@@ -20,6 +20,8 @@ read -r -p "Is the client connected via DNS tunnel right now? [y/N] " ans
 apply_rules <<EOF
 # Config 6 — config 3 plus 443 now permitted.
 block out on $UPLINK_IF all
+# Bootstrap API. In production this shares 443; see config.env.
+pass out on $UPLINK_IF proto tcp to $SERVER_IP port $API_PORT
 pass out on $UPLINK_IF proto udp to any port 53
 pass out on $UPLINK_IF inet proto icmp
 pass out on $UPLINK_IF proto tcp to any port 443

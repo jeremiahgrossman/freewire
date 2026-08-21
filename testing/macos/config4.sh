@@ -25,6 +25,8 @@ apply_rules <<EOF
 # Config 4 — ICMP is the only route out. DNS is redirected to the
 # local NXDOMAIN resolver so the DNS tunnel path fails cleanly.
 block out on $UPLINK_IF all
+# Bootstrap API. In production this shares 443; see config.env.
+pass out on $UPLINK_IF proto tcp to $SERVER_IP port $API_PORT
 pass out on $UPLINK_IF inet proto icmp
 rdr pass on $UPLINK_IF proto udp to port 53 -> 127.0.0.1 port 5353
 EOF

@@ -144,6 +144,33 @@ hysteresis.
 
 ---
 
+## The bootstrap API must be reachable in every config
+
+The client calls `GET /v1/server/config` and `POST /v1/peers` *before* it
+selects a transport. If those fail it reports CONN-3 ("servers are
+unreachable") and never enters the fallback chain, so the config tests
+nothing.
+
+In production the API rides HTTPS on 443 alongside the TLS transport, so
+it is reachable exactly when 443 is. The dev server splits it onto
+`API_PORT`, so configs 1, 2, 3, 4 and 6 pass that port explicitly. This
+matches production rather than weakening the test: no config is expected
+to block the API while still expecting a tunnel.
+
+**Config 5 is deliberately excluded, and that changes what it proves.**
+A hard block takes the API down too, so the client fails at bootstrap
+with CONN-3 rather than trying four paths and landing on CONN-2b. The
+guide expects CONN-2b. Reaching it requires the API to succeed while
+every transport fails — which the current architecture cannot produce on
+a single blocked network, because the API needs the same network the
+transports do.
+
+This is an open design question, not a harness bug: **how does the client
+bootstrap on a network where it cannot reach the API at all?** Peer
+registration has to happen before a tunnel exists. Until that is
+answered, treat Config 5 as verifying CONN-3, and record it as such
+rather than forcing a CONN-2b result.
+
 ## Config 1 does not work on a single machine
 
 `tryHTTPConnect` finds its proxy by parsing `route get default` — the

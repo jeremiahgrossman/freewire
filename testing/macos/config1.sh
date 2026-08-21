@@ -20,6 +20,8 @@ fi
 apply_rules <<EOF
 # Config 1 — only the gateway's CONNECT proxy and DNS may egress.
 block out on $UPLINK_IF all
+# Bootstrap API. In production this shares 443; see config.env.
+pass out on $UPLINK_IF proto tcp to $SERVER_IP port $API_PORT
 pass out on $UPLINK_IF proto tcp to $GATEWAY_IP port 443
 pass out on $UPLINK_IF proto udp to any port 53
 EOF

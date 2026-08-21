@@ -12,6 +12,8 @@ banner 2 "Port 443 open to internet, all else blocked" \
 apply_rules <<EOF
 # Config 2 — 443 open directly, no proxy present.
 block out on $UPLINK_IF all
+# Bootstrap API. In production this shares 443; see config.env.
+pass out on $UPLINK_IF proto tcp to $SERVER_IP port $API_PORT
 pass out on $UPLINK_IF proto tcp to any port 443
 pass out on $UPLINK_IF proto udp to any port 53
 pass out on $UPLINK_IF inet proto icmp

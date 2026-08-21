@@ -438,28 +438,38 @@ final class TunnelManager: ObservableObject {
             throw TunnelError.helperNotFound
         }
 
-        let tmp        = FileManager.default.temporaryDirectory
-        let uid        = UUID().uuidString
-        let readyFile  = tmp.appendingPathComponent("fw-ready-\(uid).txt")
-        let scriptFile = tmp.appendingPathComponent("fw-launch-\(uid).sh")
+        let tmp       = FileManager.default.temporaryDirectory
+        let readyFile = tmp.appendingPathComponent("fw-ready-\(UUID().uuidString).txt")
 
         // The config carries the WireGuard private key, which must never touch
         // disk. It goes to the helper over a stdin pipe; only the ready line
         // comes back through a file.
         let configData = try JSONEncoder().encode(config)
-        defer { try? FileManager.default.removeItem(at: scriptFile) }
 
+        // sudo runs the helper binary directly. An earlier version wrote a
+        // randomly-named shell script to the temp directory and ran sudo on
+        // that, which made a scoped NOPASSWD sudoers rule impossible: the path
+        // changed every launch, so the rule would have needed a wildcard over a
+        // world-writable directory. Invoking the fixed binary path also closes
+        // the window where that script existed on disk before it ran.
         let helperPath = helperURL.path
-        let script = "#!/bin/sh\nexec '\(helperPath)' > '\(readyFile.path)' 2>&1\n"
-        try script.write(to: scriptFile, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptFile.path)
+        let stderrPipe = Pipe()
 
-        Task.detached { [scriptFile, configData] in
+        Task.detached { [helperPath, configData, readyFile, stderrPipe] in
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-            p.arguments = [scriptFile.path]
-            p.standardOutput = FileHandle.nullDevice
-            p.standardError  = FileHandle.nullDevice
+            // -n: never prompt. Without it sudo blocks on a password nobody can
+            // type, the helper never starts, and the failure surfaces as an
+            // empty error string.
+            p.arguments = ["-n", helperPath]
+
+            // The helper writes its ready line to stdout; redirect it to the file
+            // the poller watches. Diagnostics from sudo itself arrive on stderr.
+            FileManager.default.createFile(atPath: readyFile.path, contents: nil)
+            if let out = try? FileHandle(forWritingTo: readyFile) {
+                p.standardOutput = out
+            }
+            p.standardError = stderrPipe.fileHandleForWriting
 
             let stdin = Pipe()
             p.standardInput = stdin
@@ -467,6 +477,29 @@ final class TunnelManager: ObservableObject {
             try? stdin.fileHandleForWriting.write(contentsOf: configData)
             try? stdin.fileHandleForWriting.close()
             p.waitUntilExit()
+            try? stderrPipe.fileHandleForWriting.close()
+        }
+
+        func failure() -> TunnelError {
+            let out = (try? String(contentsOf: readyFile, encoding: .utf8)) ?? ""
+            let err = String(
+                data: stderrPipe.fileHandleForReading.availableData,
+                encoding: .utf8
+            ) ?? ""
+            try? FileManager.default.removeItem(at: readyFile)
+
+            if out.contains("all_paths_failed") { return .allPathsFailed }
+
+            let detail = (out + "\n" + err).trimmingCharacters(in: .whitespacesAndNewlines)
+            if detail.isEmpty {
+                return .helperFailed("The tunnel helper produced no output.")
+            }
+            // sudo's own refusal is the common case during development and is
+            // otherwise reported as an unexplained failure.
+            if detail.contains("a password is required") || detail.contains("a terminal is required") {
+                return .helperNeedsPrivileges
+            }
+            return .helperFailed(detail)
         }
 
         do {
@@ -486,16 +519,8 @@ final class TunnelManager: ObservableObject {
         } catch TunnelError.allPathsFailed {
             try? FileManager.default.removeItem(at: readyFile)
             throw TunnelError.allPathsFailed
-        } catch TunnelError.timedOut {
-            let output = (try? String(contentsOf: readyFile, encoding: .utf8)) ?? ""
-            try? FileManager.default.removeItem(at: readyFile)
-            if output.contains("all_paths_failed") { throw TunnelError.allPathsFailed }
-            throw TunnelError.helperFailed(output.trimmingCharacters(in: .whitespacesAndNewlines))
         } catch {
-            let output = (try? String(contentsOf: readyFile, encoding: .utf8)) ?? ""
-            try? FileManager.default.removeItem(at: readyFile)
-            if output.contains("all_paths_failed") { throw TunnelError.allPathsFailed }
-            throw TunnelError.helperFailed(output.trimmingCharacters(in: .whitespacesAndNewlines))
+            throw failure()
         }
     }
 
@@ -549,6 +574,7 @@ private struct TunnelConfig: Encodable {
 
 enum TunnelError: Error, LocalizedError {
     case helperNotFound
+    case helperNeedsPrivileges
     case helperFailed(String)
     case badReadyLine(String)
     case timedOut
@@ -557,6 +583,7 @@ enum TunnelError: Error, LocalizedError {
     var errorDescription: String? {
         switch self {
         case .helperNotFound:        return "Tunnel helper not found."
+        case .helperNeedsPrivileges: return "Freewire needs administrator access to create the tunnel."
         case .helperFailed(let msg): return "Tunnel error: \(msg)"
         case .badReadyLine(let s):   return "Unexpected tunnel output: \(s)"
         case .timedOut:              return "Tunnel did not start within 30 seconds."
