@@ -8,6 +8,7 @@ final class Preferences {
     private enum Key {
         static let killSwitch = "killSwitch"
         static let dnsResolverOverride = "dnsResolverOverride"
+        static let skipRouting = "skipRouting"
         static let autoConnect = "autoConnect"
         static let networkIntelligence = "networkIntelligence"
         static let initialized = "prefsInitialized"
@@ -23,6 +24,20 @@ final class Preferences {
     var dnsResolverOverride: String? {
         let v = UserDefaults.standard.string(forKey: Key.dnsResolverOverride)
         return (v?.isEmpty ?? true) ? nil : v
+    }
+
+    /// Runs the tunnel without taking over routing.
+    ///
+    /// Debug builds only. For environments whose egress cannot carry the tunnel
+    /// -- container runtimes on macOS drop forwarded traffic -- where the point
+    /// of the run is which transport gets chosen. Never reachable in a release
+    /// build, so no shipped client can be talked out of routing its traffic.
+    var skipRouting: Bool {
+        #if DEBUG
+        return UserDefaults.standard.bool(forKey: Key.skipRouting)
+        #else
+        return false
+        #endif
     }
 
     var killSwitchEnabled: Bool {

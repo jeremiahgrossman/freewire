@@ -543,14 +543,19 @@ final class TunnelManager: ObservableObject {
         // the window where that script existed on disk before it ran.
         let helperPath = helperURL.path
         let stderrPipe = Pipe()
+        let skipRouting = Preferences.shared.skipRouting
 
-        Task.detached { [helperPath, configData, readyFile, stderrPipe] in
+        Task.detached { [helperPath, configData, readyFile, stderrPipe, skipRouting] in
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
             // -n: never prompt. Without it sudo blocks on a password nobody can
             // type, the helper never starts, and the failure surfaces as an
             // empty error string.
-            p.arguments = ["-n", helperPath]
+            var args = ["-n", helperPath]
+            if skipRouting {
+                args.append("--skip-egress-check")
+            }
+            p.arguments = args
 
             // The helper writes its ready line to stdout; redirect it to the file
             // the poller watches. Diagnostics from sudo itself arrive on stderr.
