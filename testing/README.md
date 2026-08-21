@@ -101,7 +101,8 @@ Record each run. Bugs found here become the first regression tests.
 
 | Config | Date | Path observed | Time | Pass | Notes |
 |---|---|---|---|---|---|
-| 0 | 2026-06 | TLS/443 | — | ✅ | Baseline confirmed pre-harness |
+| 0 | 2026-06 | TLS/443 | — | ✅ | Baseline, pre-harness, against the UTM VM |
+| — | 2026-08-21 | — | — | — | Harness retargeted from UTM to the OrbStack container at 192.168.97.2. Server moved to real ports 443/53 so the guide's rules apply unchanged. |
 | 1 | | | | | |
 | 2 | | | | | |
 | 3 | | | | | |
@@ -136,6 +137,31 @@ numbers: DNS(4) → TLS/443(3), then stop. Oscillation means broken
 hysteresis.
 
 ---
+
+## Config 1 does not work on a single machine
+
+`tryHTTPConnect` finds its proxy by parsing `route get default` — the
+machine's real default gateway. `config1.sh` puts the proxy at
+`GATEWAY_IP`, the Mac's address on the container bridge. Those are
+different addresses and always will be, so the CONNECT path can never
+succeed here no matter what the rules allow.
+
+This predates the move to Docker; the UTM setup had the same mismatch,
+which is why Config 1 was never recorded as passing.
+
+Two ways to fix it, neither done yet:
+
+1. **Second machine.** Run the client on a device whose default gateway
+   really is the machine running `proxy.py`. This is what the guide
+   assumes and what `linux/` is built for.
+2. **Transparent redirect.** A pf `rdr` rule intercepting outbound TCP to
+   the real gateway on 3128/8080/443 and sending it to the local proxy.
+   Closer to how a portal actually behaves, but redirecting
+   locally-originated traffic on macOS pf is awkward and needs care.
+
+Until one of those lands, Config 1 is **blocked**, not failing. Do not
+record it as a pass on the strength of the client connecting — it will
+have connected over TLS/443.
 
 ## Known gap
 

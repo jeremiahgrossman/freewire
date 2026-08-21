@@ -8,7 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var clickMonitor: Any?
     private var tunnelManager: TunnelManager?
     private var cancellable: AnyCancellable?
-    private let api = ServerAPI(host: "127.0.0.1")
+    private let api = ServerAPI(host: "192.168.97.2")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -123,7 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .disconnected:             return "Freewire — Not connected"
         case .connecting:               return "Freewire — Connecting..."
         case .connected:                return "Freewire — Protected"
-        case .reconnecting:             return "Freewire — Reconnecting... Traffic blocked"
+        case .reconnecting:             return "Freewire — Reconnecting... Traffic not protected"
         case .blocked:                  return "Freewire — Connection lost. Click to reconnect."
         case .captivePortal:            return "Freewire — Network login required"
         case .networkBlock:             return "Freewire — Network is blocking VPN"
