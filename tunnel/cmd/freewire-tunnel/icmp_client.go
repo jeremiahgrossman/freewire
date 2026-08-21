@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -35,13 +36,22 @@ const (
 	icmpTypeData    = 0x10
 	icmpTypeKA      = 0x20
 
-	icmpHeaderLen   = 8
-	icmpMaxPayload  = 1416
+	icmpHeaderLen  = 8
+	icmpMaxPayload = 1416
+	// Read buffers are sized past the largest datagram the tunnel can produce.
+	// net.PacketConn.ReadFrom discards whatever does not fit, so a buffer at
+	// exactly icmpMaxPayload silently truncated full-size packets, which were
+	// then encrypted and shipped as corrupt.
+	icmpReadBuf     = 2048
 	icmpWindowInit  = 4
 	icmpWindowMax   = 16
 	icmpKeepalive   = 15 * time.Second
 	icmpHandshakeTO = 2 * time.Second
 	icmpRateLimit   = 20 // packets/second hard cap
+	// Outbound send pool. Small on purpose: the rate cap above already bounds
+	// throughput, so more workers would only reorder packets.
+	icmpSendWorkers = 2
+	icmpSendQueue   = 64
 )
 
 // icmpClientSession holds the state for an active ICMP/UDP tunnel session.
@@ -50,10 +60,14 @@ type icmpClientSession struct {
 	sessionKey   [32]byte // authenticates the ClientConfirm MAC only
 	// Directional keys. Both peers number packets from zero, so one shared
 	// key would repeat the (key, nonce) pair across directions.
-	keyC2S     [32]byte // client → server: client seals with this
-	keyS2C     [32]byte // server → client: client opens with this
-	txSeq      uint32   // outbound sequence (atomic)
-	windowSize int      // current sliding window size
+	keyC2S [32]byte // client → server: client seals with this
+	keyS2C [32]byte // server → client: client opens with this
+	// AEADs built once at handshake rather than per packet, matching the
+	// server, which already does this in the same forwarding path.
+	aeadTx     cipher.AEAD
+	aeadRx     cipher.AEAD
+	txSeq      uint32 // outbound sequence (atomic)
+	windowSize int    // current sliding window size
 	conn       *net.UDPConn
 	mu         sync.Mutex
 
@@ -178,6 +192,15 @@ func icmpHandshake(cfg Config, uc *net.UDPConn) (*icmpClientSession, error) {
 	// Step 3: HANDSHAKE_CONFIRM
 	// Payload: MAC = SHA256(sessionKey || "confirm" || sessionToken)[:16]
 	mac := icmpConfirmMAC(sessionKey, sessionToken)
+	aeadTx, err := chacha20poly1305.New(keyC2S[:])
+	if err != nil {
+		return nil, fmt.Errorf("icmp handshake: aead tx: %w", err)
+	}
+	aeadRx, err := chacha20poly1305.New(keyS2C[:])
+	if err != nil {
+		return nil, fmt.Errorf("icmp handshake: aead rx: %w", err)
+	}
+
 	confirm := make([]byte, icmpHeaderLen+16)
 	confirm[0] = icmpVersion
 	confirm[1] = icmpTypeConfirm
@@ -194,6 +217,8 @@ func icmpHandshake(cfg Config, uc *net.UDPConn) (*icmpClientSession, error) {
 		sessionKey:   sessionKey,
 		keyC2S:       keyC2S,
 		keyS2C:       keyS2C,
+		aeadTx:       aeadTx,
+		aeadRx:       aeadRx,
 		txSeq:        2, // 0=hello, 1=confirm, data starts at 2
 		windowSize:   icmpWindowInit,
 		conn:         uc,
@@ -232,9 +257,24 @@ func (s *icmpClientSession) run(lp net.PacketConn) {
 	peerCh := make(chan net.Addr, 1)
 
 	// WireGuard → ICMP/UDP.
+	//
+	// Sends go through a small bounded pool rather than a goroutine per packet.
+	// A burst from wireguard-go used to map one-to-one onto goroutines, with no
+	// ceiling, and reordered packets on the way out -- which pushed the server's
+	// replay window harder than necessary for no benefit.
+	sendCh := make(chan []byte, icmpSendQueue)
+	for i := 0; i < icmpSendWorkers; i++ {
+		go func() {
+			for pkt := range sendCh {
+				s.sendData(pkt) //nolint:errcheck
+			}
+		}()
+	}
+
 	go func() {
 		defer finish()
-		buf := make([]byte, icmpMaxPayload)
+		defer close(sendCh)
+		buf := make([]byte, icmpReadBuf)
 		for {
 			n, peer, err := lp.ReadFrom(buf)
 			if err != nil {
@@ -243,14 +283,19 @@ func (s *icmpClientSession) run(lp net.PacketConn) {
 			peerOnce.Do(func() { peerCh <- peer })
 			pkt := make([]byte, n)
 			copy(pkt, buf[:n])
-			go s.sendData(pkt) //nolint:errcheck
+			select {
+			case sendCh <- pkt:
+			default:
+				// Queue full: drop rather than grow without bound. The 20 pkt/s
+				// rate cap means a backlog is never going to drain in time.
+			}
 		}
 	}()
 
 	// ICMP/UDP → WireGuard.
 	go func() {
 		defer finish()
-		buf := make([]byte, icmpHeaderLen+icmpMaxPayload+16+16) // header + overhead
+		buf := make([]byte, icmpReadBuf)
 		for {
 			n, err := s.conn.Read(buf)
 			if err != nil {
@@ -315,7 +360,9 @@ func (s *icmpClientSession) rateCheck() bool {
 // sendData encrypts and sends a data packet over the ICMP/UDP connection.
 func (s *icmpClientSession) sendData(payload []byte) error {
 	if len(payload) > icmpMaxPayload {
-		payload = payload[:icmpMaxPayload]
+		// Truncating here produced a packet that failed the peer's tag check
+		// with no diagnostic. Refuse it instead.
+		return fmt.Errorf("send data: payload %d exceeds the %d-byte budget", len(payload), icmpMaxPayload)
 	}
 	if !s.rateCheck() {
 		return fmt.Errorf("rate limit exceeded")

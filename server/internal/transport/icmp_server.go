@@ -66,6 +66,10 @@ type icmpSrvSession struct {
 	wgInbound chan []byte
 }
 
+// icmpSrvMaxPayload mirrors the client's per-packet budget. Frames larger than
+// this cannot be received, so they are dropped at the source.
+const icmpSrvMaxPayload = 1416
+
 // Worker pool sizing for the UDP read loop.
 const (
 	icmpWorkers    = 16
@@ -372,6 +376,14 @@ func (s *ICMPServer) handleConfirm(pkt []byte, srcAddr *net.UDPAddr, conn *net.U
 	udpConn := conn
 	go func() {
 		for pkt := range sess.wgInbound {
+			// The client reads into a fixed buffer; anything larger is truncated
+			// on arrival, fails its tag check, and is dropped with no
+			// diagnostic. Drop it here instead, where it can be counted.
+			if len(pkt) > icmpSrvMaxPayload {
+				s.log.Warn("icmp server: dropping oversize frame",
+					zap.Int("bytes", len(pkt)), zap.Int("limit", icmpSrvMaxPayload))
+				continue
+			}
 			sess.mu.Lock()
 			seq := sess.txSeq
 			sess.txSeq++

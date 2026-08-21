@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base32"
@@ -43,12 +44,15 @@ type dnsClientSession struct {
 	sessionKey [32]byte // authenticates the ClientConfirm MAC only
 	// Directional keys. Both peers number packets from zero, so a single shared
 	// key would repeat the (key, nonce) pair across directions.
-	keyC2S     [32]byte // client → server: client seals with this
-	keyS2C     [32]byte // server → client: client opens with this
-	tokenB32   string   // base32(token), cached: it is constant for the session
-	txSeq      uint32   // next outbound sequence number (atomic add)
-	windowSize int      // current sliding window size (AIMD)
-	dnsServer  string   // resolved DNS server IP
+	keyC2S   [32]byte // client → server: client seals with this
+	keyS2C   [32]byte // server → client: client opens with this
+	tokenB32 string   // base32(token), cached: it is constant for the session
+	// AEADs built once at handshake rather than per packet, matching the server.
+	aeadTx     cipher.AEAD // client → server
+	aeadRx     cipher.AEAD // server → client
+	txSeq      uint32      // next outbound sequence number (atomic add)
+	windowSize int         // current sliding window size (AIMD)
+	dnsServer  string      // resolved DNS server IP
 	mu         sync.Mutex
 }
 
@@ -182,9 +186,20 @@ func dnsHandshake(cfg Config, dnsServer string) (*dnsClientSession, error) {
 		return nil, fmt.Errorf("client confirm: server rejected (got %q)", confirmTxt)
 	}
 
+	aeadTx, err := chacha20poly1305.New(keyC2S[:])
+	if err != nil {
+		return nil, fmt.Errorf("client confirm: aead tx: %w", err)
+	}
+	aeadRx, err := chacha20poly1305.New(keyS2C[:])
+	if err != nil {
+		return nil, fmt.Errorf("client confirm: aead rx: %w", err)
+	}
+
 	return &dnsClientSession{
 		token:      token,
 		tokenB32:   tokenB32,
+		aeadTx:     aeadTx,
+		aeadRx:     aeadRx,
 		sessionKey: sessionKey,
 		keyC2S:     keyC2S,
 		keyS2C:     keyS2C,
@@ -221,9 +236,19 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 	var wgPeer net.Addr
 
 	// WireGuard → DNS.
+	//
+	// Sends are gated by a semaphore sized to the sliding window. Previously a
+	// goroutine was spawned per packet, each holding a pooled socket attempt, a
+	// read buffer and an encoded copy of the packet for up to a 3s round trip,
+	// with nothing capping how many could exist at once.
+	sendSlots := make(chan struct{}, s.windowSize)
+
 	go func() {
 		defer close(done)
-		buf := make([]byte, 1416)
+		// Sized past the largest datagram the tunnel can produce: ReadFrom
+		// discards whatever does not fit, so a buffer at exactly the payload
+		// budget silently truncated full-size packets.
+		buf := make([]byte, 2048)
 		for {
 			n, peer, err := lp.ReadFrom(buf)
 			if err != nil {
@@ -232,7 +257,14 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 			peerOnce.Do(func() { peerCh <- peer })
 			pkt := make([]byte, n)
 			copy(pkt, buf[:n])
+			select {
+			case sendSlots <- struct{}{}:
+			default:
+				// Window full: drop rather than queue without bound.
+				continue
+			}
 			go func(p []byte) {
+				defer func() { <-sendSlots }()
 				data, err := s.sendPacket(p)
 				if err != nil || len(data) == 0 {
 					return
@@ -278,31 +310,130 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 
 // sendPacket encrypts pkt, transmits via DNS TXT query, and returns any
 // decrypted inbound data from the response.
+// DNS name budget. RFC 1035 caps a domain name at 255 bytes on the wire, where
+// every label costs its length plus one, and the terminating root label costs
+// one more. Nothing enforced this before: a full WireGuard datagram encoded to
+// roughly 2.4 KB of name across 37 labels, which every resolver rejects. That
+// is why the DNS transport never carried a packet.
+const (
+	dnsMaxName  = 253 // usable name length, excluding the root label
+	dnsMaxLabel = 63
+
+	// Plaintext carried per query. Derived from the budget below and kept
+	// deliberately conservative so a longer tunnel domain cannot silently push
+	// a name over the limit.
+	dnsFragPayload = 96
+)
+
+// dnsNameWireLen reports how many bytes name occupies in a DNS message.
+func dnsNameWireLen(name string) int {
+	n := 1 // root label
+	for _, label := range strings.Split(strings.TrimSuffix(name, "."), ".") {
+		if label == "" {
+			continue
+		}
+		n += 1 + len(label)
+	}
+	return n
+}
+
+// sendPacket splits pkt across as many queries as the name budget requires and
+// returns any payload the server piggybacked on the final response.
+//
+// The ciphertext is produced once for the whole packet and then fragmented, so
+// the server reassembles before it decrypts and the sequence number covers the
+// whole packet rather than each piece.
 func (s *dnsClientSession) sendPacket(pkt []byte) ([]byte, error) {
 	seq := atomic.AddUint32(&s.txSeq, 1) - 1
 
-	txAEAD, err := chacha20poly1305.New(s.keyC2S[:])
-	if err != nil {
-		return nil, fmt.Errorf("send packet: aead: %w", err)
-	}
+	var nonce [12]byte
+	dnsNonceInto(seq, &nonce)
+	ciphertext := s.aeadTx.Seal(nil, nonce[:], pkt, nil)
 
-	nonce := dnsMakeNonce(seq)
-	ciphertext := txAEAD.Seal(nil, nonce, pkt, nil)
+	// Fragment the ciphertext so each query's encoded chunk fits the budget.
+	chunks := splitCiphertext(ciphertext, dnsFragCipherBytes())
+	if len(chunks) > 255 {
+		return nil, fmt.Errorf("send packet: %d fragments exceeds the 255 the header allows", len(chunks))
+	}
 
 	seqB32 := b32enc.EncodeToString(uint32BE(seq))
 
-	// Encode ciphertext and split into ≤63-char DNS labels.
-	dataB32 := b32enc.EncodeToString(ciphertext)
-	labels := chunkLabels(dataB32, 63)
+	var last []byte
+	for i, chunk := range chunks {
+		// frag carries index and total so the server knows when it is complete.
+		fragB32 := b32enc.EncodeToString([]byte{byte(i), byte(len(chunks))})
+		dataB32 := b32enc.EncodeToString(chunk)
+		labels := chunkLabels(dataB32, dnsMaxLabel)
 
-	name := "t." + seqB32 + "." + s.tokenB32 + "." + strings.Join(labels, ".") + "." + dnsTunnelDomain + "."
+		name := "t." + seqB32 + "." + fragB32 + "." + s.tokenB32 + "." +
+			strings.Join(labels, ".") + "." + dnsTunnelDomain + "."
 
-	deadline := time.Now().Add(3 * time.Second)
-	resp, err := dnsQuery(s.dnsServer, name, deadline)
-	if err != nil {
-		return nil, fmt.Errorf("send packet: dns query: %w", err)
+		if l := dnsNameWireLen(name); l > dnsMaxName {
+			return nil, fmt.Errorf("send packet: fragment %d/%d builds a %d-byte name, over the %d limit",
+				i+1, len(chunks), l, dnsMaxName)
+		}
+
+		deadline := time.Now().Add(3 * time.Second)
+		resp, err := dnsQuery(s.dnsServer, name, deadline)
+		if err != nil {
+			return nil, fmt.Errorf("send packet: fragment %d/%d: %w", i+1, len(chunks), err)
+		}
+		// Only the response to the final fragment can carry piggybacked data;
+		// the server has nothing to answer with until the packet is whole.
+		last = resp
 	}
 
+	if last == nil {
+		return nil, nil
+	}
+	return s.decodePiggyback(last)
+}
+
+// dnsFragCipherBytes is how many ciphertext bytes fit in one query, worked out
+// from the actual encoded overhead rather than assumed.
+func dnsFragCipherBytes() int {
+	// Fixed labels: "t", seq, frag, token, plus the tunnel domain and root.
+	overhead := dnsNameWireLen("t." +
+		b32enc.EncodeToString(make([]byte, 4)) + "." +
+		b32enc.EncodeToString(make([]byte, 2)) + "." +
+		b32enc.EncodeToString(make([]byte, 10)) + "." +
+		dnsTunnelDomain + ".")
+
+	budget := dnsMaxName - overhead
+	if budget <= 0 {
+		return 1
+	}
+	// Each 63-char label costs 64 bytes on the wire.
+	fullLabels := budget / (dnsMaxLabel + 1)
+	chars := fullLabels * dnsMaxLabel
+	if rem := budget % (dnsMaxLabel + 1); rem > 1 {
+		chars += rem - 1
+	}
+	// base32 expands 5 bytes to 8 characters.
+	n := chars / 8 * 5
+	if n < 1 {
+		return 1
+	}
+	return n
+}
+
+// splitCiphertext divides b into pieces of at most size bytes.
+func splitCiphertext(b []byte, size int) [][]byte {
+	if size < 1 {
+		size = 1
+	}
+	var out [][]byte
+	for len(b) > size {
+		out = append(out, b[:size])
+		b = b[size:]
+	}
+	// A zero-length packet still needs one fragment so the server sees a total.
+	out = append(out, b)
+	return out
+}
+
+// decodePiggyback decrypts a payload the server attached to a data response.
+func (s *dnsClientSession) decodePiggyback(resp []byte) ([]byte, error) {
 	txt, err := parseTXTResponse(resp)
 	if err != nil || txt == "" {
 		return nil, nil
@@ -319,18 +450,14 @@ func (s *dnsClientSession) sendPacket(pkt []byte) ([]byte, error) {
 	}
 	rxSeq := binary.BigEndian.Uint32(rxSeqBytes)
 
-	// Join remaining labels (ciphertext may have been split).
 	rxCipher, err := b32enc.DecodeString(strings.ReplaceAll(rparts[1], ".", ""))
 	if err != nil {
 		return nil, nil
 	}
 
-	rxAEAD, err := chacha20poly1305.New(s.keyS2C[:])
-	if err != nil {
-		return nil, fmt.Errorf("decrypt response: aead: %w", err)
-	}
-	rxNonce := dnsMakeNonce(rxSeq)
-	plain, err := rxAEAD.Open(nil, rxNonce, rxCipher, nil)
+	var rxNonce [12]byte
+	dnsNonceInto(rxSeq, &rxNonce)
+	plain, err := s.aeadRx.Open(nil, rxNonce[:], rxCipher, nil)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt response: %w", err)
 	}
@@ -346,11 +473,12 @@ func (s *dnsClientSession) sendKeepalive() error {
 	return err
 }
 
-// dnsMakeNonce builds a 12-byte ChaCha20-Poly1305 nonce: seq(4B big-endian) || 0x00(8B).
-func dnsMakeNonce(seq uint32) []byte {
-	nonce := make([]byte, 12)
-	binary.BigEndian.PutUint32(nonce[:4], seq)
-	return nonce
+// dnsNonceInto writes a 12-byte ChaCha20-Poly1305 nonce into out:
+// seq(4B big-endian) || 0x00(8B). Filling a caller-owned array keeps the nonce
+// off the heap in the packet path.
+func dnsNonceInto(seq uint32, out *[12]byte) {
+	*out = [12]byte{}
+	binary.BigEndian.PutUint32(out[:4], seq)
 }
 
 // uint32BE encodes a uint32 as 4-byte big-endian slice.

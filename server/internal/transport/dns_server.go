@@ -68,7 +68,29 @@ type dnsSession struct {
 	lastSeen   time.Time
 	// Inbound WG packets queued for piggybacking in data responses.
 	wgInbound chan []byte
+	// Fragment reassembly, keyed by the client's packet sequence. A WireGuard
+	// datagram does not fit in one DNS name, so the client splits the ciphertext
+	// and the server rebuilds it before decrypting.
+	frags map[uint32]*dnsFragAssembly
 }
+
+// dnsFragAssembly collects the fragments of one packet.
+type dnsFragAssembly struct {
+	chunks   [][]byte
+	received int
+	total    int
+	started  time.Time
+}
+
+// maxDNSAssemblies caps how many partially received packets a session may hold.
+// Fragments are unauthenticated until the packet is whole and decrypts, so a
+// sender emitting first-fragments alone must not be able to grow this without
+// bound.
+const maxDNSAssemblies = 64
+
+// dnsAssemblyTTL discards partial packets whose remaining fragments never
+// arrived, which is ordinary loss on this transport.
+const dnsAssemblyTTL = 10 * time.Second
 
 // Worker pool sizing for the UDP read loop.
 const (
@@ -340,6 +362,7 @@ func (s *DNSServer) handleClientHello(conn *net.UDPConn, srcAddr *net.UDPAddr, r
 		activated:  false,
 		lastSeen:   time.Now(),
 		wgInbound:  make(chan []byte, 32),
+		frags:      make(map[uint32]*dnsFragAssembly),
 	}
 	key := srvB32enc.EncodeToString(token[:])
 	s.sessions.Store(key, sess)
@@ -439,12 +462,13 @@ func (s *DNSServer) handleClientConfirm(conn *net.UDPConn, srcAddr *net.UDPAddr,
 
 // handleData processes a data query: decrypt, forward to WG, piggyback response.
 func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, req []byte, parts []string) {
-	// parts[0] = b32(seq), parts[1] = b32(token), parts[2..] = b32(ciphertext) chunks
-	if len(parts) < 3 {
+	// parts[0] = b32(seq), parts[1] = b32(frag), parts[2] = b32(token),
+	// parts[3..] = b32(ciphertext) chunks
+	if len(parts) < 4 {
 		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
-	tokenB32 := parts[1]
+	tokenB32 := parts[2]
 	v, ok := s.sessions.Load(strings.ToUpper(tokenB32))
 	if !ok {
 		s.sendNXDomain(conn, srcAddr, req)
@@ -476,19 +500,88 @@ func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, req []by
 	}
 	seq := binary.BigEndian.Uint32(seqBytes)
 
-	// Checked before decryption so a replay flood costs no AEAD work.
-	fresh := sess.rx.accept(seq)
-	sess.mu.Unlock()
-
-	if !fresh {
+	fragBytes, fragErr := srvB32enc.DecodeString(parts[1])
+	if fragErr != nil || len(fragBytes) != 2 {
+		sess.mu.Unlock()
+		s.sendNXDomain(conn, srcAddr, req)
+		return
+	}
+	fragIndex, fragTotal := int(fragBytes[0]), int(fragBytes[1])
+	if fragTotal == 0 || fragIndex >= fragTotal {
+		sess.mu.Unlock()
 		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 
-	// Join all remaining label chunks as the ciphertext (they were split at 63 chars).
-	cipherB32 := strings.Join(parts[2:], "")
-	ciphertext, err := srvB32enc.DecodeString(cipherB32)
+	// Join this fragment's label chunks.
+	cipherB32 := strings.Join(parts[3:], "")
+	chunk, err := srvB32enc.DecodeString(cipherB32)
 	if err != nil {
+		sess.mu.Unlock()
+		s.sendNXDomain(conn, srcAddr, req)
+		return
+	}
+
+	// Collect the fragment. Nothing here is authenticated yet -- the tag covers
+	// the whole packet -- so the assembly is bounded and expires.
+	asm := sess.frags[seq]
+	if asm == nil {
+		if len(sess.frags) >= maxDNSAssemblies {
+			// Drop the oldest rather than refuse the newest, so a stalled
+			// packet cannot wedge the session.
+			var oldestSeq uint32
+			var oldest time.Time
+			for k, a := range sess.frags {
+				if oldest.IsZero() || a.started.Before(oldest) {
+					oldest, oldestSeq = a.started, k
+				}
+			}
+			delete(sess.frags, oldestSeq)
+		}
+		asm = &dnsFragAssembly{
+			chunks:  make([][]byte, fragTotal),
+			total:   fragTotal,
+			started: time.Now(),
+		}
+		sess.frags[seq] = asm
+	}
+	if asm.total != fragTotal || fragIndex >= len(asm.chunks) {
+		sess.mu.Unlock()
+		s.sendNXDomain(conn, srcAddr, req)
+		return
+	}
+	if asm.chunks[fragIndex] == nil {
+		asm.chunks[fragIndex] = chunk
+		asm.received++
+	}
+
+	// Expire assemblies whose remaining fragments never arrived.
+	for k, a := range sess.frags {
+		if time.Since(a.started) > dnsAssemblyTTL {
+			delete(sess.frags, k)
+		}
+	}
+
+	if asm.received < asm.total {
+		// Acknowledge without a payload; the packet is not whole yet.
+		sess.mu.Unlock()
+		conn.WriteToUDP(buildDNSTXTResponse(req, ""), srcAddr) //nolint:errcheck
+		return
+	}
+	delete(sess.frags, seq)
+
+	var ciphertext []byte
+	for _, c := range asm.chunks {
+		ciphertext = append(ciphertext, c...)
+	}
+
+	// Checked once the packet is whole, since the sequence covers the packet
+	// rather than any single fragment. Before decryption, so a replay flood
+	// costs no AEAD work.
+	fresh := sess.rx.accept(seq)
+	sess.mu.Unlock()
+
+	if !fresh {
 		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
