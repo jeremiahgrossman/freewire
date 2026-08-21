@@ -144,32 +144,49 @@ hysteresis.
 
 ---
 
-## Forwarded traffic dies in this environment (ECN + OrbStack)
+## Forwarded traffic dies in this environment
 
 Full-tunnel egress cannot be validated against the container. Traffic
 reaches the server and is forwarded correctly, but replies never return.
 
-A capture inside the container isolates it exactly:
+The server side is provably correct. Inside the container:
 
-    FORWARDED   eth0 Out 192.168.97.2.63002 > 1.1.1.1.53  Flags [SEW]   no reply
-    ORIGINATED  eth0 Out 192.168.97.2.41409 > 1.1.1.1.53  Flags [S]     reply in 17ms
+    MASQUERADE     7,940 packets    NAT is applying
+    FORWARD out   41,125 packets    forwarding works
+    FORWARD in            0         nothing ever comes back
 
-Same source, same destination, same NAT rule. The difference is `[SEW]`:
-ECE+CWR, an ECN-capable SYN. macOS sets `net.inet.tcp.ecn_initiate_out=1`,
-so every TCP connection from the host is ECN-marked, and those packets are
-dropped once the container forwards them out. The container's own
-connections use a plain `[S]` and succeed.
+Zero return packets, and a capture on eth0 shows no inbound from the
+destination either. Packets leave the container correctly source-NAT'd and
+are lost past it, in the runtime's own NAT.
 
-**This is not a Freewire defect.** The capture shows the tunnel delivering
-packets to the server, the server forwarding them, and MASQUERADE
-rewriting the source correctly. The drop happens past the container.
+Two hypotheses were tested and **both were wrong**, recorded here so they
+are not retried:
 
-To confirm it and unblock full-path testing, turn ECN off for the session:
+1. *The Config 2 pf ruleset blocks the return path.* Disproven: the
+   failure reproduces identically with the ruleset flushed.
+2. *macOS ECN-capable SYNs are dropped when forwarded.* The forwarded SYNs
+   did carry `[SEW]` while the container's own used `[S]`, which looked
+   conclusive. Disproven: with `net.inet.tcp.ecn_initiate_out=0` the
+   forwarded SYNs became plain `[S]` and still received zero replies.
 
-    sudo sysctl -w net.inet.tcp.ecn_initiate_out=0     # revert with =1
+The remaining difference between a working and a failing flow is only that
+one is forwarded, so the cause sits in the runtime's handling of forwarded
+flows. Debugging it further has no value for Freewire: the tunnel, the
+server, forwarding and NAT are all doing their jobs.
 
-Otherwise validate egress against a real server (Phase 3, EC2), and treat
-container runs as testing **path selection only**.
+**Testing against the container therefore covers path selection only.**
+Validate egress, throughput and MTU against a real server (Phase 3, EC2).
+
+### Running a config despite unverifiable egress
+
+`setupRouting` treats a tunnel that carries no traffic as fatal, which is
+correct for users but would block every remaining config here. Pass the
+flag to accept it:
+
+    sudo tunnel/freewire-tunnel --skip-egress-check < config.json
+
+It also stops the supervisor that would otherwise release the routes about
+30s later. The app never passes it, so no release build can reach it.
 
 ## setupRouting does not install the default route (found in Config 2)
 

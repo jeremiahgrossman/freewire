@@ -227,6 +227,11 @@ func superviseRouting() <-chan struct{} {
 	)
 
 	unhealthy := make(chan struct{})
+	if skipEgressCheck() {
+		// Nothing would keep the tunnel alive otherwise: the supervisor would
+		// see the same failures the startup check was told to ignore.
+		return unhealthy
+	}
 	go func() {
 		defer close(unhealthy)
 		tally := healthTally{limit: failuresToUnhook}
@@ -272,6 +277,26 @@ func probeThroughTunnel() error {
 		return err
 	}
 	return c.Close()
+}
+
+// skipEgressCheckFlag disables both the startup egress check and the supervisor
+// that releases the routes when traffic stops. Testing aid only.
+//
+// A flag rather than an environment variable because sudo clears the
+// environment, and the helper always runs under sudo. It is passed on the
+// command line by a person running the binary by hand; the app never passes
+// it, so no server response or config field can reach it.
+const skipEgressCheckFlag = "--skip-egress-check"
+
+// skipEgressCheck reports whether the run was told to accept a tunnel whose
+// egress cannot be verified.
+func skipEgressCheck() bool {
+	for _, a := range os.Args[1:] {
+		if a == skipEgressCheckFlag {
+			return true
+		}
+	}
+	return false
 }
 
 // tunnelProbeAddr is dialed to decide whether traffic survives the tunnel
@@ -354,6 +379,20 @@ func setupRouting(tunName, bypassHost string) error {
 	// nowhere at all, packets leave and nothing comes back: the host is
 	// suddenly offline with a tunnel that looks healthy. Confirm something
 	// answers through the tunnel before declaring it usable.
+	//
+	// The escape hatch exists for environments whose egress is known broken --
+	// container runtimes on macOS drop forwarded traffic -- where the point of
+	// the run is which transport gets chosen, not what the far end does with
+	// the packets. It is deliberately an environment variable rather than a
+	// config field: nothing the server sends can turn this off, and a release
+	// build has no path to it unless someone sets it in the launching shell.
+	if skipEgressCheck() {
+		fmt.Fprintf(os.Stderr,
+			"freewire-tunnel: %s — skipping the egress check; traffic may not be carried\n",
+			skipEgressCheckFlag)
+		return nil
+	}
+
 	if err := verifyTunnelCarriesTraffic(); err != nil {
 		return fmt.Errorf("tunnel routes installed but carry no traffic: %w", err)
 	}
