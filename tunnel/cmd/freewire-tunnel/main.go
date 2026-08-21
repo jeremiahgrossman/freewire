@@ -46,9 +46,6 @@ func (c *Config) applyDefaults() {
 	}
 }
 
-// oldGateway is set during setupRouting so cleanupRouting can restore it.
-var oldGateway string
-
 func main() {
 	var cfg Config
 	if err := json.NewDecoder(os.Stdin).Decode(&cfg); err != nil {
@@ -154,8 +151,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	// Set up default route via tunnel. The bypass route for the server IP goes
-	// through the old default gateway so WireGuard/TLS/DNS traffic is not looped.
+	// Route traffic into the tunnel, pinning the server and resolver outside it.
 	bypassHost := cfg.ServerHost
 	if bypassHost == "" {
 		// Extract host from endpoint.
@@ -165,8 +161,20 @@ func main() {
 		}
 	}
 	if err := setupRouting(tunName, bypassHost); err != nil {
-		// Non-fatal: routing may partially work, log but continue.
+		// Fatal. A tunnel that carries nothing is worse than no tunnel: the
+		// client reports "Protected" off the ready line, so a silent routing
+		// failure means the user believes they are covered while every packet
+		// leaves in the clear. Tear down and report instead.
+		cleanupRouting(tunName, bypassHost)
+		wgDev.Close()
+		if transportConn != nil {
+			transportConn.Close()
+		}
+		if localProxy != nil {
+			localProxy.Close()
+		}
 		fmt.Fprintf(os.Stderr, "freewire-tunnel: routing: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Signal ready to the parent Swift process.
@@ -188,62 +196,193 @@ func main() {
 	cleanupRouting(tunName, bypassHost)
 }
 
-// setupRouting installs routes to send all traffic through the tunnel.
-// 1. Saves the current default gateway.
-// 2. Adds a specific route for bypassHost via the old gateway (so tunnel traffic isn't looped).
-// 3. Replaces the default route to go via tunName.
-func setupRouting(tunName, bypassHost string) error {
-	gw, err := getDefaultGateway()
-	if err != nil {
-		return fmt.Errorf("get default gateway: %w", err)
-	}
-	oldGateway = gw
+// bypassRoutes records the host routes pinned outside the tunnel so cleanup can
+// remove exactly what was added.
+var bypassRoutes []string
 
-	// Resolve bypass host to IP if needed.
+// setupRouting sends all traffic through the tunnel.
+//
+// Two halves, in this order:
+//
+//  1. Pin the server (and the DNS resolver) to the path they already use, so
+//     the transport's own packets are not routed into the tunnel they carry.
+//  2. Cover the address space with 0.0.0.0/1 and 128.0.0.0/1 via the tunnel.
+//
+// The split-default pair is what WireGuard and OpenVPN use. Both halves are
+// more specific than any default route, so they win without deleting one. The
+// previous approach did `route delete default` followed by `route add default`,
+// which breaks whenever more than one default route exists: the delete removes
+// an arbitrary entry (a bridge's, say, not the physical link's) and the add then
+// fails with "file exists" while the original default survives. Traffic kept
+// flowing outside the tunnel while the client reported "Protected".
+func setupRouting(tunName, bypassHost string) error {
+	// Resolve bypass host to an IP if needed.
 	bypassIP := bypassHost
-	if net.ParseIP(bypassHost) == nil && bypassHost != "" {
+	if bypassHost != "" && net.ParseIP(bypassHost) == nil {
 		addrs, lookupErr := net.LookupHost(bypassHost)
 		if lookupErr == nil && len(addrs) > 0 {
 			bypassIP = addrs[0]
 		}
 	}
+	if bypassIP == "" {
+		return fmt.Errorf("no server address to pin outside the tunnel")
+	}
 
-	// Add bypass route for server IP via old gateway.
-	if bypassIP != "" {
-		if out, err := exec.Command("route", "-q", "add", "-host", bypassIP, gw).CombinedOutput(); err != nil {
-			fmt.Fprintf(os.Stderr, "freewire-tunnel: bypass route (non-fatal): %v — %s\n",
-				err, strings.TrimSpace(string(out)))
+	// The server must keep its current path. Routing it through the default
+	// gateway is wrong whenever it is reachable some other way — on a bridge,
+	// over another interface — and would black-hole the transport.
+	if err := pinOutsideTunnel(bypassIP); err != nil {
+		return fmt.Errorf("pin server route: %w", err)
+	}
+
+	// The DNS tunnel talks to the local resolver, which must stay reachable for
+	// the same reason.
+	if resolver, err := resolveLocalDNSServer(); err == nil && resolver != bypassIP {
+		if err := pinOutsideTunnel(resolver); err != nil {
+			// Not fatal: only the DNS transport depends on it.
+			fmt.Fprintf(os.Stderr, "freewire-tunnel: pin resolver route: %v\n", err)
 		}
 	}
 
-	// Delete current default route.
-	exec.Command("route", "-q", "delete", "default").Run() //nolint:errcheck
+	// Cover everything with two halves rather than replacing the default route.
+	for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+		// -ifscope keeps the entry tied to the tunnel; delete first so a stale
+		// entry from an unclean exit cannot make the add fail.
+		exec.Command("route", "-q", "-n", "delete", "-inet", half).Run() //nolint:errcheck
+		if out, err := exec.Command("route", "-q", "-n", "add", "-inet", half,
+			"-interface", tunName).CombinedOutput(); err != nil {
+			return fmt.Errorf("add %s via %s: %w — %s", half, tunName, err,
+				strings.TrimSpace(string(out)))
+		}
+	}
 
-	// Add new default route via tunnel interface.
-	if out, err := exec.Command("route", "-q", "add", "default", "-interface", tunName).CombinedOutput(); err != nil {
-		return fmt.Errorf("add default route: %w — %s", err, strings.TrimSpace(string(out)))
+	// Verify rather than assume. A silent routing failure means the client
+	// reports "Protected" while every packet leaves in the clear.
+	if iface, err := interfaceForDest("8.8.8.8"); err != nil {
+		return fmt.Errorf("verify tunnel route: %w", err)
+	} else if iface != tunName {
+		return fmt.Errorf("tunnel routes did not take effect: traffic to 8.8.8.8 still uses %s, not %s",
+			iface, tunName)
+	}
+
+	// Installing the routes is not the same as traffic surviving them. If the
+	// far end forwards without translating the source address, or forwards
+	// nowhere at all, packets leave and nothing comes back: the host is
+	// suddenly offline with a tunnel that looks healthy. Confirm something
+	// answers through the tunnel before declaring it usable.
+	if err := verifyTunnelCarriesTraffic(); err != nil {
+		return fmt.Errorf("tunnel routes installed but carry no traffic: %w", err)
 	}
 
 	return nil
 }
 
-// cleanupRouting restores the original default gateway.
-func cleanupRouting(tunName, bypassHost string) {
-	// Remove tunnel default route.
-	exec.Command("route", "-q", "delete", "default").Run() //nolint:errcheck
+// verifyTunnelCarriesTraffic confirms a round trip survives the new routes.
+//
+// It runs after the split-default pair is in place, so it exercises the real
+// post-routing path. Failing here is what turns a total loss of connectivity
+// into a clean teardown and an error message.
+func verifyTunnelCarriesTraffic() error {
+	// A TCP handshake against a well-known anycast resolver. DNS is not used:
+	// resolution itself may be what the tunnel has broken.
+	const probeAddr = "1.1.1.1:53"
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		c, err := net.DialTimeout("tcp", probeAddr, 2*time.Second)
+		if err == nil {
+			c.Close()
+			return nil
+		}
+		lastErr = err
+		time.Sleep(300 * time.Millisecond)
+	}
+	return fmt.Errorf("no response from %s after 3 attempts: %w", probeAddr, lastErr)
+}
 
-	// Remove tunnel subnet route.
+// pinOutsideTunnel adds a host route for ip along the path it currently uses,
+// so it survives the tunnel taking over the rest of the address space.
+func pinOutsideTunnel(ip string) error {
+	gw, iface, err := routeTo(ip)
+	if err != nil {
+		return err
+	}
+
+	// A stale entry from an unclean exit would make the add fail.
+	exec.Command("route", "-q", "-n", "delete", "-host", ip).Run() //nolint:errcheck
+
+	// Prefer the gateway when there is one; otherwise the destination is on a
+	// directly attached link and must be pinned to that interface.
+	args := []string{"-q", "-n", "add", "-host", ip}
+	switch {
+	case gw != "" && net.ParseIP(gw) != nil:
+		args = append(args, gw)
+	case iface != "":
+		args = append(args, "-interface", iface)
+	default:
+		return fmt.Errorf("no gateway or interface for %s", ip)
+	}
+
+	if out, err := exec.Command("route", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("%w — %s", err, strings.TrimSpace(string(out)))
+	}
+	bypassRoutes = append(bypassRoutes, ip)
+	return nil
+}
+
+// routeTo reports the gateway and interface the system currently uses for dest.
+// The gateway is empty when dest sits on a directly attached link.
+func routeTo(dest string) (gateway, iface string, err error) {
+	out, err := exec.Command("route", "-n", "get", dest).CombinedOutput()
+	if err != nil {
+		return "", "", fmt.Errorf("route get %s: %w", dest, err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case strings.HasPrefix(line, "gateway:"):
+			v := strings.TrimSpace(strings.TrimPrefix(line, "gateway:"))
+			// A link-layer address here means the destination is on-link.
+			if net.ParseIP(v) != nil {
+				gateway = v
+			}
+		case strings.HasPrefix(line, "interface:"):
+			iface = strings.TrimSpace(strings.TrimPrefix(line, "interface:"))
+		}
+	}
+	if gateway == "" && iface == "" {
+		return "", "", fmt.Errorf("route get %s: no gateway or interface in output", dest)
+	}
+	return gateway, iface, nil
+}
+
+// interfaceForDest reports which interface the system would use to reach dest.
+func interfaceForDest(dest string) (string, error) {
+	_, iface, err := routeTo(dest)
+	if err != nil {
+		return "", err
+	}
+	return iface, nil
+}
+
+// cleanupRouting restores the original default gateway.
+// cleanupRouting removes exactly what setupRouting added.
+//
+// The system default route is never touched now, so there is nothing to
+// restore: removing the two halves hands traffic back to it automatically.
+func cleanupRouting(tunName, bypassHost string) {
+	for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+		exec.Command("route", "-q", "-n", "delete", "-inet", half).Run() //nolint:errcheck
+	}
+
+	// Remove the tunnel subnet route added by configureInterface.
 	exec.Command("route", "-q", "-n", "delete", "-inet", "10.0.0.0/24").Run() //nolint:errcheck
 
-	// Remove bypass route.
-	if bypassHost != "" {
-		exec.Command("route", "-q", "delete", "-host", bypassHost).Run() //nolint:errcheck
+	// Remove every host route pinned outside the tunnel, tracked so a resolver
+	// route is not left behind when it differs from the server address.
+	for _, ip := range bypassRoutes {
+		exec.Command("route", "-q", "-n", "delete", "-host", ip).Run() //nolint:errcheck
 	}
-
-	// Restore original default gateway.
-	if oldGateway != "" {
-		exec.Command("route", "-q", "add", "default", oldGateway).Run() //nolint:errcheck
-	}
+	bypassRoutes = nil
 }
 
 // configureInterface sets the point-to-point tunnel address and MTU.
