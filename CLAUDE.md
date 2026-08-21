@@ -29,15 +29,14 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 - `r.RemoteAddr` removed from `config_handler.go`; CI now fails on any `RemoteAddr` in server or tunnel code.
 - Goroutine leak in `runLocalProxy` — the WireGuard reader stayed parked when the transport died.
 
+All 53 audit findings are now closed except the privileged helper below. Second pass added: ICMP anti-replay window (64-entry sliding window, checked before decryption), ICMP activation re-entry guard, session-token collision handling, in-memory dev TLS key, EDNS0 on DNS queries, exit paths for both client run loops, `replace_allowed_ips` on the client, cached AEADs, bounded worker pools on both UDP listeners, coalesced frame writes, O(1) IP pool, a correct gateway-based HTTP CONNECT probe, and the client UX fixes (dead Connect button, network-drop handling, captive-portal reconnect, timer granularity).
+
 **Known Phase 2 gaps** (do not block configs 1–6):
 
-- `FreewireHelper` SMJobBless target does not exist — the pf kill switch is unimplemented. `TunnelManager.reconnecting` claims "kill switch active" but nothing enforces it. SMJobBless is also deprecated as of macOS 13; migrate to `SMAppService` before GA.
-- DNS tunnel omits the EDNS0 OPT RR, so responses cap at 512 bytes (audit F3).
-- DNS client dials a fresh UDP socket per data packet (audit PERF-004); ICMP server spawns a goroutine per inbound packet and rebuilds the AEAD per packet (PERF-001/002).
-- ICMP session activation has no re-entry guard — duplicate CONFIRM packets start duplicate bridge goroutines (audit F08).
-- No anti-replay window on the ICMP data path (audit F6).
-- `PathUpgradeManager` probes HTTP CONNECT with a direct TCP/443 dial rather than through the portal proxy (audit F5), and still returns false for DNS/ICMP.
-- Remaining audit findings are medium/low: client-side goroutine leaks on shutdown (F-004/R-07, F-005/R-08), several UX gaps (F04 `connect()` no-ops from `.failed`, F05 captive-portal copy overpromises auto-reconnect, F07/F09 panel details), and assorted perf items.
+- `FreewireHelper` does not exist — the pf kill switch is unimplemented, and `TunnelManager.reconnecting` claims "kill switch active" while nothing enforces it. This is the one audit item deliberately left open: it is not a fix but a project (signing configuration, install and update flow, and a decision about how pf rules are torn down if the helper dies). Build it against `SMAppService`, not SMJobBless, which Apple deprecated in macOS 13. Needed before GA.
+- `PathUpgradeManager` still returns false for the DNS and ICMP paths; probing either requires a full handshake.
+- ECH is not implemented. uTLS hides the handshake fingerprint, but SNI still names the destination in cleartext. Requires publishing ECH config in DNS — design the Phase 3 server DNS setup so this can be added without rework.
+- DoH is hardcoded to Cloudflare 1.1.1.1: a single point of failure and a single point of trust for a privacy-sensitive signal. Should become a list with fallback.
 - `captive-portal-testing-guide.md`'s `proxy.py` listing is broken — its relay threads never iterate. `testing/proxy.py` is a working replacement; fold it back into the guide.
 
 ---
