@@ -275,7 +275,7 @@ func (s *TLS443Server) bridgeToWireGuard(transport net.Conn) {
 	//
 	// The length prefix and body go out in one Write. Splitting them emitted two
 	// TLS records per packet, doubling record overhead and syscalls.
-	frame := make([]byte, 2+(1<<16))
+	frame := make([]byte, 2+tlsMaxFrame)
 	for {
 		n, err := udpConn.Read(frame[2:])
 		if err != nil {
@@ -308,6 +308,15 @@ type bufConn struct {
 }
 
 func (c *bufConn) Read(b []byte) (int, error) { return c.r.Read(b) }
+
+// tlsMaxFrame bounds a single bridged packet.
+//
+// The bridge previously allocated two 64 KB buffers per connection, before the
+// peer had proven anything, so opening connections was enough to make the
+// server commit 128 KB each. A WireGuard datagram cannot approach that: the
+// tunnel MTU plus WireGuard and AEAD overhead stays well under 2 KB, and
+// anything larger is a corrupt stream rather than traffic worth carrying.
+const tlsMaxFrame = 4096
 
 // peekedConn wraps net.Conn and prepends one already-read byte to the read stream.
 type peekedConn struct {

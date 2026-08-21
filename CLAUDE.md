@@ -31,24 +31,20 @@ The server runs in Docker, not a VM. Start it with `make -C server docker-up`; l
 
 **Recent work:** uTLS on both TLS paths with Chrome/Safari/Firefox fingerprint rotation. ACME/Let's Encrypt on the server (set `acme_domain`; self-signed stays the dev default). 53-finding audit applied in full. First test suite (`go test -race ./...` in `server/`) and `.github/workflows/ci.yml`, which fails on any `RemoteAddr` or private-key logging. CI has been written but never executed — nothing has been pushed yet.
 
-**Fixed in the 2026-08-21 audit pass:**
+**Two audits have run.** The first found 53 issues, all closed. A second, run
+against the rewritten code, found 89 more — including bugs introduced by the
+first pass. Of those, 87 are closed; the two open ones are listed below.
 
-- Nonce reuse in **both** tunnels: DNS and ICMP derived one session key while both directions numbered packets from zero, so the first packet each way shared a (key, nonce) pair. Now three keys come off one HKDF stream — confirm-MAC, client→server, server→client. Covered by `keyderivation_test.go`.
-- Quit deadlock: `applicationWillTerminate` blocked the main thread on a semaphore waiting for a `@MainActor` task that needed that same thread. Peer removal now goes through `ServerAPI.removePeerBlocking` and reads the token from a lock-guarded box.
-- Private key on disk: the tunnel config (which carries the WireGuard private key) was written to a temp file. It now goes to the helper over a stdin pipe; only the ready line uses a file.
-- `insecureTLS` was hardcoded true on every path. Now derived from `allowsSelfSignedCert` — loopback and RFC 1918 only.
-- TOCTOU in `AddPeer` let concurrent registrations exceed capacity; the slot is now claimed under the same lock that checks it.
-- `RemovePeer` leaked a pool address whenever the WireGuard IPC failed.
-- Per-packet `Info` logging in the TLS bridge (~4k lines/sec at 50 Mbps).
-- HTTP CONNECT could run 18s against its 2s budget; all three ports now share one deadline.
-- `r.RemoteAddr` removed from `config_handler.go`; CI now fails on any `RemoteAddr` in server or tunnel code.
-- Goroutine leak in `runLocalProxy` — the WireGuard reader stayed parked when the transport died.
-
-All 53 audit findings are now closed except the privileged helper below. Second pass added: ICMP anti-replay window (64-entry sliding window, checked before decryption), ICMP activation re-entry guard, session-token collision handling, in-memory dev TLS key, EDNS0 on DNS queries, exit paths for both client run loops, `replace_allowed_ips` on the client, cached AEADs, bounded worker pools on both UDP listeners, coalesced frame writes, O(1) IP pool, a correct gateway-based HTTP CONNECT probe, and the client UX fixes (dead Connect button, network-drop handling, captive-portal reconnect, timer granularity).
+The second audit found the DNS tunnel had never worked: responses omitted the
+question section so the client misread every one, and a full packet encoded to a
+~2.4 KB query name against a 255-byte limit. Both are fixed, with fragmentation
+added and round-trip tests covering the wire format.
 
 **Known Phase 2 gaps** (none block configs 2–6):
 
 - **`FreewireHelper` does not exist — the pf kill switch is unimplemented.** The one audit item deliberately left open, because it is a project rather than a fix: signing configuration, an install and update flow, and fail-mode semantics. The UI no longer claims it (see `error-states-spec.md` §"Interim: kill switch not yet enforced"); the toggle is disabled and defaults off. **Resolved:** build against `SMAppService`, not SMJobBless (deprecated in macOS 13), and **fail closed** — pf rules persist if the helper dies, and release only on explicit user action. Needed before GA.
+- **FW-001 (open, critical): the control plane runs over cleartext HTTP.** `ServerAPI` builds `http://` and the Go API serves it with no TLS, so `GET /v1/server/config` hands over the server's WireGuard public key — the trust anchor for the whole tunnel — with no integrity protection, on exactly the hostile networks this product targets. An on-path attacker substitutes their own key and endpoint and terminates the tunnel. `client-server-api-spec.md` already says HTTPS only, so the implementation contradicts its own spec. Left open deliberately: it needs decisions (pin the key in the bundle? how do self-hosted servers hand over their key in Phase 3? how does it interact with the ACME work?), not just a patch.
+- **PERF-07 and the remaining medium/low findings** from the second audit are unfixed but none block the milestone.
 - **Config 1 is untestable on one machine.** `tryHTTPConnect` probes the machine's real default gateway; `config1.sh` puts the proxy on the container bridge. They can never match. Needs a second machine or a pf `rdr`. See `testing/README.md`.
 - `PathUpgradeManager` returns false for the DNS and ICMP paths; probing either requires a full handshake.
 - ECH is not implemented. uTLS hides the handshake fingerprint, but SNI still names the destination in cleartext. Requires publishing ECH config in DNS — design the Phase 3 server DNS setup so this can be added without rework.
