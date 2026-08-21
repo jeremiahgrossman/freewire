@@ -111,7 +111,7 @@ Record each run. Bugs found here become the first regression tests.
 | — | 2026-08-21 | — | — | — | Harness retargeted to the Docker container. Server moved to real ports 443/53 so the guide's rules apply unchanged. |
 | 1 | | | | | |
 | 2 | 2026-08-21 | **TLS/443** | ~2s | ✅ path / ⚠️ egress | Path selection correct: `tls443: session established`, handshake completed, `utun6` up at 10.0.0.2, 10.0.0.1 answers in ~2ms. Routing since fixed and verified installing. Egress unverifiable here — see the ECN note. |
-| 3 | 2026-08-21 | **DNS tunnel** | ~16s | ✅ transport | `ready utun6 10.0.0.3 dns`. 15/15 pings, 0% loss, avg 59ms (min 1.6, max 578 — variance is the poll interval). TCP connect completes over it. Run with the path forced, not under Config 3's pf rules: the fallback scenario is still untested, but the transport itself works. |
+| 3 | 2026-08-21 | **DNS tunnel** | 3.1s | ✅ PASS | `ready utun6 10.0.0.3 dns`. 15/15 pings, 0% loss, avg 59ms (min 1.6, max 578 — variance is the poll interval). TCP connect completes over it. Confirmed twice. First with the path forced, then properly under Config 3's rules with no preferred transport set: HTTP CONNECT failed, TLS/443 was blocked, and the chain selected DNS on its own 3.1s after peer registration. 15/15 pings, 0% loss, avg 38ms. Routing skipped, so this proves path selection and transport, not egress. |
 | 4 | | | | | |
 | 5 | | | | | |
 | 6 | | | | | |
