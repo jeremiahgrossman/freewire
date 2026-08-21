@@ -108,7 +108,7 @@ private struct ConnectingBody: View {
                 .foregroundStyle(.secondary)
             Spacer().frame(height: 4)
             Button("Cancel") {
-                Task { await tunnelManager.disconnect() }
+                tunnelManager.cancelConnect()
             }
             .buttonStyle(SecondaryButtonStyle())
             .frame(maxWidth: .infinity)

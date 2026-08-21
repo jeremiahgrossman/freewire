@@ -60,6 +60,7 @@ final class TunnelManager: ObservableObject {
     private var reconnectTask: Task<Void, Never>?
     private var upgradeManager: PathUpgradeManager?
     private var awaitPortalTask: Task<Void, Never>?
+    private var connectTask: Task<Void, Never>?
 
     init(api: ServerAPI, identity: DeviceIdentity) {
         self.api = api
@@ -106,19 +107,30 @@ final class TunnelManager: ObservableObject {
         // button, and rejecting the call left that button visibly dead.
         switch state {
         case .disconnected, .failed:
-            await doConnect()
+            break
         default:
             return
         }
+        // Held so cancelConnect can actually stop it. Previously the connect ran
+        // as a detached task nothing retained, so Cancel set the state to
+        // disconnected and the still-running connect overwrote it seconds later
+        // with connected or failed.
+        connectTask?.cancel()
+        let task = Task { await doConnect() }
+        connectTask = task
+        await task.value
     }
 
     func cancelConnect() {
-        state = .disconnected
+        connectTask?.cancel(); connectTask = nil
         watchTask?.cancel(); watchTask = nil
         reconnectTask?.cancel(); reconnectTask = nil
+        state = .disconnected
+        Task { await killTunnel(); await deregisterPeer() }
     }
 
     func disconnect() async {
+        connectTask?.cancel(); connectTask = nil
         cancelTasks()
         stopUpgradeManager()
         state = .disconnected
@@ -193,6 +205,12 @@ final class TunnelManager: ObservableObject {
             )
 
             let (ifName, transport) = try await launchTunnel(config: cfg)
+            // The user may have cancelled while the helper was starting.
+            guard !Task.isCancelled else {
+                await killTunnel()
+                await deregisterPeer()
+                return
+            }
             state = .connected(
                 tunnelIP: peer.tunnelIP,
                 interfaceName: ifName,
@@ -204,6 +222,7 @@ final class TunnelManager: ObservableObject {
             startUpgradeManager(serverHost: api.serverHost, transport: transport)
 
         } catch TunnelError.allPathsFailed {
+            guard !Task.isCancelled else { await deregisterPeer(); return }
             // freewire-tunnel exhausted all four transport paths.
             // Probe captive.apple.com to distinguish portal (CONN-2a) from hard block (CONN-2b).
             await deregisterPeer()
@@ -216,6 +235,7 @@ final class TunnelManager: ObservableObject {
             }
         } catch {
             await deregisterPeer()
+            guard !Task.isCancelled else { return }
             state = .failed(error)
         }
     }
@@ -598,14 +618,24 @@ enum TunnelError: Error, LocalizedError {
     case timedOut
     case allPathsFailed
 
+    /// Copy is specified in error-states-spec.md under "Local tunnel failures
+    /// (TUN)". Do not paraphrase: support matches reported text to spec entries.
     var errorDescription: String? {
         switch self {
-        case .helperNotFound:        return "Tunnel helper not found."
-        case .helperNeedsPrivileges: return "Freewire needs administrator access to create the tunnel."
-        case .helperFailed(let msg): return "Tunnel error: \(msg)"
-        case .badReadyLine(let s):   return "Unexpected tunnel output: \(s)"
-        case .timedOut:              return "Tunnel did not start within 30 seconds."
-        case .allPathsFailed:        return "All transport paths failed."
+        case .helperNotFound:        // TUN-1
+            return "Freewire is missing a component it needs. Reinstalling should fix it."
+        case .helperNeedsPrivileges: // TUN-2
+            return "Freewire needs administrator access to create the tunnel."
+        case .helperFailed(let detail): // TUN-3
+            return "The tunnel could not start. \(detail)"
+        case .badReadyLine:          // TUN-4
+            return "The tunnel reported something unexpected. Try connecting again."
+        case .timedOut:              // TUN-5
+            return "The tunnel took too long to start. Try connecting again."
+        case .allPathsFailed:
+            // Not surfaced: doConnect routes this to CONN-2a or CONN-2b after
+            // the captive portal probe.
+            return "All transport paths failed."
         }
     }
 }

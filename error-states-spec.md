@@ -28,6 +28,33 @@ When `FreewireHelper` ships: restore the copy specified in SESSION-1, SESSION-2,
 
 ---
 
+## Local tunnel failures (TUN)
+
+Failures of the `freewire-tunnel` helper on the client, before or instead of a
+server-side error. These are distinct from the CONN states: no connection was
+attempted or the attempt never reached the network.
+
+Copy is specified here because it is shown to users verbatim. It was previously
+invented in `TunnelManager.swift` with no spec entry, which left crash reports
+and support tickets with no way to match a reported message to a known state.
+
+| ID | Condition | User-visible message | Type |
+|---|---|---|---|
+| TUN-1 | The helper binary is missing from the bundle | "Freewire is missing a component it needs. Reinstalling should fix it." | Hard block |
+| TUN-2 | The helper cannot get administrator rights | "Freewire needs administrator access to create the tunnel." | Hard block |
+| TUN-3 | The helper exited with a diagnostic | "The tunnel could not start. {detail}" | Hard block |
+| TUN-4 | The helper produced unreadable output | "The tunnel reported something unexpected. Try connecting again." | Soft warning |
+| TUN-5 | The helper did not report ready within 30s | "The tunnel took too long to start. Try connecting again." | Soft warning |
+
+TUN-3 carries the helper's own text. It is the one message with interpolated
+content, because the underlying causes are open-ended and a generic string would
+discard the only diagnostic available.
+
+Note that `allPathsFailed` is not listed: it is not surfaced as an error. It
+routes to CONN-2a or CONN-2b after the captive portal probe.
+
+---
+
 ## Error Type Taxonomy
 
 - **Silent failure** — logged internally; user not notified; connection continues or degrades gracefully
