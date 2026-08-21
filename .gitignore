@@ -1,0 +1,65 @@
+# ---- macOS ----
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# ---- Xcode ----
+DerivedData/
+build/
+*.xcuserstate
+*.xcuserdatad/
+xcuserdata/
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# ---- Swift Package Manager ----
+.build/
+.swiftpm/
+Package.resolved
+
+# ---- Go ----
+# Compiled binaries (source lives in cmd/, binaries do not)
+server/freewire-server
+server/freewire-server-*
+tunnel/freewire-tunnel
+tunnel/freewire-tunnel-*
+*.exe
+*.test
+*.out
+vendor/
+
+# ---- Signing, certs, keys — never commit ----
+*.p12
+*.pem
+*.key
+*.cer
+*.certSigningRequest
+*.mobileprovision
+*.provisionprofile
+.env
+.env.*
+secrets.json
+# WireGuard configs contain private keys
+*.conf.local
+wg*.conf
+# Server runtime config — holds the server WireGuard private key
+server/freewire-server.json
+server/*.state.json
+
+# ---- AWS / deploy local state ----
+.terraform/
+*.tfstate
+*.tfstate.*
+aws-credentials
+
+# ---- Editor / tooling ----
+# Machine-local Claude permissions; .claude/settings.json (shared) is tracked
+.claude/settings.local.json
+.vscode/
+.idea/
+*.swp
+*~

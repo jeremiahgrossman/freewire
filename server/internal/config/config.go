@@ -1,0 +1,107 @@
+package config
+
+import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"os"
+
+	"golang.org/x/crypto/curve25519"
+)
+
+type Config struct {
+	PrivateKey       string `json:"private_key"`
+	PublicKey        string `json:"public_key"`
+	ListenPort       int    `json:"listen_port"`
+	APIPort          int    `json:"api_port"`
+	TunnelCIDR       string `json:"tunnel_cidr"`
+	ServerTunnelIP   string `json:"server_tunnel_ip"`
+	Capacity         int    `json:"capacity"`
+	Region           string `json:"region"`
+	ServerVersion    string `json:"server_version"`
+	MinClientVersion string `json:"min_client_version"`
+
+	// Phase 2: additional transport listeners.
+	TLSPort       int    `json:"tls_port"`        // default 443
+	TLSCertFile   string `json:"tls_cert_file"`   // path to cert PEM; empty = self-signed
+	TLSKeyFile    string `json:"tls_key_file"`    // path to key PEM; empty = self-signed
+	DNSTunnelPort int    `json:"dns_tunnel_port"` // default 53
+	ICMPUDPPort   int    `json:"icmp_udp_port"`   // default 4500
+
+	// PublicHost is the externally reachable IP or hostname for this server.
+	// Used in /v1/server/config responses so clients know where to connect.
+	// Defaults to empty string; clients fall back to the address they connected from.
+	PublicHost string `json:"public_host"`
+}
+
+// Load reads config from path. If the file does not exist, a new config with a
+// fresh WireGuard keypair is generated and written to path.
+func Load(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return generate(path)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	cfg.applyDefaults()
+	return &cfg, nil
+}
+
+// applyDefaults fills in zero-value fields with sensible defaults.
+func (c *Config) applyDefaults() {
+	if c.TLSPort == 0 {
+		c.TLSPort = 443
+	}
+	if c.DNSTunnelPort == 0 {
+		c.DNSTunnelPort = 53
+	}
+	if c.ICMPUDPPort == 0 {
+		c.ICMPUDPPort = 4500
+	}
+}
+
+func generate(path string) (*Config, error) {
+	privateKey := make([]byte, 32)
+	if _, err := rand.Read(privateKey); err != nil {
+		return nil, fmt.Errorf("generate private key: %w", err)
+	}
+	// Curve25519 clamping (RFC 7748 §5).
+	privateKey[0] &= 248
+	privateKey[31] = (privateKey[31] & 127) | 64
+
+	publicKey, err := curve25519.X25519(privateKey, curve25519.Basepoint)
+	if err != nil {
+		return nil, fmt.Errorf("derive public key: %w", err)
+	}
+
+	cfg := &Config{
+		PrivateKey:       base64.StdEncoding.EncodeToString(privateKey),
+		PublicKey:        base64.StdEncoding.EncodeToString(publicKey),
+		ListenPort:       51820,
+		APIPort:          8080,
+		TunnelCIDR:       "10.0.0.0/24",
+		ServerTunnelIP:   "10.0.0.1",
+		Capacity:         253,
+		Region:           "local",
+		ServerVersion:    "0.1.0",
+		MinClientVersion: "0.1.0",
+		TLSPort:          443,
+		DNSTunnelPort:    53,
+		ICMPUDPPort:      4500,
+	}
+
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal config: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		return nil, fmt.Errorf("write config: %w", err)
+	}
+	return cfg, nil
+}
