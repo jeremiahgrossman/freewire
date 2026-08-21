@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.zx2c4.com/wireguard/device"
 )
 
 // Per-path budgets from the fallback chain spec. Each is the ceiling for the
@@ -20,44 +23,77 @@ const (
 	tls443Budget      = 3 * time.Second
 )
 
-// selectTransport tries each path in order per the fallback chain spec.
-// Returns transport name, a local UDP PacketConn to bridge, the transport
-// net.Conn, and error. If transport is "wireguard", localProxy and conn are nil.
-//
-// Fallback order (per spec, 10s total budget):
+// Fallback order (per spec, ~10s total budget):
 //
 //	HTTP CONNECT (2s) → TLS/443 (3s) → DNS tunnel (3s) → ICMP/UDP (2s) → direct WireGuard
-func selectTransport(cfg Config) (name string, localProxy net.PacketConn, transport net.Conn, err error) {
-	// 1. HTTP CONNECT
-	if tc, e := tryHTTPConnect(cfg); e == nil {
-		lp, e2 := newLocalUDPProxy()
-		if e2 == nil {
-			return "http_connect", lp, tc, nil
-		}
-		tc.Close()
-	}
+//
+// transportCandidate is one rung of the fallback chain.
+type transportCandidate struct {
+	name string
+	// open establishes the transport. localProxy is the UDP socket WireGuard
+	// will point at; transport is the stream to bridge, or nil when the
+	// implementation runs its own bridge (DNS and ICMP do).
+	open func(Config) (localProxy net.PacketConn, transport net.Conn, err error)
+}
 
-	// 2. TLS/443
-	if tc, e := tryTLS443(cfg); e == nil {
-		lp, e2 := newLocalUDPProxy()
-		if e2 == nil {
-			return "tls443", lp, tc, nil
-		}
-		tc.Close()
+// transportCandidates lists the chain in priority order.
+//
+// Selection deliberately stops at "the transport established", not "the tunnel
+// works". Whether WireGuard can actually complete a handshake over it is the
+// caller's job to decide, because that is what lets a candidate that connects
+// but carries nothing fall through to the next one.
+func transportCandidates() []transportCandidate {
+	return []transportCandidate{
+		{
+			name: "http_connect",
+			open: func(cfg Config) (net.PacketConn, net.Conn, error) {
+				tc, err := tryHTTPConnect(cfg)
+				if err != nil {
+					return nil, nil, err
+				}
+				lp, err := newLocalUDPProxy()
+				if err != nil {
+					tc.Close()
+					return nil, nil, err
+				}
+				return lp, tc, nil
+			},
+		},
+		{
+			name: "tls443",
+			open: func(cfg Config) (net.PacketConn, net.Conn, error) {
+				tc, err := tryTLS443(cfg)
+				if err != nil {
+					return nil, nil, err
+				}
+				lp, err := newLocalUDPProxy()
+				if err != nil {
+					tc.Close()
+					return nil, nil, err
+				}
+				return lp, tc, nil
+			},
+		},
+		{
+			name: "dns",
+			open: func(cfg Config) (net.PacketConn, net.Conn, error) {
+				lp, err := runDNSTunnel(cfg)
+				return lp, nil, err
+			},
+		},
+		{
+			name: "icmp_udp",
+			open: func(cfg Config) (net.PacketConn, net.Conn, error) {
+				lp, err := runICMPUDPTunnel(cfg)
+				return lp, nil, err
+			},
+		},
+		{
+			// Direct WireGuard UDP: no proxy, no bridge.
+			name: "wireguard",
+			open: func(Config) (net.PacketConn, net.Conn, error) { return nil, nil, nil },
+		},
 	}
-
-	// 3. DNS tunnel
-	if lp, e := runDNSTunnel(cfg); e == nil {
-		return "dns", lp, nil, nil
-	}
-
-	// 4. ICMP/UDP tunnel
-	if lp, e := runICMPUDPTunnel(cfg); e == nil {
-		return "icmp_udp", lp, nil, nil
-	}
-
-	// 5. Direct WireGuard UDP (last resort fallback)
-	return "wireguard", nil, nil, nil
 }
 
 // tryHTTPConnect attempts HTTP CONNECT through a captive portal proxy.
@@ -69,8 +105,24 @@ func tryHTTPConnect(cfg Config) (net.Conn, error) {
 		return nil, fmt.Errorf("http-connect: no gateway: %w", err)
 	}
 
+	// The proxy is asked to reach the configured server, not a hardcoded name.
+	// This used to be the literal "vpn.freewire.com:443" while tryTLS443 used
+	// cfg.ServerHost, so the two paths disagreed about where the server was: on
+	// any self-hosted or development server the proxy opened a tunnel to the
+	// wrong host, and if that name resolved at all the client talked to a server
+	// it had never registered its peer with.
+	host := cfg.ServerHost
+	if host == "" {
+		if h, _, e := net.SplitHostPort(cfg.ServerEndpoint); e == nil {
+			host = h
+		}
+	}
+	if host == "" {
+		return nil, fmt.Errorf("http-connect: no server host configured")
+	}
+	target := net.JoinHostPort(host, fmt.Sprintf("%d", cfg.TLSPort))
+
 	ports := []string{"3128", "8080", "443"}
-	target := "vpn.freewire.com:443"
 
 	// The spec budgets 2s for this path in total, not per port. Every dial,
 	// CONNECT exchange, and TLS handshake below shares this one deadline so
@@ -124,7 +176,7 @@ func tryHTTPConnect(cfg Config) (net.Conn, error) {
 			c.Close()
 			break
 		}
-		tlsConn, hsErr := utlsHandshake(c, "vpn.freewire.com", cfg.InsecureTLS, hsBudget)
+		tlsConn, hsErr := utlsHandshake(c, host, cfg.InsecureTLS, hsBudget)
 		if hsErr != nil {
 			c.Close()
 			continue
@@ -262,4 +314,97 @@ func newLocalUDPProxy() (net.PacketConn, error) {
 		return nil, fmt.Errorf("local udp proxy: %w", err)
 	}
 	return pc, nil
+}
+
+// handshakeBudget is how long one candidate gets to prove WireGuard can carry
+// traffic over it before the chain moves on.
+const handshakeBudget = 3 * time.Second
+
+// establishTunnel walks the fallback chain and returns the first transport over
+// which WireGuard actually completes a handshake.
+//
+// The device is created once and re-pointed at each candidate's local proxy, so
+// a failed rung costs a teardown of the transport rather than of the TUN
+// interface. Failure to hand back a working transport means every rung was
+// tried, including direct WireGuard.
+func establishTunnel(
+	cfg Config,
+	wgDev *device.Device,
+	privKeyHex, pubKeyHex string,
+	keepalive int,
+) (name string, localProxy net.PacketConn, transport net.Conn, err error) {
+	upped := false
+
+	for _, candidate := range transportCandidates() {
+		lp, tc, openErr := candidate.open(cfg)
+		if openErr != nil {
+			continue
+		}
+
+		// Point WireGuard at this candidate. Direct WireGuard has no proxy, so
+		// it uses the server endpoint itself.
+		endpoint := cfg.ServerEndpoint
+		if lp != nil {
+			endpoint = lp.LocalAddr().String()
+		}
+
+		// replace_allowed_ips makes the allowed_ip lines authoritative rather
+		// than additive, which matters here because this runs once per
+		// candidate against the same device.
+		ipcConf := "private_key=" + privKeyHex + "\n" +
+			"public_key=" + pubKeyHex + "\n" +
+			"endpoint=" + endpoint + "\n" +
+			"replace_allowed_ips=true\n" +
+			"allowed_ip=0.0.0.0/0\n" +
+			"allowed_ip=::/0\n" +
+			fmt.Sprintf("persistent_keepalive_interval=%d\n", keepalive) +
+			"\n"
+
+		if ipcErr := wgDev.IpcSetOperation(strings.NewReader(ipcConf)); ipcErr != nil {
+			closeCandidate(lp, tc)
+			continue
+		}
+		if !upped {
+			if upErr := wgDev.Up(); upErr != nil {
+				closeCandidate(lp, tc)
+				return "", nil, nil, fmt.Errorf("device up: %w", upErr)
+			}
+			upped = true
+		}
+
+		// Bridge, for the transports that need one.
+		var bridgeDone chan struct{}
+		if lp != nil && tc != nil {
+			bridgeDone = make(chan struct{})
+			go func() {
+				defer close(bridgeDone)
+				runLocalProxy(lp, tc)
+			}()
+		}
+
+		if waitForHandshake(wgDev, handshakeBudget) {
+			return candidate.name, lp, tc, nil
+		}
+
+		// The transport carried nothing. Tear it down and try the next rung
+		// rather than declaring the whole network blocked.
+		fmt.Fprintf(os.Stderr,
+			"freewire-tunnel: %s connected but no WireGuard handshake; trying the next path\n",
+			candidate.name)
+		closeCandidate(lp, tc)
+		if bridgeDone != nil {
+			<-bridgeDone
+		}
+	}
+
+	return "", nil, nil, fmt.Errorf("no transport carried a WireGuard handshake")
+}
+
+func closeCandidate(lp net.PacketConn, tc net.Conn) {
+	if tc != nil {
+		tc.Close()
+	}
+	if lp != nil {
+		lp.Close()
+	}
 }

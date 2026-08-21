@@ -27,11 +27,11 @@ type Peer struct {
 
 // Manager owns the WireGuard device and peer lifecycle.
 type Manager struct {
-	dev    *device.Device
-	log    *zap.Logger
-	pool   *ipPool
-	mu     sync.RWMutex
-	peers  map[string]*Peer // peer_token → Peer
+	dev   *device.Device
+	log   *zap.Logger
+	pool  *ipPool
+	mu    sync.RWMutex
+	peers map[string]*Peer // peer_token → Peer
 }
 
 func NewManager(cfg *config.Config, log *zap.Logger) (*Manager, error) {
@@ -97,6 +97,15 @@ func (m *Manager) AddPeer(peerToken, publicKeyBase64 string, capacity int) (*Pee
 	if err != nil {
 		return nil, fmt.Errorf("decode public key: %w", err)
 	}
+	// A Curve25519 public key is exactly 32 bytes, and an all-zero key is not a
+	// valid point. Neither was checked, so malformed input reached the device.
+	if len(publicKeyBytes) != 32 {
+		return nil, fmt.Errorf("public key must be 32 bytes, got %d", len(publicKeyBytes))
+	}
+	var zero [32]byte
+	if bytes.Equal(publicKeyBytes, zero[:]) {
+		return nil, fmt.Errorf("public key is all zero")
+	}
 
 	// Claim the slot and publish the entry under one lock. Checking capacity and
 	// inserting separately let concurrent registrations both observe room and
@@ -108,6 +117,23 @@ func (m *Manager) AddPeer(peerToken, publicKeyBase64 string, capacity int) (*Pee
 	if len(m.peers) >= capacity {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("server at capacity")
+	}
+	// Refuse a key that is already registered. Registration is unauthenticated
+	// and replace_allowed_ips makes the peer line authoritative, so re-
+	// registering someone else's key rewrote their allowed_ip to a fresh
+	// address: their traffic stopped being routed to them, and the caller could
+	// then remove them outright. A public key is not a secret -- it crosses the
+	// API in the clear and is derivable from any captured handshake -- so it
+	// cannot be treated as proof of anything, but it can at least be bound to
+	// the first token that claimed it.
+	for existingToken, p := range m.peers {
+		if p.PublicKey == publicKeyBase64 {
+			m.mu.Unlock()
+			if existingToken == peerToken {
+				return nil, fmt.Errorf("peer already registered")
+			}
+			return nil, fmt.Errorf("public key already registered to another peer")
+		}
 	}
 	m.peers[peerToken] = peer
 	m.mu.Unlock()

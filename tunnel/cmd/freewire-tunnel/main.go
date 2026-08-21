@@ -84,20 +84,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Select transport: tries HTTP CONNECT → TLS/443 → DNS → ICMP → direct WireGuard.
-	transportName, localProxy, transportConn, err := selectTransport(cfg)
-	if err != nil {
-		tunDev.Close()
-		fmt.Fprintf(os.Stderr, "freewire-tunnel: transport: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Determine WireGuard endpoint.
-	wgEndpoint := cfg.ServerEndpoint // direct UDP (wireguard transport)
-	if transportName != "wireguard" && localProxy != nil {
-		wgEndpoint = localProxy.LocalAddr().String()
-	}
-
 	logger := device.NewLogger(device.LogLevelError, "wg: ")
 	wgDev := device.NewDevice(tunDev, conn.NewDefaultBind(), logger)
 
@@ -106,46 +92,20 @@ func main() {
 		keepalive = 25
 	}
 
-	// replace_allowed_ips makes the allowed_ip lines below authoritative rather
-	// than additive. Without it a second IpcSetOperation on the same device
-	// accumulates entries instead of replacing them.
-	ipcConf := "private_key=" + privKeyHex + "\n" +
-		"public_key=" + pubKeyHex + "\n" +
-		"endpoint=" + wgEndpoint + "\n" +
-		"replace_allowed_ips=true\n" +
-		"allowed_ip=0.0.0.0/0\n" +
-		"allowed_ip=::/0\n" +
-		fmt.Sprintf("persistent_keepalive_interval=%d\n", keepalive) +
-		"\n"
-
-	if err := wgDev.IpcSetOperation(strings.NewReader(ipcConf)); err != nil {
+	// Walk the fallback chain, and judge each rung by whether WireGuard can
+	// actually complete a handshake over it -- not merely by whether the
+	// transport connected.
+	//
+	// Selection used to stop at the first transport that established, configure
+	// WireGuard over it, and give up entirely if no handshake followed. A portal
+	// that answers HTTP CONNECT with 200 and then discards the tunnelled bytes
+	// is routine -- they whitelist the verb, not the destination -- and it made
+	// the client report the network as blocking VPNs without ever having tried
+	// TLS/443, DNS or ICMP. That is the exact situation this product exists for.
+	transportName, localProxy, transportConn, err := establishTunnel(cfg, wgDev, privKeyHex, pubKeyHex, keepalive)
+	if err != nil {
 		wgDev.Close()
-		fmt.Fprintf(os.Stderr, "freewire-tunnel: ipc set: %v\n", err)
-		os.Exit(1)
-	}
-
-	if err := wgDev.Up(); err != nil {
-		wgDev.Close()
-		fmt.Fprintf(os.Stderr, "freewire-tunnel: device up: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Start local proxy bridge for non-wireguard transports.
-	if transportName != "wireguard" && localProxy != nil && transportConn != nil {
-		go runLocalProxy(localProxy, transportConn)
-	}
-
-	// Wait up to 5s for the WireGuard handshake to complete. This detects captive
-	// portal networks where UDP (or the chosen transport) is blocked — if no handshake
-	// occurs, all paths are effectively failed and Swift runs the captive portal probe.
-	if !waitForHandshake(wgDev, 5*time.Second) {
-		wgDev.Close()
-		if transportConn != nil {
-			transportConn.Close()
-		}
-		if localProxy != nil {
-			localProxy.Close()
-		}
+		tunDev.Close()
 		fmt.Println("all_paths_failed")
 		os.Stdout.Sync() //nolint:errcheck
 		os.Exit(2)

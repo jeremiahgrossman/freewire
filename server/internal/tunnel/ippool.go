@@ -15,7 +15,7 @@ import (
 type ipPool struct {
 	mu        sync.Mutex
 	network   *net.IPNet
-	free      []uint32          // available addresses, taken from the tail
+	free      []uint32 // available addresses, taken from the tail
 	allocated map[uint32]struct{}
 	reserved  int // addresses excluded from the pool (network, server, broadcast)
 }

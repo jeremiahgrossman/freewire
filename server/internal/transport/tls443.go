@@ -147,15 +147,22 @@ func (s *TLS443Server) handleConn(rawConn net.Conn) {
 	}
 	rawConn.SetReadDeadline(time.Time{}) //nolint:errcheck
 
-	// Reconstruct a connection that re-emits the peeked byte.
-	pc := &peekedConn{Conn: rawConn, peeked: buf[0]}
+	// Reconstruct a connection that re-emits the peeked byte. Typed as net.Conn
+	// because the CONNECT path may wrap it again to preserve buffered bytes.
+	var pc net.Conn = &peekedConn{Conn: rawConn, peeked: buf[0]}
 
 	if buf[0] == 'C' || buf[0] == 'G' || buf[0] == 'P' || buf[0] == 'H' {
 		// Looks like HTTP. Attempt CONNECT handling.
-		if err := s.handleHTTPConnect(pc); err != nil {
+		// The reader is carried across the CONNECT boundary: it may already hold
+		// the first bytes of the client's TLS handshake.
+		br, err := s.handleHTTPConnect(pc)
+		if err != nil {
 			s.log.Error("tls443: http connect", zap.Error(err))
 			rawConn.Close()
 			return
+		}
+		if br.Buffered() > 0 {
+			pc = &bufConn{Conn: pc, r: br}
 		}
 		// After CONNECT + 200, the client will do a TLS handshake.
 		// Fall through to TLS upgrade.
@@ -176,15 +183,20 @@ func (s *TLS443Server) handleConn(rawConn net.Conn) {
 }
 
 // handleHTTPConnect reads an HTTP CONNECT request from conn and responds 200.
-func (s *TLS443Server) handleHTTPConnect(conn net.Conn) error {
+//
+// The reader is returned rather than discarded: a client commonly pipelines the
+// start of its TLS handshake in the same segment as the CONNECT headers, and
+// those bytes are already buffered. Dropping them left the handshake reading a
+// stream missing its opening bytes.
+func (s *TLS443Server) handleHTTPConnect(conn net.Conn) (*bufio.Reader, error) {
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
 	br := bufio.NewReader(conn)
 	line, err := br.ReadString('\n')
 	if err != nil {
-		return fmt.Errorf("read connect line: %w", err)
+		return nil, fmt.Errorf("read connect line: %w", err)
 	}
 	if !strings.HasPrefix(line, "CONNECT") {
-		return fmt.Errorf("expected CONNECT, got: %q", line)
+		return nil, fmt.Errorf("expected CONNECT, got: %q", line)
 	}
 	// Drain headers.
 	for {
@@ -195,8 +207,10 @@ func (s *TLS443Server) handleHTTPConnect(conn net.Conn) error {
 	}
 	conn.SetReadDeadline(time.Time{}) //nolint:errcheck
 
-	_, err = io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n")
-	return err
+	if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
+		return nil, err
+	}
+	return br, nil
 }
 
 // bridgeToWireGuard reads length-framed packets from transport, forwards them to
@@ -279,6 +293,21 @@ func (s *TLS443Server) bridgeToWireGuard(transport net.Conn) {
 		}
 	}
 }
+
+// bufConn wraps net.Conn so reads come from a bufio.Reader that already holds
+// buffered bytes.
+//
+// The CONNECT handler reads its request line and headers through a
+// bufio.Reader. Anything the client pipelined behind them -- typically the
+// start of the TLS ClientHello, arriving in the same TCP segment -- sits in
+// that buffer. Dropping the reader discarded those bytes and the handshake then
+// read a stream missing its opening, failing as a record-layer error.
+type bufConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (c *bufConn) Read(b []byte) (int, error) { return c.r.Read(b) }
 
 // peekedConn wraps net.Conn and prepends one already-read byte to the read stream.
 type peekedConn struct {
