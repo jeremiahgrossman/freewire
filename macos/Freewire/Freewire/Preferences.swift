@@ -7,10 +7,22 @@ final class Preferences {
 
     private enum Key {
         static let killSwitch = "killSwitch"
+        static let dnsResolverOverride = "dnsResolverOverride"
         static let autoConnect = "autoConnect"
         static let networkIntelligence = "networkIntelligence"
         static let initialized = "prefsInitialized"
         static let onboardingDone = "onboardingDone"
+    }
+
+    /// Resolver the DNS tunnel should query instead of the system one.
+    ///
+    /// Testing aid: the tunnel zone is only delegated in production, so against
+    /// a development server the system resolver cannot reach it. No UI sets
+    /// this; it is written with `defaults write com.freewire.Freewire
+    /// dnsResolverOverride <ip>`.
+    var dnsResolverOverride: String? {
+        let v = UserDefaults.standard.string(forKey: Key.dnsResolverOverride)
+        return (v?.isEmpty ?? true) ? nil : v
     }
 
     var killSwitchEnabled: Bool {

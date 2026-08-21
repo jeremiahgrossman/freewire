@@ -32,6 +32,14 @@ type Config struct {
 	TLSPort         int    `json:"tls_port"`          // default 443; server reports its own
 	DNSTunnelPort   int    `json:"dns_tunnel_port"`   // default 53; server reports its own
 	ICMPUDPPort     int    `json:"icmp_udp_port"`     // default 4500
+	// DNSResolver overrides the resolver the DNS tunnel queries.
+	//
+	// Normally the tunnel uses the system resolver and relies on it forwarding
+	// the tunnel zone to the authoritative server. That requires the zone to be
+	// delegated, which is true in production and false anywhere else -- so
+	// without this the DNS transport cannot be exercised against a development
+	// server at all. Empty means use the system resolver.
+	DNSResolver string `json:"dns_resolver,omitempty"`
 	// PreferredTransport names a path to attempt before the normal chain.
 	// Set when upgrading from a slower path: without it the relaunched tunnel
 	// restarts the chain from the top and reselects whatever it had before,

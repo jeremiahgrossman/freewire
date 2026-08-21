@@ -60,9 +60,17 @@ type dnsClientSession struct {
 // PacketConn that bridges wireguard-go UDP ↔ DNS tunnel.
 // Returns an error if the handshake fails within dnsHandshakeTimeout.
 func runDNSTunnel(cfg Config) (net.PacketConn, error) {
-	dnsServer, err := resolveLocalDNSServer()
-	if err != nil {
-		return nil, fmt.Errorf("dns tunnel: resolve dns server: %w", err)
+	// An explicit resolver wins. Production relies on the system resolver
+	// forwarding the tunnel zone, which needs the zone delegated; pointing
+	// straight at the authoritative server is what makes the transport testable
+	// against a server that is not.
+	dnsServer := cfg.DNSResolver
+	if dnsServer == "" {
+		var err error
+		dnsServer, err = resolveLocalDNSServer()
+		if err != nil {
+			return nil, fmt.Errorf("dns tunnel: resolve dns server: %w", err)
+		}
 	}
 
 	sess, err := dnsHandshake(cfg, dnsServer)

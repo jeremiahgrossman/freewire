@@ -226,7 +226,8 @@ final class TunnelManager: ObservableObject {
                 tlsPort:         server.tlsEndpointPort,
                 dnsTunnelPort:   server.dnsTunnelPort,
                 icmpUDPPort:     server.icmpUDPPort,
-                preferredTransport: nil
+                preferredTransport: nil,
+                dnsResolver: Preferences.shared.dnsResolverOverride
             )
 
             let (ifName, transport) = try await launchTunnel(config: cfg)
@@ -295,7 +296,8 @@ final class TunnelManager: ObservableObject {
                     tlsPort:         server.tlsEndpointPort,
                     dnsTunnelPort:   server.dnsTunnelPort,
                     icmpUDPPort:     server.icmpUDPPort,
-                    preferredTransport: nil
+                    preferredTransport: nil,
+                    dnsResolver: Preferences.shared.dnsResolverOverride
                 )
 
                 let (ifName, transport) = try await launchTunnel(config: cfg)
@@ -372,7 +374,8 @@ final class TunnelManager: ObservableObject {
                 // tunnel restarts the chain from the top and reselects whatever
                 // it had before, so the upgrade rebuilt the same tunnel and then
                 // upgraded again, forever.
-                preferredTransport: transport.rawValue
+                preferredTransport: transport.rawValue,
+                dnsResolver: Preferences.shared.dnsResolverOverride
             )
             let (ifName, newTransport) = try await launchTunnel(config: cfg)
 
@@ -643,6 +646,7 @@ private struct TunnelConfig: Encodable {
     let dnsTunnelPort:   Int
     let icmpUDPPort:     Int
     let preferredTransport: String?
+    let dnsResolver:        String?
 
     enum CodingKeys: String, CodingKey {
         case privateKey      = "private_key"
@@ -657,6 +661,7 @@ private struct TunnelConfig: Encodable {
         case dnsTunnelPort   = "dns_tunnel_port"
         case icmpUDPPort     = "icmp_udp_port"
         case preferredTransport = "preferred_transport"
+        case dnsResolver        = "dns_resolver"
     }
 }
 
