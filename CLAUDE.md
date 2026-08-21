@@ -13,8 +13,16 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 - **Active phase:** Phase 2 — Captive portal
 - **In progress:** nothing
-- **Last completed:** Config 0 (baseline open network) passes — app shows "Protected · TLS/443". UTM VM (Ubuntu 26.04 arm64, 192.168.64.2) running freewire-server. Swift app pointed at VM. Ready to run configs 1–5 from captive-portal-testing-guide.md.
-- **Blocked on:** nothing — run configs 1–5 next.
+- **Last completed:** Repo restructured to a single root git repo (macos/ + server/ + tunnel/ + specs, 4 commits). Captive portal test harness added at `testing/` — runnable scripts for configs 0–6, a working HTTP CONNECT proxy, and `which-path.sh` for network-layer path verification. `tunnel/go.mod` aligned with `server/go.mod` (was 2.5 years of version skew).
+- **Blocked on:** nothing — run configs 1–6 via `testing/README.md`. Config 0 already passes ("Protected · TLS/443", UTM VM Ubuntu 26.04 arm64 at 192.168.64.2).
+
+**Known Phase 2 gaps** (do not block configs 1–6):
+
+- `FreewireHelper` SMJobBless target does not exist — the pf kill switch is unimplemented. `TunnelManager.reconnecting` claims "kill switch active" but nothing enforces it.
+- uTLS not integrated — TLS/443 uses a plain Go handshake and is DPI-fingerprintable.
+- No tests, no `.github/workflows`. Bugs found in configs 1–6 should become the first regression tests.
+- `server/internal/api/config_handler.go:28` reads `r.RemoteAddr`. Not a privacy violation (never logged or persisted, only echoed to the requesting client), but it is functionally wrong when `PublicHost` is unset and puts `RemoteAddr` in a live path. The CI lint rule for `RemoteAddr` would flag it.
+- `captive-portal-testing-guide.md`'s `proxy.py` listing is broken — its relay threads never iterate. `testing/proxy.py` is a working replacement; fold it back into the guide.
 
 ---
 
