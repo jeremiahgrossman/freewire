@@ -1,7 +1,30 @@
 # Freewire VPN — Error States Specification
 
-**Version:** 0.1  
+**Version:** 0.2  
 **Status:** Draft
+
+---
+
+## Interim: kill switch not yet enforced
+
+**Applies until `FreewireHelper` ships.** Every "kill switch active / traffic is blocked" behavior in this document describes the intended end state. None of it is enforced today: `FreewireHelper` does not exist, no `pf` rules are installed, and traffic flows normally whenever the tunnel is down.
+
+Until the helper ships, the UI must not claim protection it cannot deliver. A user on hotel or airport wifi who reads "traffic is blocked" and is not blocked is worse off than one who was told nothing.
+
+Interim copy, to be implemented verbatim and reverted when the helper lands:
+
+| Location | Interim copy |
+|---|---|
+| Preferences toggle | Label: "Kill switch" — control **disabled**. Caption: "Not available yet. When the VPN drops, traffic is not blocked. Coming in a future release." |
+| SESSION-1 (reconnecting) | "Attempt {n} of 3. Your traffic is not protected while reconnecting." |
+| SESSION-2 (blocked) | "Reconnection failed. Your traffic is not protected. Reconnect or disconnect." |
+| First-connect tooltip | Suppressed entirely. |
+
+The kill switch preference must also default to **off** while unenforced, so no user carries a stored `true` that implies protection.
+
+When `FreewireHelper` ships: restore the copy specified in SESSION-1, SESSION-2, and `ux-workflows.md`, restore the default to on, and delete this section.
+
+**Resolved design decision (2026-08-21):** if the privileged helper dies unexpectedly while the tunnel is up, `pf` rules **persist** — fail closed. Traffic stays blocked until the user explicitly reconnects or disconnects, consistent with `engineering-handoff.md` §5 ("kill switch never releases automatically without user action"). The tradeoff is accepted: a helper crash can leave the machine without network until Freewire is relaunched.
 
 ---
 

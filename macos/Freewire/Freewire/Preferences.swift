@@ -47,7 +47,9 @@ final class Preferences {
 
     private init() {
         guard !UserDefaults.standard.bool(forKey: Key.initialized) else { return }
-        UserDefaults.standard.set(true, forKey: Key.killSwitch)
+        // Off until FreewireHelper enforces it — a stored `true` would imply a
+        // protection the app cannot deliver.
+        UserDefaults.standard.set(false, forKey: Key.killSwitch)
         UserDefaults.standard.set(true, forKey: Key.autoConnect)
         UserDefaults.standard.set(false, forKey: Key.networkIntelligence)
         UserDefaults.standard.set(true, forKey: Key.initialized)

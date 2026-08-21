@@ -40,9 +40,14 @@ struct PreferencesView: View {
 
             Section("Protection") {
                 VStack(alignment: .leading, spacing: 4) {
+                    // Disabled until FreewireHelper installs the pf rules. The
+                    // control previously defaulted to on and promised protection
+                    // on public networks that nothing enforced. Copy per
+                    // error-states-spec.md "Interim: kill switch not yet enforced".
                     Toggle("Kill switch", isOn: $killSwitch)
                         .onChange(of: killSwitch) { _, v in Preferences.shared.killSwitchEnabled = v }
-                    Text("When on, traffic is blocked if the VPN drops. Prevents accidental exposure on public networks.")
+                        .disabled(true)
+                    Text("Not available yet. When the VPN drops, traffic is not blocked. Coming in a future release.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

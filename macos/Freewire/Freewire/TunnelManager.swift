@@ -8,7 +8,7 @@ enum TunnelState {
     case disconnected
     case connecting(status: String)
     case connected(tunnelIP: String, interfaceName: String, connectedAt: Date, transport: TunnelTransport)
-    case reconnecting(attempt: Int)   // kill switch active; traffic blocked
+    case reconnecting(attempt: Int)   // traffic NOT blocked: kill switch unimplemented
     case blocked                      // all reconnect attempts failed
     case captivePortal(redirectURL: URL?)  // CONN-2a: portal intercepting, need auth
     case networkBlock                 // CONN-2b: hard block, no portal

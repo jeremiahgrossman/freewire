@@ -185,7 +185,7 @@ private struct ReconnectingBody: View {
                 Text("Reconnecting...")
                     .font(.subheadline.weight(.medium))
             }
-            Text("Attempt \(attempt + 1) of 3. Your traffic is blocked until reconnected.")
+            Text("Attempt \(attempt + 1) of 3. Your traffic is not protected while reconnecting.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -210,7 +210,7 @@ private struct BlockedBody: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             StatusRow(symbol: "exclamationmark.circle.fill", label: "Connection lost", color: .red)
-            Text("Your traffic is blocked. Reconnect or disconnect to restore access.")
+            Text("Reconnection failed. Your traffic is not protected. Reconnect or disconnect.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Spacer().frame(height: 4)
