@@ -57,11 +57,8 @@ type icmpSrvSession struct {
 	txSeq    uint32
 	mu       sync.Mutex
 	lastSeen time.Time
-	// Anti-replay state for the inbound direction: the highest sequence seen and
-	// a bitmap of the 64 below it. Without this a captured packet can be replayed
-	// indefinitely — it decrypts cleanly every time, since its nonce is valid.
-	rxHighest uint32
-	rxBitmap  uint64
+	// Anti-replay for the inbound direction. See replayWindow.
+	rx replayWindow
 	// Pending handshake state (before ClientConfirm).
 	serverPriv [32]byte
 	activated  bool
@@ -74,40 +71,6 @@ const (
 	icmpWorkers    = 16
 	icmpQueueDepth = 256
 )
-
-// icmpReplayWindow is how far behind the highest received sequence a packet may
-// arrive and still be accepted. Matches the WireGuard/IPsec convention.
-const icmpReplayWindow = 64
-
-// checkReplay reports whether seq is fresh, recording it when so.
-// Callers must hold sess.mu.
-func (sess *icmpSrvSession) checkReplay(seq uint32) bool {
-	switch {
-	case seq > sess.rxHighest:
-		// Advance the window, shifting the bitmap by the gap.
-		shift := seq - sess.rxHighest
-		if shift >= icmpReplayWindow {
-			sess.rxBitmap = 0
-		} else {
-			sess.rxBitmap <<= shift
-		}
-		sess.rxBitmap |= 1
-		sess.rxHighest = seq
-		return true
-
-	case sess.rxHighest-seq >= icmpReplayWindow:
-		// Too old to prove it is not a replay.
-		return false
-
-	default:
-		bit := uint64(1) << (sess.rxHighest - seq)
-		if sess.rxBitmap&bit != 0 {
-			return false // already seen
-		}
-		sess.rxBitmap |= bit
-		return true
-	}
-}
 
 // NewICMPServer creates an ICMPServer bridging to WireGuard on wgPort.
 func NewICMPServer(wgPort int, log *zap.Logger) *ICMPServer {
@@ -270,54 +233,62 @@ func (s *ICMPServer) handleHello(pkt []byte, srcAddr *net.UDPAddr, conn *net.UDP
 		return
 	}
 
-	// Assign session token (2 random bytes). The space is only 65536 wide, so
-	// collisions are realistic; storing over a live entry would strand that
-	// session's goroutines with no one left to close their channel.
+	// Assign a session token and publish a fully built session under it.
+	//
+	// An earlier version claimed the token with an empty struct and then
+	// assigned through the pointer once the keys were derived. That copied a
+	// struct containing a sync.Mutex, and any DATA or CONFIRM arriving in the
+	// gap would lock a mutex that was being overwritten. It also left a live,
+	// keyless session behind if derivation failed.
+	//
+	// The token space is only 65536 wide, so collisions are realistic and the
+	// claim has to be atomic: overwriting a live entry would strand its
+	// goroutines with nothing left to close their channel.
 	var token [2]byte
-	var tokenKey uint16
-	claimed := false
-	sess := &icmpSrvSession{}
-	for attempt := 0; attempt < 8; attempt++ {
+	var sess *icmpSrvSession
+	for attempt := 0; attempt < 8 && sess == nil; attempt++ {
 		if _, err := rand.Read(token[:]); err != nil {
 			return
 		}
-		tokenKey = binary.BigEndian.Uint16(token[:])
-		if _, loaded := s.sessions.LoadOrStore(tokenKey, sess); !loaded {
-			claimed = true
-			break
+		tokenKey := binary.BigEndian.Uint16(token[:])
+		if _, taken := s.sessions.Load(tokenKey); taken {
+			continue
+		}
+
+		// Derive the session key plus one key per direction. Reading 96 bytes
+		// from a single HKDF stream keeps all three independent. The token is
+		// the salt, so this cannot happen before the token is chosen.
+		var sessionKey, keyC2S, keyS2C [32]byte
+		hk := hkdf.New(sha256.New, shared, token[:], []byte("freewire-icmp-tunnel-v1"))
+		if _, err := io.ReadFull(hk, sessionKey[:]); err != nil {
+			return
+		}
+		if _, err := io.ReadFull(hk, keyC2S[:]); err != nil {
+			return
+		}
+		if _, err := io.ReadFull(hk, keyS2C[:]); err != nil {
+			return
+		}
+
+		candidate := &icmpSrvSession{
+			sessionToken: token,
+			sessionKey:   sessionKey,
+			keyC2S:       keyC2S,
+			keyS2C:       keyS2C,
+			serverPriv:   serverPriv,
+			clientAddr:   srcAddr,
+			activated:    false,
+			lastSeen:     time.Now(),
+			wgInbound:    make(chan []byte, 32),
+		}
+		if _, loaded := s.sessions.LoadOrStore(tokenKey, candidate); !loaded {
+			sess = candidate
 		}
 	}
-	if !claimed {
+	if sess == nil {
 		s.log.Error("icmp server: could not allocate a free session token")
 		return
 	}
-
-	// Derive the session key plus one key per direction. Reading 96 bytes from a
-	// single HKDF stream keeps all three independent.
-	var sessionKey, keyC2S, keyS2C [32]byte
-	hk := hkdf.New(sha256.New, shared, token[:], []byte("freewire-icmp-tunnel-v1"))
-	if _, err := io.ReadFull(hk, sessionKey[:]); err != nil {
-		return
-	}
-	if _, err := io.ReadFull(hk, keyC2S[:]); err != nil {
-		return
-	}
-	if _, err := io.ReadFull(hk, keyS2C[:]); err != nil {
-		return
-	}
-
-	*sess = icmpSrvSession{
-		sessionToken: token,
-		sessionKey:   sessionKey,
-		keyC2S:       keyC2S,
-		keyS2C:       keyS2C,
-		serverPriv:   serverPriv,
-		clientAddr:   srcAddr,
-		activated:    false,
-		lastSeen:     time.Now(),
-		wgInbound:    make(chan []byte, 32),
-	}
-
 	// Send HANDSHAKE_ACK: header(8) + serverPub(32) + token(2) = 42 bytes.
 	ack := make([]byte, 8+32+2)
 	ack[0] = 0x01
@@ -439,7 +410,7 @@ func (s *ICMPServer) handleData(pkt []byte, srcAddr *net.UDPAddr, conn *net.UDPC
 	sess.lastSeen = time.Now()
 	aead := sess.aeadRx
 	seq := binary.BigEndian.Uint32(pkt[4:8])
-	fresh := sess.checkReplay(seq)
+	fresh := sess.rx.accept(seq)
 	sess.mu.Unlock()
 
 	if !fresh {

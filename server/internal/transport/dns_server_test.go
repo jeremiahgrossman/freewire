@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"encoding/binary"
 	"strings"
 	"testing"
@@ -163,5 +164,165 @@ func TestNoncesAreUniquePerSequence(t *testing.T) {
 			t.Errorf("sequences %d and %d produce the same nonce", prev, seq)
 		}
 		seen[n] = seq
+	}
+}
+
+// The server emitted QDCOUNT=0 with no question section while the client's
+// parser unconditionally walks one. Every response was therefore misread: the
+// parser consumed the answer RR's NAME/TYPE/CLASS as the question and took
+// RDLENGTH from inside RDATA. No DNS tunnel session could ever complete.
+//
+// parseLikeClient mirrors tunnel/cmd/freewire-tunnel/dns_client.go's
+// parseTXTResponse so the two stay honest about the same wire format.
+func parseLikeClient(resp []byte) (string, error) {
+	if len(resp) < 12 {
+		return "", errShort
+	}
+	if binary.BigEndian.Uint16(resp[6:8]) == 0 {
+		return "", errNoAnswers
+	}
+	off := 12
+	for off < len(resp) { // question QNAME
+		if resp[off] == 0 {
+			off++
+			break
+		}
+		if resp[off]&0xC0 == 0xC0 {
+			off += 2
+			break
+		}
+		off += int(resp[off]) + 1
+	}
+	off += 4 // QTYPE + QCLASS
+	if off >= len(resp) {
+		return "", errShort
+	}
+	if resp[off]&0xC0 == 0xC0 { // answer NAME
+		off += 2
+	} else {
+		for off < len(resp) {
+			if resp[off] == 0 {
+				off++
+				break
+			}
+			off += int(resp[off]) + 1
+		}
+	}
+	off += 8 // TYPE + CLASS + TTL
+	if off+2 > len(resp) {
+		return "", errShort
+	}
+	rdlen := int(binary.BigEndian.Uint16(resp[off : off+2]))
+	off += 2
+	if off+rdlen > len(resp) {
+		return "", errShort
+	}
+	rdata := resp[off : off+rdlen]
+
+	var out []byte
+	for i := 0; i < len(rdata); {
+		l := int(rdata[i])
+		i++
+		if i+l > len(rdata) {
+			return "", errShort
+		}
+		out = append(out, rdata[i:i+l]...)
+		i += l
+	}
+	return string(out), nil
+}
+
+var (
+	errShort     = fmtErr("truncated")
+	errNoAnswers = fmtErr("no answers")
+)
+
+type fmtErr string
+
+func (e fmtErr) Error() string { return string(e) }
+
+// query builds a realistic request so responses have a question to echo.
+func query(name string) []byte {
+	b := []byte{0xAB, 0xCD, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0}
+	for _, label := range splitDots(name) {
+		b = append(b, byte(len(label)))
+		b = append(b, label...)
+	}
+	b = append(b, 0x00, 0x00, 0x10, 0x00, 0x01)
+	return b
+}
+
+func splitDots(s string) []string {
+	var out []string
+	cur := ""
+	for _, r := range s {
+		if r == '.' {
+			if cur != "" {
+				out = append(out, cur)
+			}
+			cur = ""
+			continue
+		}
+		cur += string(r)
+	}
+	if cur != "" {
+		out = append(out, cur)
+	}
+	return out
+}
+
+func TestTXTResponseRoundTripsThroughClientParser(t *testing.T) {
+	for _, payload := range []string{
+		"OK",
+		"",
+		"AAAABBBBCCCC.DDDDEEEEFFFF",
+		strings.Repeat("X", 400), // spans multiple character-strings
+	} {
+		req := query("t.abc.def.tunnel.freewire.com")
+		got, err := parseLikeClient(buildDNSTXTResponse(req, payload))
+		if err != nil {
+			t.Errorf("payload %d bytes: parse failed: %v", len(payload), err)
+			continue
+		}
+		if got != payload {
+			t.Errorf("payload %d bytes: round trip returned %d bytes, want %d",
+				len(payload), len(got), len(payload))
+		}
+	}
+}
+
+func TestResponseEchoesTheQuestion(t *testing.T) {
+	req := query("h.1.abcdef.tunnel.freewire.com")
+	for name, resp := range map[string][]byte{
+		"TXT":      buildDNSTXTResponse(req, "OK"),
+		"NXDOMAIN": buildDNSNXDomain(req),
+	} {
+		if qd := binary.BigEndian.Uint16(resp[4:6]); qd != 1 {
+			t.Errorf("%s: QDCOUNT = %d, want 1", name, qd)
+		}
+		_, question := dnsIDAndQuestion(req)
+		if !bytes.Equal(resp[12:12+len(question)], question) {
+			t.Errorf("%s: question section not echoed verbatim", name)
+		}
+		if !bytes.Equal(resp[:2], req[:2]) {
+			t.Errorf("%s: query ID not echoed", name)
+		}
+	}
+}
+
+// A bare 2-byte ID must still produce a well-formed response rather than
+// slicing out of range.
+func TestBuildersTolerateAnIDOnlyRequest(t *testing.T) {
+	for name, resp := range map[string][]byte{
+		"TXT":      buildDNSTXTResponse([]byte{0x12, 0x34}, "OK"),
+		"NXDOMAIN": buildDNSNXDomain([]byte{0x12, 0x34}),
+	} {
+		if len(resp) < 12 {
+			t.Errorf("%s: response is %d bytes, want a full header", name, len(resp))
+			continue
+		}
+		if binary.BigEndian.Uint16(resp[4:6]) != 0 {
+			t.Errorf("%s: QDCOUNT should be 0 when there is no question", name)
+		}
 	}
 }

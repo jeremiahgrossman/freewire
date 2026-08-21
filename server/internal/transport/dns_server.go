@@ -12,6 +12,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -30,7 +31,10 @@ import (
 type DNSServer struct {
 	wgPort   int
 	sessions sync.Map // base32(token) → *dnsSession
-	log      *zap.Logger
+	// pending counts sessions awaiting a ClientConfirm, tracked separately so a
+	// hello flood cannot displace established tunnels.
+	pending atomic.Int64
+	log     *zap.Logger
 }
 
 // dnsSession holds the server-side state for one DNS tunnel session.
@@ -49,9 +53,13 @@ type dnsSession struct {
 	localConn *net.UDPConn
 	wgAddr    *net.UDPAddr
 	// Sequence counters.
-	rxSeq uint32
 	txSeq uint32
 	mu    sync.Mutex
+	// Anti-replay for the inbound direction. The ICMP transport received this
+	// protection; the DNS one did not, so a captured query decrypted cleanly
+	// every time it was resent -- and on this path the local resolver and the
+	// portal operator both see every query. See replayWindow.
+	rx replayWindow
 	// Handshake state: pending until ClientConfirm received.
 	serverPriv [32]byte
 	serverPub  []byte
@@ -66,6 +74,19 @@ type dnsSession struct {
 const (
 	dnsWorkers    = 16
 	dnsQueueDepth = 256
+)
+
+// maxPendingDNSSessions caps sessions that have completed a ClientHello but not
+// a ClientConfirm.
+//
+// A hello is unauthenticated -- possession is only proven by the confirm that
+// follows -- so without a ceiling anyone can allocate sessions at line rate.
+// Each carries two keys, a 32-slot channel and map overhead, and lived for the
+// full 90s eviction window. Pending sessions are also evicted far sooner than
+// established ones, so a flood cannot crowd out live tunnels.
+const (
+	maxPendingDNSSessions = 256
+	pendingDNSSessionTTL  = 10 * time.Second
 )
 
 var srvB32enc = base32.StdEncoding.WithPadding(base32.NoPadding)
@@ -149,12 +170,23 @@ func (s *DNSServer) evictLoop(ctx context.Context) {
 				sess.mu.Lock()
 				ls := sess.lastSeen
 				sess.mu.Unlock()
-				if now.Sub(ls) > 90*time.Second {
+				sess.mu.Lock()
+				active := sess.activated
+				sess.mu.Unlock()
+
+				ttl := 90 * time.Second
+				if !active {
+					ttl = pendingDNSSessionTTL
+				}
+				if now.Sub(ls) > ttl {
 					s.sessions.Delete(k)
+					if !active {
+						s.pending.Add(-1)
+					}
 					if sess.localConn != nil {
 						sess.localConn.Close()
 					}
-					s.log.Info("dns server: session evicted")
+					s.log.Info("dns server: session evicted", zap.Bool("established", active))
 				}
 				return true
 			})
@@ -167,17 +199,19 @@ func (s *DNSServer) handleQuery(buf []byte, srcAddr *net.UDPAddr, conn *net.UDPC
 	if len(buf) < 12 {
 		return
 	}
-	qid := buf[:2] // DNS query ID to echo in response
+	// The whole request travels with the handlers: responses must echo the
+	// question section, not just the ID.
+	req := buf
 
 	// Parse the question QNAME.
 	name, err := extractQNAME(buf, 12)
 	if err != nil {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 	name = strings.ToUpper(strings.TrimSuffix(name, "."))
 	if !strings.HasSuffix(name, dnsTunnelSuffix) {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 	// Strip the tunnel domain suffix.
@@ -185,62 +219,62 @@ func (s *DNSServer) handleQuery(buf []byte, srcAddr *net.UDPAddr, conn *net.UDPC
 
 	parts := strings.Split(label, ".")
 	if len(parts) < 2 {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 
 	switch strings.ToUpper(parts[0]) {
 	case "H":
-		s.handleHandshake(conn, srcAddr, qid, parts[1:])
+		s.handleHandshake(conn, srcAddr, req, parts[1:])
 	case "T":
-		s.handleData(conn, srcAddr, qid, parts[1:])
+		s.handleData(conn, srcAddr, req, parts[1:])
 	case "K":
-		s.handleKeepalive(conn, srcAddr, qid, parts[1:])
+		s.handleKeepalive(conn, srcAddr, req, parts[1:])
 	default:
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 	}
 }
 
 // handleHandshake dispatches h.1.* (ClientHello) and h.3.* (ClientConfirm).
-func (s *DNSServer) handleHandshake(conn *net.UDPConn, srcAddr *net.UDPAddr, qid []byte, parts []string) {
+func (s *DNSServer) handleHandshake(conn *net.UDPConn, srcAddr *net.UDPAddr, req []byte, parts []string) {
 	if len(parts) < 1 {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 	switch parts[0] {
 	case "1":
 		// ClientHello: parts[1] = b32(clientPub)
 		if len(parts) < 2 {
-			s.sendNXDomain(conn, srcAddr, qid)
+			s.sendNXDomain(conn, srcAddr, req)
 			return
 		}
-		s.handleClientHello(conn, srcAddr, qid, parts[1])
+		s.handleClientHello(conn, srcAddr, req, parts[1])
 	case "3":
 		// ClientConfirm: parts[1] = b32(mac), parts[2] = b32(token)
 		if len(parts) < 3 {
-			s.sendNXDomain(conn, srcAddr, qid)
+			s.sendNXDomain(conn, srcAddr, req)
 			return
 		}
-		s.handleClientConfirm(conn, srcAddr, qid, parts[1], parts[2])
+		s.handleClientConfirm(conn, srcAddr, req, parts[1], parts[2])
 	default:
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 	}
 }
 
 // handleClientHello processes a ClientHello query and sends ServerHello TXT response.
 // TXT value: <b32(serverPub)>.<b32(token)>
-func (s *DNSServer) handleClientHello(conn *net.UDPConn, srcAddr *net.UDPAddr, qid []byte, clientPubB32 string) {
+func (s *DNSServer) handleClientHello(conn *net.UDPConn, srcAddr *net.UDPAddr, req []byte, clientPubB32 string) {
 	clientPub, err := srvB32enc.DecodeString(clientPubB32)
 	if err != nil {
 		s.log.Error("dns: decode client pub", zap.Error(err))
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 
 	// Generate server ephemeral keypair.
 	var serverPriv [32]byte
 	if _, err := rand.Read(serverPriv[:]); err != nil {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 	serverPriv[0] &= 248
@@ -248,21 +282,28 @@ func (s *DNSServer) handleClientHello(conn *net.UDPConn, srcAddr *net.UDPAddr, q
 
 	serverPub, err := curve25519.X25519(serverPriv[:], curve25519.Basepoint)
 	if err != nil {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 
 	// DH shared secret.
 	shared, err := curve25519.X25519(serverPriv[:], clientPub)
 	if err != nil {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
+		return
+	}
+
+	// Refuse to allocate past the pending ceiling.
+	if s.pending.Load() >= maxPendingDNSSessions {
+		s.log.Warn("dns: pending session limit reached; rejecting hello")
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 
 	// Generate session token (10 bytes).
 	var token [10]byte
 	if _, err := rand.Read(token[:]); err != nil {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 
@@ -272,15 +313,15 @@ func (s *DNSServer) handleClientHello(conn *net.UDPConn, srcAddr *net.UDPAddr, q
 	var sessionKey, keyC2S, keyS2C [32]byte
 	hk := hkdf.New(sha256.New, shared, token[:], []byte("freewire-dns-tunnel-v1"))
 	if _, err := io.ReadFull(hk, sessionKey[:]); err != nil {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 	if _, err := io.ReadFull(hk, keyC2S[:]); err != nil {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 	if _, err := io.ReadFull(hk, keyS2C[:]); err != nil {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 
@@ -302,53 +343,67 @@ func (s *DNSServer) handleClientHello(conn *net.UDPConn, srcAddr *net.UDPAddr, q
 	}
 	key := srvB32enc.EncodeToString(token[:])
 	s.sessions.Store(key, sess)
+	s.pending.Add(1)
 
 	// Build TXT response: <b32(serverPub)>.<b32(token)>
 	txt := srvB32enc.EncodeToString(serverPub) + "." + srvB32enc.EncodeToString(token[:])
-	resp := buildDNSTXTResponse(qid, txt)
+	resp := buildDNSTXTResponse(req, txt)
 	conn.WriteToUDP(resp, srcAddr) //nolint:errcheck
 }
 
 // handleClientConfirm activates the session after verifying the client's MAC.
-func (s *DNSServer) handleClientConfirm(conn *net.UDPConn, srcAddr *net.UDPAddr, qid []byte, macB32, tokenB32 string) {
+func (s *DNSServer) handleClientConfirm(conn *net.UDPConn, srcAddr *net.UDPAddr, req []byte, macB32, tokenB32 string) {
 	v, ok := s.sessions.Load(strings.ToUpper(tokenB32))
 	if !ok {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 	sess := v.(*dnsSession)
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 
+	// Activation is idempotent. The client retransmits CONFIRM whenever the OK
+	// response is lost, which is routine on the lossy networks this transport
+	// exists for. Re-activating would dial a second bridge socket, overwrite
+	// localConn, and strand the first socket and its reader goroutine with
+	// nothing left holding a reference to close them. The ACK is re-sent
+	// because dropping the retransmit silently leaves the client waiting out
+	// its handshake timeout.
+	if sess.activated {
+		sess.lastSeen = time.Now()
+		conn.WriteToUDP(buildDNSTXTResponse(req, "OK"), srcAddr) //nolint:errcheck
+		return
+	}
+
 	clientMAC, err := srvB32enc.DecodeString(macB32)
 	if err != nil || !hmacEqual(clientMAC, sess.confirmMAC) {
 		s.log.Error("dns: client confirm MAC mismatch")
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 
 	// Build both AEADs once; the keys are fixed for the session lifetime.
 	aeadRx, err := chacha20poly1305.New(sess.keyC2S[:])
 	if err != nil {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 	aeadTx, err := chacha20poly1305.New(sess.keyS2C[:])
 	if err != nil {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 
 	// Activate session: open per-session WG bridge socket.
 	wgAddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("127.0.0.1:%d", s.wgPort))
 	if err != nil {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 	uc, err := net.DialUDP("udp4", nil, wgAddr)
 	if err != nil {
 		s.log.Error("dns: dial wg udp", zap.Error(err))
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 	sess.aeadRx = aeadRx
@@ -356,6 +411,7 @@ func (s *DNSServer) handleClientConfirm(conn *net.UDPConn, srcAddr *net.UDPAddr,
 	sess.localConn = uc
 	sess.wgAddr = wgAddr
 	sess.activated = true
+	s.pending.Add(-1) // promoted from pending to established
 	sess.lastSeen = time.Now()
 
 	// Start goroutine to read WG responses for piggybacking.
@@ -377,21 +433,21 @@ func (s *DNSServer) handleClientConfirm(conn *net.UDPConn, srcAddr *net.UDPAddr,
 	}()
 
 	s.log.Info("dns: session activated")
-	resp := buildDNSTXTResponse(qid, "OK")
+	resp := buildDNSTXTResponse(req, "OK")
 	conn.WriteToUDP(resp, srcAddr) //nolint:errcheck
 }
 
 // handleData processes a data query: decrypt, forward to WG, piggyback response.
-func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, qid []byte, parts []string) {
+func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, req []byte, parts []string) {
 	// parts[0] = b32(seq), parts[1] = b32(token), parts[2..] = b32(ciphertext) chunks
 	if len(parts) < 3 {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 	tokenB32 := parts[1]
 	v, ok := s.sessions.Load(strings.ToUpper(tokenB32))
 	if !ok {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 	sess := v.(*dnsSession)
@@ -402,7 +458,7 @@ func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, qid []by
 	sess.mu.Lock()
 	if !sess.activated {
 		sess.mu.Unlock()
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 	sess.lastSeen = time.Now()
@@ -411,20 +467,29 @@ func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, qid []by
 	localConn := sess.localConn
 	txSeq := sess.txSeq
 	sess.txSeq++
-	sess.mu.Unlock()
 
-	seqBytes, err := srvB32enc.DecodeString(parts[0])
-	if err != nil || len(seqBytes) != 4 {
-		s.sendNXDomain(conn, srcAddr, qid)
+	seqBytes, decErr := srvB32enc.DecodeString(parts[0])
+	if decErr != nil || len(seqBytes) != 4 {
+		sess.mu.Unlock()
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 	seq := binary.BigEndian.Uint32(seqBytes)
+
+	// Checked before decryption so a replay flood costs no AEAD work.
+	fresh := sess.rx.accept(seq)
+	sess.mu.Unlock()
+
+	if !fresh {
+		s.sendNXDomain(conn, srcAddr, req)
+		return
+	}
 
 	// Join all remaining label chunks as the ciphertext (they were split at 63 chars).
 	cipherB32 := strings.Join(parts[2:], "")
 	ciphertext, err := srvB32enc.DecodeString(cipherB32)
 	if err != nil {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 
@@ -433,7 +498,7 @@ func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, qid []by
 	plain, err := rxAEAD.Open(nil, nonce[:], ciphertext, nil)
 	if err != nil {
 		s.log.Error("dns: decrypt data", zap.Error(err))
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 
@@ -449,7 +514,7 @@ func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, qid []by
 
 	if len(wgPkt) == 0 {
 		// Nothing to piggyback — send empty ACK.
-		resp := buildDNSTXTResponse(qid, "")
+		resp := buildDNSTXTResponse(req, "")
 		conn.WriteToUDP(resp, srcAddr) //nolint:errcheck
 		return
 	}
@@ -462,19 +527,19 @@ func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, qid []by
 	txSeqB32 := srvB32enc.EncodeToString(uint32BESrv(txSeq))
 	encB32 := srvB32enc.EncodeToString(encrypted)
 	txt := txSeqB32 + "." + encB32
-	resp := buildDNSTXTResponse(qid, txt)
+	resp := buildDNSTXTResponse(req, txt)
 	conn.WriteToUDP(resp, srcAddr) //nolint:errcheck
 }
 
 // handleKeepalive updates the session lastSeen timestamp and responds with "K".
-func (s *DNSServer) handleKeepalive(conn *net.UDPConn, srcAddr *net.UDPAddr, qid []byte, parts []string) {
+func (s *DNSServer) handleKeepalive(conn *net.UDPConn, srcAddr *net.UDPAddr, req []byte, parts []string) {
 	if len(parts) < 1 {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 	v, ok := s.sessions.Load(strings.ToUpper(parts[0]))
 	if !ok {
-		s.sendNXDomain(conn, srcAddr, qid)
+		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 	sess := v.(*dnsSession)
@@ -482,13 +547,13 @@ func (s *DNSServer) handleKeepalive(conn *net.UDPConn, srcAddr *net.UDPAddr, qid
 	sess.lastSeen = time.Now()
 	sess.mu.Unlock()
 
-	resp := buildDNSTXTResponse(qid, "K")
+	resp := buildDNSTXTResponse(req, "K")
 	conn.WriteToUDP(resp, srcAddr) //nolint:errcheck
 }
 
 // sendNXDomain sends a DNS NXDOMAIN response.
-func (s *DNSServer) sendNXDomain(conn *net.UDPConn, srcAddr *net.UDPAddr, qid []byte) {
-	resp := buildDNSNXDomain(qid)
+func (s *DNSServer) sendNXDomain(conn *net.UDPConn, srcAddr *net.UDPAddr, req []byte) {
+	resp := buildDNSNXDomain(req)
 	conn.WriteToUDP(resp, srcAddr) //nolint:errcheck
 }
 
@@ -517,16 +582,32 @@ func extractQNAME(buf []byte, offset int) (string, error) {
 // buildDNSTXTResponse builds a minimal DNS TXT response packet.
 // A single TXT character-string is limited to 255 bytes by RFC 1035 §3.3.14.
 // Longer payloads are split into multiple character-strings within one RDATA.
-func buildDNSTXTResponse(qid []byte, txt string) []byte {
+func buildDNSTXTResponse(req []byte, txt string) []byte {
+	id, question := dnsIDAndQuestion(req)
+
 	var buf []byte
-	buf = append(buf, qid...)
+	buf = append(buf, id...)
 	buf = append(buf, 0x84, 0x00) // flags: QR=1, AA=1, RCODE=0
-	buf = append(buf, 0x00, 0x00) // QDCOUNT = 0 (we omit the question section in response)
+	// The question section is echoed back. Emitting QDCOUNT=0 and starting the
+	// answer at offset 12 makes every RFC 1035 parser -- including this
+	// project's own client -- read the answer RR as the question and then take
+	// RDLENGTH from inside RDATA.
+	if len(question) > 0 {
+		buf = append(buf, 0x00, 0x01) // QDCOUNT = 1
+	} else {
+		buf = append(buf, 0x00, 0x00)
+	}
 	buf = append(buf, 0x00, 0x01) // ANCOUNT = 1
 	buf = append(buf, 0x00, 0x00) // NSCOUNT = 0
 	buf = append(buf, 0x00, 0x00) // ARCOUNT = 0
+	buf = append(buf, question...)
 
-	buf = append(buf, 0x00)                   // NAME = root label
+	if len(question) > 0 {
+		// Compression pointer back to the question name at offset 12.
+		buf = append(buf, 0xC0, 0x0C)
+	} else {
+		buf = append(buf, 0x00) // NAME = root label
+	}
 	buf = append(buf, 0x00, 0x10)             // TYPE = TXT (16)
 	buf = append(buf, 0x00, 0x01)             // CLASS = IN
 	buf = append(buf, 0x00, 0x00, 0x00, 0x3C) // TTL = 60
@@ -553,15 +634,56 @@ func buildDNSTXTResponse(qid []byte, txt string) []byte {
 }
 
 // buildDNSNXDomain builds a minimal DNS NXDOMAIN response.
-func buildDNSNXDomain(qid []byte) []byte {
+func buildDNSNXDomain(req []byte) []byte {
+	id, question := dnsIDAndQuestion(req)
+
 	var buf []byte
-	buf = append(buf, qid...)
+	buf = append(buf, id...)
 	buf = append(buf, 0x84, 0x03) // flags: QR=1, AA=1, RCODE=NXDOMAIN(3)
-	buf = append(buf, 0x00, 0x00) // QDCOUNT=0
+	if len(question) > 0 {
+		buf = append(buf, 0x00, 0x01) // QDCOUNT = 1
+	} else {
+		buf = append(buf, 0x00, 0x00)
+	}
 	buf = append(buf, 0x00, 0x00) // ANCOUNT=0
 	buf = append(buf, 0x00, 0x00) // NSCOUNT=0
 	buf = append(buf, 0x00, 0x00) // ARCOUNT=0
+	buf = append(buf, question...)
 	return buf
+}
+
+// dnsIDAndQuestion splits a request into its 2-byte ID and the raw bytes of its
+// question section (QNAME + QTYPE + QCLASS), ready to be echoed verbatim.
+//
+// Callers may pass a bare 2-byte ID, in which case the question is empty.
+func dnsIDAndQuestion(req []byte) (id, question []byte) {
+	if len(req) < 2 {
+		return make([]byte, 2), nil
+	}
+	id = req[:2]
+	if len(req) < 12 {
+		return id, nil
+	}
+
+	// Walk the QNAME labels to find where the question ends.
+	off := 12
+	for off < len(req) {
+		l := int(req[off])
+		if l == 0 {
+			off++
+			break
+		}
+		if l&0xC0 == 0xC0 { // compression pointer: 2 bytes, no further labels
+			off += 2
+			break
+		}
+		off += l + 1
+	}
+	off += 4 // QTYPE + QCLASS
+	if off > len(req) {
+		return id, nil
+	}
+	return id, req[12:off]
 }
 
 // srvDNSNonceInto writes a 12-byte ChaCha20-Poly1305 nonce into out:
