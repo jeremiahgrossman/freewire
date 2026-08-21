@@ -298,6 +298,44 @@ const tunnelProbeAddr = "1.1.1.1:53"
 // remove exactly what was added.
 var bypassRoutes []string
 
+// pinnedRoutesFile records pinned host routes so a run that dies without
+// cleaning up can be repaired by the next one.
+//
+// The split-default routes heal themselves: they are bound to the utun
+// interface, so the kernel drops them when it disappears. Pinned host routes do
+// not -- they sit on a physical interface, they are static, and they outlive the
+// process. A stale pin for a gateway or resolver breaks that network the next
+// time the machine joins it, because a static route is not corrected by ARP or
+// DHCP. That is not a hypothetical: a SIGKILL during testing left a pin on a
+// home router and broke wifi.
+const pinnedRoutesFile = "/var/run/freewire-pinned-routes"
+
+// releaseStalePins removes host routes left behind by a previous run.
+func releaseStalePins() {
+	data, err := os.ReadFile(pinnedRoutesFile)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		ip := strings.TrimSpace(line)
+		if ip == "" || net.ParseIP(ip) == nil {
+			continue
+		}
+		exec.Command("route", "-q", "-n", "delete", "-host", ip).Run() //nolint:errcheck
+		fmt.Fprintf(os.Stderr, "freewire-tunnel: released a stale pinned route for %s\n", ip)
+	}
+	os.Remove(pinnedRoutesFile) //nolint:errcheck
+}
+
+// recordPins persists the current pin list so a crash can be repaired later.
+func recordPins() {
+	if len(bypassRoutes) == 0 {
+		os.Remove(pinnedRoutesFile) //nolint:errcheck
+		return
+	}
+	os.WriteFile(pinnedRoutesFile, []byte(strings.Join(bypassRoutes, "\n")), 0644) //nolint:errcheck
+}
+
 // setupRouting sends all traffic through the tunnel.
 //
 // Two halves, in this order:
@@ -314,6 +352,9 @@ var bypassRoutes []string
 // fails with "file exists" while the original default survives. Traffic kept
 // flowing outside the tunnel while the client reported "Protected".
 func setupRouting(tunName, bypassHost string) error {
+	// Repair anything a previous run left behind before adding more.
+	releaseStalePins()
+
 	// Resolve bypass host to an IP if needed.
 	bypassIP := bypassHost
 	if bypassHost != "" && net.ParseIP(bypassHost) == nil {
@@ -428,6 +469,7 @@ func pinOutsideTunnel(ip string) error {
 		return fmt.Errorf("%w — %s", err, strings.TrimSpace(string(out)))
 	}
 	bypassRoutes = append(bypassRoutes, ip)
+	recordPins()
 	return nil
 }
 
@@ -485,6 +527,7 @@ func cleanupRouting(tunName, bypassHost string) {
 		exec.Command("route", "-q", "-n", "delete", "-host", ip).Run() //nolint:errcheck
 	}
 	bypassRoutes = nil
+	recordPins()
 }
 
 // configureInterface sets the point-to-point tunnel address and MTU.
