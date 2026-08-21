@@ -29,6 +29,21 @@ type Config struct {
 	ServerTunnelIP  string `json:"server_tunnel_ip"`  // e.g. 10.0.0.1
 	Keepalive       int    `json:"keepalive"`         // seconds, typically 25
 	InsecureTLS     bool   `json:"insecure_tls"`      // dev only: skip cert verify
+	TLSPort         int    `json:"tls_port"`          // default 443; override for dev (e.g. 8443)
+	DNSTunnelPort   int    `json:"dns_tunnel_port"`   // default 53; override for dev (e.g. 5353)
+	ICMPUDPPort     int    `json:"icmp_udp_port"`     // default 4500
+}
+
+func (c *Config) applyDefaults() {
+	if c.TLSPort == 0 {
+		c.TLSPort = 443
+	}
+	if c.DNSTunnelPort == 0 {
+		c.DNSTunnelPort = 53
+	}
+	if c.ICMPUDPPort == 0 {
+		c.ICMPUDPPort = 4500
+	}
 }
 
 // oldGateway is set during setupRouting so cleanupRouting can restore it.
@@ -40,6 +55,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "freewire-tunnel: config: %v\n", err)
 		os.Exit(1)
 	}
+	cfg.applyDefaults()
 
 	privKeyHex, err := b64ToHex(cfg.PrivateKey)
 	if err != nil {

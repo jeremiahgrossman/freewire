@@ -36,7 +36,14 @@ type ICMPServer struct {
 // icmpSrvSession holds the server-side state for one ICMP/UDP tunnel session.
 type icmpSrvSession struct {
 	sessionToken [2]byte
-	sessionKey   [32]byte
+	// Directional keys. Both peers number their packets from zero, so a single
+	// shared key would produce the same (key, nonce) pair for the first packet
+	// in each direction — catastrophic for ChaCha20-Poly1305. Separate keys per
+	// direction keep every nonce unique under its own key.
+	keyC2S [32]byte // client → server: server opens with this
+	keyS2C [32]byte // server → client: server seals with this
+	// sessionKey is retained only to authenticate the ClientConfirm MAC.
+	sessionKey [32]byte
 	// Client address — all responses go here.
 	clientAddr *net.UDPAddr
 	// Per-session WG bridge socket.
@@ -197,16 +204,25 @@ func (s *ICMPServer) handleHello(pkt []byte, srcAddr *net.UDPAddr, conn *net.UDP
 		return
 	}
 
-	// Derive session key.
-	var sessionKey [32]byte
+	// Derive the session key plus one key per direction. Reading 96 bytes from a
+	// single HKDF stream keeps all three independent.
+	var sessionKey, keyC2S, keyS2C [32]byte
 	hk := hkdf.New(sha256.New, shared, token[:], []byte("freewire-icmp-tunnel-v1"))
 	if _, err := io.ReadFull(hk, sessionKey[:]); err != nil {
+		return
+	}
+	if _, err := io.ReadFull(hk, keyC2S[:]); err != nil {
+		return
+	}
+	if _, err := io.ReadFull(hk, keyS2C[:]); err != nil {
 		return
 	}
 
 	sess := &icmpSrvSession{
 		sessionToken: token,
 		sessionKey:   sessionKey,
+		keyC2S:       keyC2S,
+		keyS2C:       keyS2C,
 		serverPriv:   serverPriv,
 		clientAddr:   srcAddr,
 		activated:    false,
@@ -283,7 +299,7 @@ func (s *ICMPServer) handleConfirm(pkt []byte, srcAddr *net.UDPAddr, conn *net.U
 			sess.mu.Lock()
 			seq := sess.txSeq
 			sess.txSeq++
-			key := sess.sessionKey
+			key := sess.keyS2C
 			tok := sess.sessionToken
 			clientA := sess.clientAddr
 			sess.mu.Unlock()
@@ -319,7 +335,7 @@ func (s *ICMPServer) handleData(pkt []byte, srcAddr *net.UDPAddr, conn *net.UDPC
 		return
 	}
 	sess.lastSeen = time.Now()
-	key := sess.sessionKey
+	key := sess.keyC2S
 	sess.mu.Unlock()
 
 	hdr := pkt[:8]

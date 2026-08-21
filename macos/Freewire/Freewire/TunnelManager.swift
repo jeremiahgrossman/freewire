@@ -28,13 +28,33 @@ enum TunnelState {
 
 // MARK: - Manager
 
+/// Lock-guarded box for the active peer token.
+///
+/// Termination handlers run on the main thread and cannot `await` a main-actor
+/// property without deadlocking, so the token is mirrored here where any thread
+/// can read it synchronously.
+final class PeerTokenBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: String?
+
+    var token: String? {
+        get { lock.lock(); defer { lock.unlock() }; return value }
+        set { lock.lock(); defer { lock.unlock() }; value = newValue }
+    }
+}
+
 @MainActor
 final class TunnelManager: ObservableObject {
     @Published private(set) var state: TunnelState = .disconnected
 
     private let api: ServerAPI
     private let identity: DeviceIdentity
-    private var peerToken: String?
+    let peerTokenBox = PeerTokenBox()
+
+    private var peerToken: String? {
+        get { peerTokenBox.token }
+        set { peerTokenBox.token = newValue }
+    }
     private var networkMonitor: NetworkMonitor?
     private var watchTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
@@ -43,6 +63,21 @@ final class TunnelManager: ObservableObject {
     init(api: ServerAPI, identity: DeviceIdentity) {
         self.api = api
         self.identity = identity
+    }
+
+    /// Certificate verification is skipped only for servers on loopback or a
+    /// private network, where a self-signed development certificate is expected.
+    /// Any routable host must present a valid CA-signed certificate.
+    private var allowsSelfSignedCert: Bool {
+        let h = api.serverHost
+        if h == "localhost" || h == "::1" || h.hasPrefix("127.") { return true }
+        if h.hasPrefix("10.") || h.hasPrefix("192.168.") { return true }
+        // 172.16.0.0/12
+        if h.hasPrefix("172.") {
+            let octet = h.dropFirst(4).prefix { $0.isNumber }
+            if let n = Int(octet), (16...31).contains(n) { return true }
+        }
+        return false
     }
 
     // MARK: - Public API
@@ -108,7 +143,10 @@ final class TunnelManager: ObservableObject {
                 tunnelIP:        peer.tunnelIP,
                 serverTunnelIP:  "10.0.0.1",
                 keepalive:       peer.keepaliveInterval,
-                insecureTLS:     true
+                insecureTLS:     allowsSelfSignedCert,
+                tlsPort:         server.tlsEndpointPort,
+                dnsTunnelPort:   server.dnsTunnelPort,
+                icmpUDPPort:     server.icmpUDPPort
             )
 
             let (ifName, transport) = try await launchTunnel(config: cfg)
@@ -165,7 +203,10 @@ final class TunnelManager: ObservableObject {
                     tunnelIP:        peer.tunnelIP,
                     serverTunnelIP:  "10.0.0.1",
                     keepalive:       peer.keepaliveInterval,
-                    insecureTLS:     true
+                    insecureTLS:     allowsSelfSignedCert,
+                    tlsPort:         server.tlsEndpointPort,
+                    dnsTunnelPort:   server.dnsTunnelPort,
+                    icmpUDPPort:     server.icmpUDPPort
                 )
 
                 let (ifName, transport) = try await launchTunnel(config: cfg)
@@ -230,7 +271,10 @@ final class TunnelManager: ObservableObject {
                 tunnelIP:        peer.tunnelIP,
                 serverTunnelIP:  "10.0.0.1",
                 keepalive:       peer.keepaliveInterval,
-                insecureTLS:     true
+                insecureTLS:     allowsSelfSignedCert,
+                tlsPort:         server.tlsEndpointPort,
+                dnsTunnelPort:   server.dnsTunnelPort,
+                icmpUDPPort:     server.icmpUDPPort
             )
             let (ifName, newTransport) = try await launchTunnel(config: cfg)
             state = .connected(
@@ -338,7 +382,7 @@ final class TunnelManager: ObservableObject {
             return bundled
         }
         let dev = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Claude/Projects/Freewire VPN/tunnel/freewire-tunnel")
+            .appendingPathComponent("Claude/Projects/FreewireVPN/tunnel/freewire-tunnel")
         return FileManager.default.isExecutableFile(atPath: dev.path) ? dev : nil
     }
 
@@ -349,28 +393,32 @@ final class TunnelManager: ObservableObject {
 
         let tmp        = FileManager.default.temporaryDirectory
         let uid        = UUID().uuidString
-        let configFile = tmp.appendingPathComponent("fw-cfg-\(uid).json")
         let readyFile  = tmp.appendingPathComponent("fw-ready-\(uid).txt")
         let scriptFile = tmp.appendingPathComponent("fw-launch-\(uid).sh")
 
+        // The config carries the WireGuard private key, which must never touch
+        // disk. It goes to the helper over a stdin pipe; only the ready line
+        // comes back through a file.
         let configData = try JSONEncoder().encode(config)
-        try configData.write(to: configFile, options: .atomic)
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configFile.path)
-        defer { try? FileManager.default.removeItem(at: configFile) }
         defer { try? FileManager.default.removeItem(at: scriptFile) }
 
         let helperPath = helperURL.path
-        let script = "#!/bin/sh\nexec '\(helperPath)' < '\(configFile.path)' > '\(readyFile.path)' 2>&1\n"
+        let script = "#!/bin/sh\nexec '\(helperPath)' > '\(readyFile.path)' 2>&1\n"
         try script.write(to: scriptFile, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptFile.path)
 
-        Task.detached { [scriptFile] in
+        Task.detached { [scriptFile, configData] in
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
             p.arguments = [scriptFile.path]
             p.standardOutput = FileHandle.nullDevice
             p.standardError  = FileHandle.nullDevice
+
+            let stdin = Pipe()
+            p.standardInput = stdin
             try? p.run()
+            try? stdin.fileHandleForWriting.write(contentsOf: configData)
+            try? stdin.fileHandleForWriting.close()
             p.waitUntilExit()
         }
 
@@ -433,6 +481,9 @@ private struct TunnelConfig: Encodable {
     let serverTunnelIP:  String
     let keepalive:       Int
     let insecureTLS:     Bool
+    let tlsPort:         Int
+    let dnsTunnelPort:   Int
+    let icmpUDPPort:     Int
 
     enum CodingKeys: String, CodingKey {
         case privateKey      = "private_key"
@@ -443,6 +494,9 @@ private struct TunnelConfig: Encodable {
         case serverTunnelIP  = "server_tunnel_ip"
         case keepalive
         case insecureTLS     = "insecure_tls"
+        case tlsPort         = "tls_port"
+        case dnsTunnelPort   = "dns_tunnel_port"
+        case icmpUDPPort     = "icmp_udp_port"
     }
 }
 

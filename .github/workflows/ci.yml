@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  privacy:
+    name: Privacy constraints
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Constraint 1: client IPs must never reach a log line. The data must not
+      # exist, so the check is on the symbol appearing at all in server code.
+      - name: No RemoteAddr in server or tunnel code
+        run: |
+          # Strip // comments before matching so the rule can be discussed in
+          # prose without tripping itself.
+          if grep -rn --include='*.go' 'RemoteAddr' server/ tunnel/ \
+             | grep -v -E ':[0-9]+:\s*//'; then
+            echo "::error::RemoteAddr is banned — client IPs must never enter a code path that could log them."
+            exit 1
+          fi
+          echo "ok: no RemoteAddr references"
+
+      # Constraint 2: the WireGuard private key never leaves the device. Catch
+      # the obvious regression of logging or persisting it server-side.
+      - name: No private key logging
+        run: |
+          if grep -rn --include='*.go' -E 'zap\.(String|Any)\("(private_key|privateKey)"' server/ tunnel/; then
+            echo "::error::Private key must never be written to a log."
+            exit 1
+          fi
+          echo "ok: no private key logging"
+
+  server:
+    name: Server (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: server/go.sum
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test -race -count=1 ./...
+
+      - name: Static binary builds for linux/amd64
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ./cmd/freewire-server
+
+  tunnel:
+    name: Tunnel (Go)
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: tunnel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: tunnel/go.sum
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test -race -count=1 ./...
+
+  macos:
+    name: macOS app (Swift)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: |
+          xcodebuild build \
+            -project macos/Freewire/Freewire.xcodeproj \
+            -scheme Freewire \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO \
+            | xcpretty || xcodebuild build \
+            -project macos/Freewire/Freewire.xcodeproj \
+            -scheme Freewire \
+            -configuration Debug \
+            CODE_SIGNING_ALLOWED=NO

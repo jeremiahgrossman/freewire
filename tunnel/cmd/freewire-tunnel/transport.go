@@ -2,14 +2,22 @@ package main
 
 import (
 	"bufio"
-	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
+)
+
+// Per-path budgets from the fallback chain spec. Each is the ceiling for the
+// whole path, including every retry inside it, so the chain reaches a verdict
+// within its ~10s total.
+const (
+	httpConnectBudget = 2 * time.Second
+	tls443Budget      = 3 * time.Second
 )
 
 // selectTransport tries each path in order per the fallback chain spec.
@@ -64,13 +72,23 @@ func tryHTTPConnect(cfg Config) (net.Conn, error) {
 	ports := []string{"3128", "8080", "443"}
 	target := "vpn.freewire.com:443"
 
+	// The spec budgets 2s for this path in total, not per port. Every dial,
+	// CONNECT exchange, and TLS handshake below shares this one deadline so
+	// three unreachable ports cannot stretch the fallback chain past its budget.
+	overall := time.Now().Add(httpConnectBudget)
+
 	for _, port := range ports {
+		remaining := time.Until(overall)
+		if remaining <= 0 {
+			break
+		}
+
 		proxyAddr := net.JoinHostPort(gw, port)
-		c, dialErr := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+		c, dialErr := net.DialTimeout("tcp", proxyAddr, remaining)
 		if dialErr != nil {
 			continue
 		}
-		c.SetDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+		c.SetDeadline(overall) //nolint:errcheck
 
 		// Send HTTP CONNECT request.
 		req := "CONNECT " + target + " HTTP/1.1\r\n" +
@@ -99,18 +117,18 @@ func tryHTTPConnect(cfg Config) (net.Conn, error) {
 
 		c.SetDeadline(time.Time{}) //nolint:errcheck
 
-		// Upgrade to TLS inside the CONNECT tunnel.
-		tlsCfg := &tls.Config{
-			ServerName:         "vpn.freewire.com",
-			InsecureSkipVerify: cfg.InsecureTLS, //nolint:gosec
+		// Upgrade to TLS inside the CONNECT tunnel, mimicking a browser
+		// fingerprint so DPI cannot identify the handshake.
+		hsBudget := time.Until(overall)
+		if hsBudget <= 0 {
+			c.Close()
+			break
 		}
-		tlsConn := tls.Client(c, tlsCfg)
-		tlsConn.SetDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
-		if hsErr := tlsConn.Handshake(); hsErr != nil {
-			tlsConn.Close()
+		tlsConn, hsErr := utlsHandshake(c, "vpn.freewire.com", cfg.InsecureTLS, hsBudget)
+		if hsErr != nil {
+			c.Close()
 			continue
 		}
-		tlsConn.SetDeadline(time.Time{}) //nolint:errcheck
 		return tlsConn, nil
 	}
 
@@ -138,7 +156,7 @@ func getDefaultGateway() (string, error) {
 	return "", fmt.Errorf("route get default: no gateway found in output")
 }
 
-// tryTLS443 connects directly via TLS to cfg.ServerHost:443 with a 3s timeout.
+// tryTLS443 connects directly via TLS to cfg.ServerHost:cfg.TLSPort with a 3s timeout.
 func tryTLS443(cfg Config) (net.Conn, error) {
 	host := cfg.ServerHost
 	if host == "" {
@@ -148,14 +166,15 @@ func tryTLS443(cfg Config) (net.Conn, error) {
 		}
 		host = h
 	}
-	addr := net.JoinHostPort(host, "443")
-	dialer := &net.Dialer{Timeout: 3 * time.Second}
-	tlsCfg := &tls.Config{
-		ServerName:         host,
-		InsecureSkipVerify: cfg.InsecureTLS, //nolint:gosec
-	}
-	c, err := tls.DialWithDialer(dialer, "tcp", addr, tlsCfg)
+	addr := net.JoinHostPort(host, fmt.Sprintf("%d", cfg.TLSPort))
+	overall := time.Now().Add(tls443Budget)
+	raw, err := net.DialTimeout("tcp", addr, tls443Budget)
 	if err != nil {
+		return nil, fmt.Errorf("tls443: dial: %w", err)
+	}
+	c, err := utlsHandshake(raw, host, cfg.InsecureTLS, time.Until(overall))
+	if err != nil {
+		raw.Close()
 		return nil, fmt.Errorf("tls443: %w", err)
 	}
 	return c, nil
@@ -172,10 +191,22 @@ func tryTLS443(cfg Config) (net.Conn, error) {
 func runLocalProxy(localProxy net.PacketConn, transport net.Conn) {
 	peerCh := make(chan net.Addr, 1)
 
+	// Closing both sides unblocks whichever direction is parked in a read, so
+	// neither goroutine outlives the connection.
+	var closeOnce sync.Once
+	closeAll := func() {
+		closeOnce.Do(func() {
+			transport.Close()
+			localProxy.Close()
+		})
+	}
+	defer closeAll()
+
 	// Single goroutine reads all WireGuard datagrams. Captures the peer address
 	// from the first packet (WireGuard's handshake initiation) and forwards all
 	// packets length-framed to the transport.
 	go func() {
+		defer closeAll()
 		buf := make([]byte, 1<<16)
 		lb := make([]byte, 2)
 		first := true

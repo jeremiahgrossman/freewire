@@ -1,0 +1,22 @@
+services:
+  freewire-server:
+    build:
+      context: server
+      dockerfile: Dockerfile
+    container_name: freewire-server
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun
+    ports:
+      - "51820:51820/udp"   # WireGuard
+      - "8080:8080/tcp"     # API
+      - "8443:8443/tcp"     # TLS/443 transport (mapped from 443 to avoid root requirement)
+      - "5353:5353/udp"     # DNS tunnel (mapped from 53)
+      - "4500:4500/udp"     # ICMP/UDP tunnel
+    volumes:
+      - ./server/data:/data  # config + key persisted here
+    environment:
+      - TZ=UTC

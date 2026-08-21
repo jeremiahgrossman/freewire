@@ -11,6 +11,8 @@ type serverConfigResponse struct {
 	EndpointPort      int      `json:"endpoint_port"`
 	TLSEndpointHost   string   `json:"tls_endpoint_host"`
 	TLSEndpointPort   int      `json:"tls_endpoint_port"`
+	DNSTunnelPort     int      `json:"dns_tunnel_port"`
+	ICMPUDPPort       int      `json:"icmp_udp_port"`
 	DNSTunnelDomain   string   `json:"dns_tunnel_domain"`
 	AllowedIPs        []string `json:"allowed_ips"`
 	ServerVersion     string   `json:"server_version"`
@@ -20,18 +22,16 @@ type serverConfigResponse struct {
 }
 
 func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
+	// Fall back to the Host header, which is the address the client dialed.
+	// RemoteAddr is deliberately not consulted: it is the client's own source
+	// address, so echoing it would hand back a useless endpoint and would put a
+	// client IP on a live code path.
 	host := s.cfg.PublicHost
 	if host == "" {
-		// Fall back to the host the client connected to.
-		h := r.Host
-		if h == "" {
-			h = r.RemoteAddr
+		host = r.Host
+		if hh, _, err := splitHostPort(host); err == nil {
+			host = hh
 		}
-		// Strip port if present.
-		if hh, _, err := splitHostPort(h); err == nil {
-			h = hh
-		}
-		host = h
 	}
 	writeJSON(w, http.StatusOK, serverConfigResponse{
 		PublicKey:         s.cfg.PublicKey,
@@ -39,6 +39,8 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 		EndpointPort:      s.cfg.ListenPort,
 		TLSEndpointHost:   host,
 		TLSEndpointPort:   s.cfg.TLSPort,
+		DNSTunnelPort:     s.cfg.DNSTunnelPort,
+		ICMPUDPPort:       s.cfg.ICMPUDPPort,
 		DNSTunnelDomain:   "tunnel.freewire.com",
 		AllowedIPs:        []string{"0.0.0.0/0", "::/0"},
 		ServerVersion:     s.cfg.ServerVersion,

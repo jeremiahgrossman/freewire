@@ -33,6 +33,14 @@ type Config struct {
 	// Used in /v1/server/config responses so clients know where to connect.
 	// Defaults to empty string; clients fall back to the address they connected from.
 	PublicHost string `json:"public_host"`
+
+	// ACME (Let's Encrypt) automatic certificate management. When ACMEDomain is
+	// set, the server provisions and auto-renews a real certificate and
+	// TLSCertFile/TLSKeyFile are ignored. Requires port 80 reachable for the
+	// HTTP-01 challenge and a public DNS A record pointing at this host.
+	ACMEDomain   string `json:"acme_domain"`    // e.g. "vpn.freewire.com"; empty disables ACME
+	ACMEEmail    string `json:"acme_email"`     // contact for expiry notices
+	ACMECacheDir string `json:"acme_cache_dir"` // cert cache; defaults to "./acme-cache"
 }
 
 // Load reads config from path. If the file does not exist, a new config with a
@@ -63,6 +71,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.ICMPUDPPort == 0 {
 		c.ICMPUDPPort = 4500
+	}
+	if c.ACMECacheDir == "" {
+		c.ACMECacheDir = "./acme-cache"
 	}
 }
 

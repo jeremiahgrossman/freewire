@@ -40,7 +40,11 @@ var b32enc = base32.StdEncoding.WithPadding(base32.NoPadding)
 // dnsClientSession holds the state for an active DNS tunnel session.
 type dnsClientSession struct {
 	token      []byte   // 10-byte opaque session token
-	sessionKey [32]byte // derived ChaCha20-Poly1305 key
+	sessionKey [32]byte // authenticates the ClientConfirm MAC only
+	// Directional keys. Both peers number packets from zero, so a single shared
+	// key would repeat the (key, nonce) pair across directions.
+	keyC2S [32]byte // client → server: client seals with this
+	keyS2C [32]byte // server → client: client opens with this
 	txSeq      uint32   // next outbound sequence number (atomic add)
 	windowSize int      // current sliding window size (AIMD)
 	dnsServer  string   // resolved DNS server IP
@@ -149,10 +153,16 @@ func dnsHandshake(cfg Config, dnsServer string) (*dnsClientSession, error) {
 	}
 
 	// Derive session key via HKDF-SHA256.
-	var sessionKey [32]byte
+	var sessionKey, keyC2S, keyS2C [32]byte
 	hk := hkdf.New(sha256.New, shared, token, []byte("freewire-dns-tunnel-v1"))
 	if _, err := io.ReadFull(hk, sessionKey[:]); err != nil {
 		return nil, fmt.Errorf("derive session key: %w", err)
+	}
+	if _, err := io.ReadFull(hk, keyC2S[:]); err != nil {
+		return nil, fmt.Errorf("derive c2s key: %w", err)
+	}
+	if _, err := io.ReadFull(hk, keyS2C[:]); err != nil {
+		return nil, fmt.Errorf("derive s2c key: %w", err)
 	}
 
 	// Compute MAC for ClientConfirm: SHA256(sessionKey || "confirm" || token)[:16].
@@ -174,6 +184,8 @@ func dnsHandshake(cfg Config, dnsServer string) (*dnsClientSession, error) {
 	return &dnsClientSession{
 		token:      token,
 		sessionKey: sessionKey,
+		keyC2S:     keyC2S,
+		keyS2C:     keyS2C,
 		windowSize: dnsWindowInit,
 		dnsServer:  dnsServer,
 	}, nil
@@ -242,13 +254,13 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 func (s *dnsClientSession) sendPacket(pkt []byte) ([]byte, error) {
 	seq := atomic.AddUint32(&s.txSeq, 1) - 1
 
-	aead, err := chacha20poly1305.New(s.sessionKey[:])
+	txAEAD, err := chacha20poly1305.New(s.keyC2S[:])
 	if err != nil {
 		return nil, fmt.Errorf("send packet: aead: %w", err)
 	}
 
 	nonce := dnsMakeNonce(seq)
-	ciphertext := aead.Seal(nil, nonce, pkt, nil)
+	ciphertext := txAEAD.Seal(nil, nonce, pkt, nil)
 
 	tokenB32 := b32enc.EncodeToString(s.token)
 	seqB32 := b32enc.EncodeToString(uint32BE(seq))
@@ -287,8 +299,12 @@ func (s *dnsClientSession) sendPacket(pkt []byte) ([]byte, error) {
 		return nil, nil
 	}
 
+	rxAEAD, err := chacha20poly1305.New(s.keyS2C[:])
+	if err != nil {
+		return nil, fmt.Errorf("decrypt response: aead: %w", err)
+	}
 	rxNonce := dnsMakeNonce(rxSeq)
-	plain, err := aead.Open(nil, rxNonce, rxCipher, nil)
+	plain, err := rxAEAD.Open(nil, rxNonce, rxCipher, nil)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt response: %w", err)
 	}

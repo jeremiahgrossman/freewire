@@ -4,6 +4,9 @@ struct ServerConfig: Decodable {
     let publicKey: String
     let endpointHost: String
     let endpointPort: Int
+    let tlsEndpointPort: Int
+    let dnsTunnelPort: Int
+    let icmpUDPPort: Int
     let capacityAvailable: Bool
 
     var endpoint: String { "\(endpointHost):\(endpointPort)" }
@@ -12,6 +15,9 @@ struct ServerConfig: Decodable {
         case publicKey = "public_key"
         case endpointHost = "endpoint_host"
         case endpointPort = "endpoint_port"
+        case tlsEndpointPort = "tls_endpoint_port"
+        case dnsTunnelPort = "dns_tunnel_port"
+        case icmpUDPPort = "icmp_udp_port"
         case capacityAvailable = "capacity_available"
     }
 }
@@ -109,6 +115,20 @@ final class ServerAPI {
         } catch is URLError {
             // Best-effort — don't surface a network error on disconnect.
         }
+    }
+
+    /// Blocking peer removal for `applicationWillTerminate`, which cannot await.
+    /// URLSession delivers its completion on a background queue, so waiting here
+    /// does not deadlock the main thread the way awaiting a main-actor method would.
+    func removePeerBlocking(token: String, timeout: TimeInterval = 2) {
+        let url = base.appendingPathComponent("peers/\(token)")
+        var req = URLRequest(url: url)
+        req.httpMethod = "DELETE"
+        req.timeoutInterval = timeout
+
+        let sema = DispatchSemaphore(value: 0)
+        session.dataTask(with: req) { _, _, _ in sema.signal() }.resume()
+        _ = sema.wait(timeout: .now() + timeout)
     }
 
     // MARK: - Helpers

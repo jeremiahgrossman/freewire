@@ -53,7 +53,11 @@ func main() {
 	defer cancel()
 
 	// TLS/443 transport.
-	tls443, err := transport.NewTLS443Server(cfg.TLSCertFile, cfg.TLSKeyFile, cfg.ListenPort, log)
+	tls443, err := transport.NewTLS443Server(cfg.TLSCertFile, cfg.TLSKeyFile, cfg.ListenPort, transport.ACMEOptions{
+		Domain:   cfg.ACMEDomain,
+		Email:    cfg.ACMEEmail,
+		CacheDir: cfg.ACMECacheDir,
+	}, log)
 	if err != nil {
 		log.Fatal("init tls443 server", zap.Error(err))
 	}

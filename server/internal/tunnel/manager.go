@@ -98,15 +98,30 @@ func (m *Manager) AddPeer(peerToken, publicKeyBase64 string, capacity int) (*Pee
 		return nil, fmt.Errorf("decode public key: %w", err)
 	}
 
+	// Claim the slot and publish the entry under one lock. Checking capacity and
+	// inserting separately let concurrent registrations both observe room and
+	// push the peer count past the configured limit. The entry starts empty and
+	// is filled in once the WireGuard IPC succeeds.
+	peer := &Peer{PublicKey: publicKeyBase64}
+
 	m.mu.Lock()
 	if len(m.peers) >= capacity {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("server at capacity")
 	}
+	m.peers[peerToken] = peer
 	m.mu.Unlock()
+
+	// From here on, any failure must surrender the reserved slot.
+	release := func() {
+		m.mu.Lock()
+		delete(m.peers, peerToken)
+		m.mu.Unlock()
+	}
 
 	tunnelIP, err := m.pool.Allocate()
 	if err != nil {
+		release()
 		return nil, err
 	}
 
@@ -114,17 +129,13 @@ func (m *Manager) AddPeer(peerToken, publicKeyBase64 string, capacity int) (*Pee
 		hex.EncodeToString(publicKeyBytes), tunnelIP)
 	if err := m.dev.IpcSet(ipcConf); err != nil {
 		m.pool.Release(tunnelIP)
+		release()
 		return nil, fmt.Errorf("add peer to wireguard: %w", err)
 	}
 
-	peer := &Peer{
-		PublicKey:  publicKeyBase64,
-		TunnelIP:   tunnelIP,
-		TunnelIPv6: tunnelIPv6(tunnelIP),
-	}
-
 	m.mu.Lock()
-	m.peers[peerToken] = peer
+	peer.TunnelIP = tunnelIP
+	peer.TunnelIPv6 = tunnelIPv6(tunnelIP)
 	m.mu.Unlock()
 
 	m.log.Info("peer added", zap.String("session", peerToken), zap.String("tunnel_ip", tunnelIP))
@@ -146,12 +157,16 @@ func (m *Manager) RemovePeer(peerToken string) error {
 		return err
 	}
 
+	// The map entry is already gone, so the address must return to the pool even
+	// if the WireGuard IPC fails. Leaving it allocated would drain the pool one
+	// address per failed removal, with nothing left to retry the release.
+	defer m.pool.Release(peer.TunnelIP)
+
 	ipcConf := fmt.Sprintf("public_key=%s\nremove=true\n\n", hex.EncodeToString(publicKeyBytes))
 	if err := m.dev.IpcSet(ipcConf); err != nil {
 		return fmt.Errorf("remove peer from wireguard: %w", err)
 	}
 
-	m.pool.Release(peer.TunnelIP)
 	m.log.Info("peer removed", zap.String("session", peerToken))
 	return nil
 }

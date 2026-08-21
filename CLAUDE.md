@@ -13,15 +13,31 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 - **Active phase:** Phase 2 — Captive portal
 - **In progress:** nothing
-- **Last completed:** Repo restructured to a single root git repo (macos/ + server/ + tunnel/ + specs, 4 commits). Captive portal test harness added at `testing/` — runnable scripts for configs 0–6, a working HTTP CONNECT proxy, and `which-path.sh` for network-layer path verification. `tunnel/go.mod` aligned with `server/go.mod` (was 2.5 years of version skew).
-- **Blocked on:** nothing — run configs 1–6 via `testing/README.md`. Config 0 already passes ("Protected · TLS/443", UTM VM Ubuntu 26.04 arm64 at 192.168.64.2).
+- **Last completed:** Server moved from the UTM VM to Docker (`docker-compose.yml` at repo root; `server/Dockerfile`; dev config in `server/data/`, ports 8080/8443/5353/4500/51820 on `127.0.0.1`). uTLS integrated on both TLS paths with Chrome/Safari/Firefox fingerprint rotation. ACME/Let's Encrypt added to the server (set `acme_domain` to enable; self-signed remains the dev default). 53-finding audit applied — see below. First test suite and `.github/workflows/ci.yml` added.
+- **Blocked on:** nothing — run configs 1–6 via `testing/README.md`. Config 0 passes against Docker at `127.0.0.1`.
+
+**Fixed in the 2026-08-21 audit pass:**
+
+- Nonce reuse in **both** tunnels: DNS and ICMP derived one session key while both directions numbered packets from zero, so the first packet each way shared a (key, nonce) pair. Now three keys come off one HKDF stream — confirm-MAC, client→server, server→client. Covered by `keyderivation_test.go`.
+- Quit deadlock: `applicationWillTerminate` blocked the main thread on a semaphore waiting for a `@MainActor` task that needed that same thread. Peer removal now goes through `ServerAPI.removePeerBlocking` and reads the token from a lock-guarded box.
+- Private key on disk: the tunnel config (which carries the WireGuard private key) was written to a temp file. It now goes to the helper over a stdin pipe; only the ready line uses a file.
+- `insecureTLS` was hardcoded true on every path. Now derived from `allowsSelfSignedCert` — loopback and RFC 1918 only.
+- TOCTOU in `AddPeer` let concurrent registrations exceed capacity; the slot is now claimed under the same lock that checks it.
+- `RemovePeer` leaked a pool address whenever the WireGuard IPC failed.
+- Per-packet `Info` logging in the TLS bridge (~4k lines/sec at 50 Mbps).
+- HTTP CONNECT could run 18s against its 2s budget; all three ports now share one deadline.
+- `r.RemoteAddr` removed from `config_handler.go`; CI now fails on any `RemoteAddr` in server or tunnel code.
+- Goroutine leak in `runLocalProxy` — the WireGuard reader stayed parked when the transport died.
 
 **Known Phase 2 gaps** (do not block configs 1–6):
 
-- `FreewireHelper` SMJobBless target does not exist — the pf kill switch is unimplemented. `TunnelManager.reconnecting` claims "kill switch active" but nothing enforces it.
-- uTLS not integrated — TLS/443 uses a plain Go handshake and is DPI-fingerprintable.
-- No tests, no `.github/workflows`. Bugs found in configs 1–6 should become the first regression tests.
-- `server/internal/api/config_handler.go:28` reads `r.RemoteAddr`. Not a privacy violation (never logged or persisted, only echoed to the requesting client), but it is functionally wrong when `PublicHost` is unset and puts `RemoteAddr` in a live path. The CI lint rule for `RemoteAddr` would flag it.
+- `FreewireHelper` SMJobBless target does not exist — the pf kill switch is unimplemented. `TunnelManager.reconnecting` claims "kill switch active" but nothing enforces it. SMJobBless is also deprecated as of macOS 13; migrate to `SMAppService` before GA.
+- DNS tunnel omits the EDNS0 OPT RR, so responses cap at 512 bytes (audit F3).
+- DNS client dials a fresh UDP socket per data packet (audit PERF-004); ICMP server spawns a goroutine per inbound packet and rebuilds the AEAD per packet (PERF-001/002).
+- ICMP session activation has no re-entry guard — duplicate CONFIRM packets start duplicate bridge goroutines (audit F08).
+- No anti-replay window on the ICMP data path (audit F6).
+- `PathUpgradeManager` probes HTTP CONNECT with a direct TCP/443 dial rather than through the portal proxy (audit F5), and still returns false for DNS/ICMP.
+- Remaining audit findings are medium/low: client-side goroutine leaks on shutdown (F-004/R-07, F-005/R-08), several UX gaps (F04 `connect()` no-ops from `.failed`, F05 captive-portal copy overpromises auto-reconnect, F07/F09 panel details), and assorted perf items.
 - `captive-portal-testing-guide.md`'s `proxy.py` listing is broken — its relay threads never iterate. `testing/proxy.py` is a working replacement; fold it back into the guide.
 
 ---

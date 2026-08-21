@@ -35,7 +35,12 @@ type DNSServer struct {
 // dnsSession holds the server-side state for one DNS tunnel session.
 type dnsSession struct {
 	token      [10]byte
+	// sessionKey authenticates the ClientConfirm MAC only.
 	sessionKey [32]byte
+	// Directional keys. Both peers number packets from zero, so a single shared
+	// key would repeat the (key, nonce) pair across directions.
+	keyC2S [32]byte // client → server: server opens with this
+	keyS2C [32]byte // server → client: server seals with this
 	// Each session gets its own UDP socket dialing the local WG port.
 	localConn *net.UDPConn
 	wgAddr    *net.UDPAddr
@@ -226,10 +231,20 @@ func (s *DNSServer) handleClientHello(conn *net.UDPConn, srcAddr *net.UDPAddr, q
 		return
 	}
 
-	// Derive session key.
-	var sessionKey [32]byte
+	// Derive the confirm-MAC key plus one key per direction off a single HKDF
+	// stream. Directional separation keeps every (key, nonce) pair unique even
+	// though both peers number their packets from zero.
+	var sessionKey, keyC2S, keyS2C [32]byte
 	hk := hkdf.New(sha256.New, shared, token[:], []byte("freewire-dns-tunnel-v1"))
 	if _, err := io.ReadFull(hk, sessionKey[:]); err != nil {
+		s.sendNXDomain(conn, srcAddr, qid)
+		return
+	}
+	if _, err := io.ReadFull(hk, keyC2S[:]); err != nil {
+		s.sendNXDomain(conn, srcAddr, qid)
+		return
+	}
+	if _, err := io.ReadFull(hk, keyS2C[:]); err != nil {
 		s.sendNXDomain(conn, srcAddr, qid)
 		return
 	}
@@ -241,6 +256,8 @@ func (s *DNSServer) handleClientHello(conn *net.UDPConn, srcAddr *net.UDPAddr, q
 	sess := &dnsSession{
 		token:      token,
 		sessionKey: sessionKey,
+		keyC2S:     keyC2S,
+		keyS2C:     keyS2C,
 		serverPriv: serverPriv,
 		serverPub:  serverPub,
 		confirmMAC: mac,
@@ -353,14 +370,14 @@ func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, qid []by
 		return
 	}
 
-	aead, err := chacha20poly1305.New(sess.sessionKey[:])
+	rxAEAD, err := chacha20poly1305.New(sess.keyC2S[:])
 	if err != nil {
 		s.sendNXDomain(conn, srcAddr, qid)
 		return
 	}
 
 	nonce := srvDNSMakeNonce(seq)
-	plain, err := aead.Open(nil, nonce, ciphertext, nil)
+	plain, err := rxAEAD.Open(nil, nonce, ciphertext, nil)
 	if err != nil {
 		s.log.Error("dns: decrypt data", zap.Error(err))
 		s.sendNXDomain(conn, srcAddr, qid)
@@ -387,8 +404,13 @@ func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, qid []by
 	// Encrypt WG response packet.
 	txSeq := sess.txSeq
 	sess.txSeq++
+	txAEAD, err := chacha20poly1305.New(sess.keyS2C[:])
+	if err != nil {
+		s.sendNXDomain(conn, srcAddr, qid)
+		return
+	}
 	txNonce := srvDNSMakeNonce(txSeq)
-	encrypted := aead.Seal(nil, txNonce, wgPkt, nil)
+	encrypted := txAEAD.Seal(nil, txNonce, wgPkt, nil)
 
 	// Encode response: <b32(txSeq)>.<b32(encrypted)>
 	txSeqB32 := srvB32enc.EncodeToString(uint32BESrv(txSeq))

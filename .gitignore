@@ -49,6 +49,10 @@ wg*.conf
 # Server runtime config — holds the server WireGuard private key
 server/freewire-server.json
 server/*.state.json
+# Docker runtime volume — holds the generated server WireGuard private key
+server/data/
+# Let's Encrypt certificate cache
+server/acme-cache/
 
 # ---- AWS / deploy local state ----
 .terraform/

@@ -47,7 +47,11 @@ const (
 // icmpClientSession holds the state for an active ICMP/UDP tunnel session.
 type icmpClientSession struct {
 	sessionToken [2]byte  // 2-byte session token (low 2 bytes of full token)
-	sessionKey   [32]byte // ChaCha20-Poly1305 key
+	sessionKey   [32]byte // authenticates the ClientConfirm MAC only
+	// Directional keys. Both peers number packets from zero, so one shared
+	// key would repeat the (key, nonce) pair across directions.
+	keyC2S       [32]byte // client → server: client seals with this
+	keyS2C       [32]byte // server → client: client opens with this
 	txSeq        uint32   // outbound sequence (atomic)
 	windowSize   int      // current sliding window size
 	conn         *net.UDPConn
@@ -72,7 +76,7 @@ func runICMPUDPTunnel(cfg Config) (net.PacketConn, error) {
 		host = h
 	}
 
-	raddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(host, "4500"))
+	raddr, err := net.ResolveUDPAddr("udp4", net.JoinHostPort(host, fmt.Sprintf("%d", cfg.ICMPUDPPort)))
 	if err != nil {
 		return nil, fmt.Errorf("icmp tunnel: resolve addr: %w", err)
 	}
@@ -156,10 +160,19 @@ func icmpHandshake(cfg Config, uc *net.UDPConn) (*icmpClientSession, error) {
 	}
 
 	// Derive session key: HKDF-SHA256(ikm=shared, salt=sessionToken, info="freewire-icmp-tunnel-v1").
-	var sessionKey [32]byte
+	// Three 32-byte reads off one stream: the confirm-MAC key, then one key per
+	// direction. Directional separation is what keeps nonces unique — both sides
+	// number packets from zero, so a shared key would repeat (key, nonce).
+	var sessionKey, keyC2S, keyS2C [32]byte
 	hk := hkdf.New(sha256.New, shared, sessionToken[:], []byte("freewire-icmp-tunnel-v1"))
 	if _, err := io.ReadFull(hk, sessionKey[:]); err != nil {
 		return nil, fmt.Errorf("derive session key: %w", err)
+	}
+	if _, err := io.ReadFull(hk, keyC2S[:]); err != nil {
+		return nil, fmt.Errorf("derive c2s key: %w", err)
+	}
+	if _, err := io.ReadFull(hk, keyS2C[:]); err != nil {
+		return nil, fmt.Errorf("derive s2c key: %w", err)
 	}
 
 	// Step 3: HANDSHAKE_CONFIRM
@@ -179,6 +192,8 @@ func icmpHandshake(cfg Config, uc *net.UDPConn) (*icmpClientSession, error) {
 	sess := &icmpClientSession{
 		sessionToken: sessionToken,
 		sessionKey:   sessionKey,
+		keyC2S:       keyC2S,
+		keyS2C:       keyS2C,
 		txSeq:        2, // 0=hello, 1=confirm, data starts at 2
 		windowSize:   icmpWindowInit,
 		conn:         uc,
@@ -287,7 +302,7 @@ func (s *icmpClientSession) sendData(payload []byte) error {
 	}
 
 	seq := atomic.AddUint32(&s.txSeq, 1) - 1
-	aead, err := chacha20poly1305.New(s.sessionKey[:])
+	aead, err := chacha20poly1305.New(s.keyC2S[:])
 	if err != nil {
 		return fmt.Errorf("aead: %w", err)
 	}
@@ -318,7 +333,7 @@ func (s *icmpClientSession) decryptData(pkt []byte) ([]byte, error) {
 	ciphertext := pkt[icmpHeaderLen:]
 	seq := binary.BigEndian.Uint32(hdr[4:8])
 
-	aead, err := chacha20poly1305.New(s.sessionKey[:])
+	aead, err := chacha20poly1305.New(s.keyS2C[:])
 	if err != nil {
 		return nil, fmt.Errorf("aead: %w", err)
 	}

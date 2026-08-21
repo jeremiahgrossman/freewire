@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var clickMonitor: Any?
     private var tunnelManager: TunnelManager?
     private var cancellable: AnyCancellable?
+    private let api = ServerAPI(host: "127.0.0.1")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -20,7 +21,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let mgr = TunnelManager(api: ServerAPI(host: "192.168.64.2"), identity: identity)
+        let mgr = TunnelManager(api: api, identity: identity)
         tunnelManager = mgr
 
         setupStatusItem(mgr: mgr)
@@ -43,14 +44,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         try? p.run()
         p.waitUntilExit()
 
-        // Deregister peer synchronously so the server slot is freed immediately.
-        if let mgr = tunnelManager {
-            let sema = DispatchSemaphore(value: 0)
-            Task {
-                await mgr.disconnect()
-                sema.signal()
-            }
-            sema.wait()
+        // Free the server slot immediately. Reads the token from its lock-guarded
+        // box and issues the DELETE directly: hopping to the main actor here would
+        // deadlock, since this handler already owns the main thread.
+        if let token = tunnelManager?.peerTokenBox.token {
+            api.removePeerBlocking(token: token)
         }
     }
 
