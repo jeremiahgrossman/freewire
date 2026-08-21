@@ -29,8 +29,19 @@ import (
 // Domain: *.tunnel.freewire.com
 
 const (
-	dnsTunnelDomain     = "tunnel.freewire.com"
-	dnsKeepaliveEvery   = 30 * time.Second
+	dnsTunnelDomain   = "tunnel.freewire.com"
+	dnsKeepaliveEvery = 30 * time.Second
+	// Poll interval while the tunnel is active.
+	//
+	// DNS gives the server no way to push, so pending data waits for a query.
+	// Without polling, a client that has sent a WireGuard handshake and is now
+	// waiting for the reply would not ask again until the keepalive 30s later,
+	// long after any handshake budget has expired -- the tunnel would activate
+	// and then starve.
+	dnsPollFast = 60 * time.Millisecond
+	dnsPollIdle = 700 * time.Millisecond
+	// How long after real traffic to keep polling at the fast rate.
+	dnsPollBusyWindow   = 3 * time.Second
 	dnsHandshakeTimeout = 3 * time.Second
 	dnsWindowInit       = 8
 	dnsWindowMax        = 64
@@ -302,6 +313,41 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 		}
 	}()
 
+	// Poll loop: keeps a query in flight so the server can return data.
+	go func() {
+		var lastActivity time.Time
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+
+			interval := dnsPollIdle
+			if time.Since(lastActivity) < dnsPollBusyWindow {
+				interval = dnsPollFast
+			}
+			time.Sleep(interval)
+
+			select {
+			case <-done:
+				return
+			default:
+			}
+
+			data, err := s.poll()
+			if err != nil || len(data) == 0 {
+				continue
+			}
+			lastActivity = time.Now()
+			select {
+			case inboundCh <- data:
+			case <-done:
+				return
+			}
+		}
+	}()
+
 	for {
 		select {
 		case <-done:
@@ -314,6 +360,20 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 			go s.sendKeepalive() //nolint:errcheck
 		}
 	}
+}
+
+// poll asks the server whether it has anything queued, and decrypts it if so.
+func (s *dnsClientSession) poll() ([]byte, error) {
+	name := "k." + s.tokenB32 + "." + dnsTunnelDomain + "."
+	resp, err := dnsQuery(s.dnsServer, name, time.Now().Add(2*time.Second))
+	if err != nil {
+		return nil, err
+	}
+	txt, err := parseTXTResponse(resp)
+	if err != nil || txt == "" || txt == "K" {
+		return nil, nil // nothing queued
+	}
+	return s.decodePiggybackTXT(txt)
 }
 
 // sendPacket encrypts pkt, transmits via DNS TXT query, and returns any
@@ -446,7 +506,11 @@ func (s *dnsClientSession) decodePiggyback(resp []byte) ([]byte, error) {
 	if err != nil || txt == "" {
 		return nil, nil
 	}
+	return s.decodePiggybackTXT(txt)
+}
 
+// decodePiggybackTXT decrypts a TXT payload of the form <b32(seq)>.<b32(data)>.
+func (s *dnsClientSession) decodePiggybackTXT(txt string) ([]byte, error) {
 	// Response TXT format: <b32(rxSeq)>.<b32(ciphertext)>
 	rparts := strings.SplitN(txt, ".", 2)
 	if len(rparts) != 2 {

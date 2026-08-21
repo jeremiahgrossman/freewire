@@ -18,8 +18,8 @@ final class Preferences {
     ///
     /// Testing aid: the tunnel zone is only delegated in production, so against
     /// a development server the system resolver cannot reach it. No UI sets
-    /// this; it is written with `defaults write com.freewire.Freewire
-    /// dnsResolverOverride <ip>`.
+    /// this; it is written with
+    /// `defaults write com.freewire.vpn.Freewire dnsResolverOverride <ip>`.
     var dnsResolverOverride: String? {
         let v = UserDefaults.standard.string(forKey: Key.dnsResolverOverride)
         return (v?.isEmpty ?? true) ? nil : v

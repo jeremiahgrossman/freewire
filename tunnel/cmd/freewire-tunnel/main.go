@@ -133,7 +133,15 @@ func main() {
 			bypassHost = h
 		}
 	}
-	if err := setupRouting(tunName, bypassHost); err != nil {
+	if skipEgressCheck() {
+		// Path selection has already been decided by this point: the transport
+		// is chosen and WireGuard has handshaked over it. Routing is the only
+		// step left, and it is the one that can strand the host, so it is
+		// skipped rather than made unsafe.
+		fmt.Fprintf(os.Stderr,
+			"freewire-tunnel: %s — tunnel is up but routing is NOT installed; traffic still uses the normal path\n",
+			skipEgressCheckFlag)
+	} else if err := setupRouting(tunName, bypassHost); err != nil {
 		// Fatal. A tunnel that carries nothing is worse than no tunnel: the
 		// client reports "Protected" off the ready line, so a silent routing
 		// failure means the user believes they are covered while every packet
@@ -201,8 +209,8 @@ func superviseRouting() <-chan struct{} {
 
 	unhealthy := make(chan struct{})
 	if skipEgressCheck() {
-		// Nothing would keep the tunnel alive otherwise: the supervisor would
-		// see the same failures the startup check was told to ignore.
+		// No routes were installed, so there is nothing to release and nothing
+		// to supervise.
 		return unhealthy
 	}
 	go func() {
@@ -252,8 +260,16 @@ func probeThroughTunnel() error {
 	return c.Close()
 }
 
-// skipEgressCheckFlag disables both the startup egress check and the supervisor
-// that releases the routes when traffic stops. Testing aid only.
+// skipEgressCheckFlag runs the tunnel without ever taking over routing.
+//
+// Testing aid, for environments where forwarded traffic is known not to
+// survive and the point of the run is which transport gets chosen.
+//
+// It deliberately does NOT mean "install the routes and disable the checks".
+// An earlier version did exactly that, and when a tunnel came up but carried
+// nothing there was no longer anything to release the routes -- the machine was
+// left with no working network and needed manual `route delete` surgery. A
+// testing switch must reduce what is attempted, never remove a safety net.
 //
 // A flag rather than an environment variable because sudo clears the
 // environment, and the helper always runs under sudo. It is passed on the
@@ -359,13 +375,6 @@ func setupRouting(tunName, bypassHost string) error {
 	// the packets. It is deliberately an environment variable rather than a
 	// config field: nothing the server sends can turn this off, and a release
 	// build has no path to it unless someone sets it in the launching shell.
-	if skipEgressCheck() {
-		fmt.Fprintf(os.Stderr,
-			"freewire-tunnel: %s — skipping the egress check; traffic may not be carried\n",
-			skipEgressCheckFlag)
-		return nil
-	}
-
 	if err := verifyTunnelCarriesTraffic(); err != nil {
 		return fmt.Errorf("tunnel routes installed but carry no traffic: %w", err)
 	}

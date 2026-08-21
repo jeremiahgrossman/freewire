@@ -636,12 +636,42 @@ func (s *DNSServer) handleKeepalive(conn *net.UDPConn, srcAddr *net.UDPAddr, req
 		return
 	}
 	sess := v.(*dnsSession)
+
+	// A keepalive doubles as a poll.
+	//
+	// DNS is request/response: the server has no way to send unsolicited data,
+	// so anything WireGuard produces waits for a query to ride back on. Data
+	// queries alone are not enough -- after the client sends a handshake it has
+	// nothing more to send and simply waits, while the reply sits in the queue.
+	// Answering polls with pending data is what lets the tunnel carry a
+	// handshake at all.
 	sess.mu.Lock()
 	sess.lastSeen = time.Now()
+	if !sess.activated {
+		sess.mu.Unlock()
+		conn.WriteToUDP(buildDNSTXTResponse(req, "K"), srcAddr) //nolint:errcheck
+		return
+	}
+	txAEAD := sess.aeadTx
+	txSeq := sess.txSeq
+	sess.txSeq++
 	sess.mu.Unlock()
 
-	resp := buildDNSTXTResponse(req, "K")
-	conn.WriteToUDP(resp, srcAddr) //nolint:errcheck
+	var wgPkt []byte
+	select {
+	case wgPkt = <-sess.wgInbound:
+	default:
+	}
+	if len(wgPkt) == 0 {
+		conn.WriteToUDP(buildDNSTXTResponse(req, "K"), srcAddr) //nolint:errcheck
+		return
+	}
+
+	var txNonce [12]byte
+	srvDNSNonceInto(txSeq, &txNonce)
+	encrypted := txAEAD.Seal(nil, txNonce[:], wgPkt, nil)
+	txt := srvB32enc.EncodeToString(uint32BESrv(txSeq)) + "." + srvB32enc.EncodeToString(encrypted)
+	conn.WriteToUDP(buildDNSTXTResponse(req, txt), srcAddr) //nolint:errcheck
 }
 
 // sendNXDomain sends a DNS NXDOMAIN response.

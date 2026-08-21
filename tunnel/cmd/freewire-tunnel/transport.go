@@ -345,7 +345,20 @@ func newLocalUDPProxy() (net.PacketConn, error) {
 
 // handshakeBudget is how long one candidate gets to prove WireGuard can carry
 // traffic over it before the chain moves on.
-const handshakeBudget = 3 * time.Second
+//
+// The tunnelled paths need more than the direct ones: a WireGuard handshake
+// over DNS is several fragmented queries plus a poll round trip to collect the
+// reply, none of which the 3s that suits a TCP transport can cover.
+func handshakeBudgetFor(name string) time.Duration {
+	switch name {
+	case "dns":
+		return 8 * time.Second
+	case "icmp_udp":
+		return 5 * time.Second
+	default:
+		return 3 * time.Second
+	}
+}
 
 // establishTunnel walks the fallback chain and returns the first transport over
 // which WireGuard actually completes a handshake.
@@ -409,7 +422,7 @@ func establishTunnel(
 			}()
 		}
 
-		if waitForHandshake(wgDev, handshakeBudget) {
+		if waitForHandshake(wgDev, handshakeBudgetFor(candidate.name)) {
 			return candidate.name, lp, tc, nil
 		}
 
