@@ -128,10 +128,14 @@ final class PathUpgradeManager {
     /// whether the proxy answered 200.
     private static func connectSucceeds(host: String, port: Int) async -> Bool {
         await withCheckedContinuation { cont in
+            // See the note above: this guard is crossed by two queues.
+            let lock = NSLock()
             var done = false
             let finish: (Bool) -> Void = { result in
-                guard !done else { return }
+                lock.lock()
+                if done { lock.unlock(); return }
                 done = true
+                lock.unlock()
                 cont.resume(returning: result)
             }
 
@@ -199,34 +203,20 @@ final class PathUpgradeManager {
     }
 
     private func probeWireGuard() async -> Bool {
-        // UDP reachability probe: send a zero-byte UDP datagram to the WireGuard port.
-        // If the port is open, the OS won't immediately return ECONNREFUSED.
-        // This is a best-effort heuristic — the upgrade manager accepts false positives
-        // (TunnelManager will detect the failure and stay on the current path).
-        return await withCheckedContinuation { cont in
-            let conn = NWConnection(
-                host: NWEndpoint.Host(serverHost),
-                port: NWEndpoint.Port(integerLiteral: UInt16(wgPort)),
-                using: .udp
-            )
-            var done = false
-            let finish = { (result: Bool) in
-                guard !done else { return }
-                done = true
-                conn.cancel()
-                cont.resume(returning: result)
-            }
-            conn.stateUpdateHandler = { state in
-                switch state {
-                case .ready:   finish(true)
-                case .failed:  finish(false)
-                default: break
-                }
-            }
-            conn.start(queue: .global())
-            // 2s deadline
-            DispatchQueue.global().asyncAfter(deadline: .now() + 2) { finish(false) }
-        }
+        // Not implemented, and deliberately reports unreachable.
+        //
+        // The previous version opened a UDP NWConnection to the WireGuard port
+        // and treated .ready as success. UDP is connectionless: NWConnection
+        // reaches .ready without a single packet leaving the host, so this
+        // returned true on every network including ones blocking UDP outright.
+        // The upgrade manager then restarted the tunnel about 60s after every
+        // connect, failed to reach WireGuard, and repeated.
+        //
+        // A real probe has to send a WireGuard handshake initiation and wait
+        // for the response, which needs the peer keys the manager does not
+        // hold. Until that exists, reporting unreachable keeps the client on
+        // the working path rather than acting on a probe that cannot fail.
+        return false
     }
 
     private func probeTCP443() async -> Bool {
@@ -236,10 +226,17 @@ final class PathUpgradeManager {
                 port: 443,
                 using: .tcp
             )
+            // `done` is touched from the NWConnection callback queue and from the
+            // timeout block below, on different threads. An unsynchronized
+            // check-then-set lets both pass the guard and resume the
+            // continuation twice, which is an unconditional fatalError.
+            let lock = NSLock()
             var done = false
             let finish = { (result: Bool) in
-                guard !done else { return }
+                lock.lock()
+                if done { lock.unlock(); return }
                 done = true
+                lock.unlock()
                 conn.cancel()
                 cont.resume(returning: result)
             }

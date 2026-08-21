@@ -66,19 +66,37 @@ final class TunnelManager: ObservableObject {
         self.identity = identity
     }
 
-    /// Certificate verification is skipped only for servers on loopback or a
-    /// private network, where a self-signed development certificate is expected.
-    /// Any routable host must present a valid CA-signed certificate.
+    /// Certificate verification is skipped only for servers at a loopback or
+    /// RFC 1918 literal address, where a self-signed development certificate is
+    /// expected. Any routable host must present a valid CA-signed certificate.
+    ///
+    /// The address is parsed, never prefix-matched. An earlier version tested
+    /// `hasPrefix("10.")` and friends against the raw host string, so routable
+    /// names like `10.attacker.com` or `192.168.evil.net` disabled certificate
+    /// verification for a public host.
     private var allowsSelfSignedCert: Bool {
         let h = api.serverHost
-        if h == "localhost" || h == "::1" || h.hasPrefix("127.") { return true }
-        if h.hasPrefix("10.") || h.hasPrefix("192.168.") { return true }
-        // 172.16.0.0/12
-        if h.hasPrefix("172.") {
-            let octet = h.dropFirst(4).prefix { $0.isNumber }
-            if let n = Int(octet), (16...31).contains(n) { return true }
+        if h == "::1" { return true }
+
+        let parts = h.split(separator: ".", omittingEmptySubsequences: false)
+        guard parts.count == 4 else { return false }
+        var octets: [Int] = []
+        for p in parts {
+            // Reject anything that is not a bare decimal octet, so a hostname
+            // whose labels happen to be numeric cannot slip through.
+            guard !p.isEmpty, p.allSatisfy(\.isNumber), let v = Int(p), (0...255).contains(v) else {
+                return false
+            }
+            octets.append(v)
         }
-        return false
+
+        switch (octets[0], octets[1]) {
+        case (127, _):            return true   // 127.0.0.0/8
+        case (10, _):             return true   // 10.0.0.0/8
+        case (192, 168):          return true   // 192.168.0.0/16
+        case (172, 16...31):      return true   // 172.16.0.0/12
+        default:                  return false
+        }
     }
 
     // MARK: - Public API

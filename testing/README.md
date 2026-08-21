@@ -110,7 +110,7 @@ Record each run. Bugs found here become the first regression tests.
 | 0 | 2026-06 | TLS/443 | — | ✅ | Baseline, pre-harness, against the earlier VM |
 | — | 2026-08-21 | — | — | — | Harness retargeted to the Docker container. Server moved to real ports 443/53 so the guide's rules apply unchanged. |
 | 1 | | | | | |
-| 2 | | | | | |
+| 2 | 2026-08-21 | **TLS/443** | ~2s | ⚠️ partial | Path selection correct: `tls443: session established`, WireGuard handshake completed, `utun6` up at 10.0.0.2, 10.0.0.1 answers in ~2ms. **But full-tunnel routing never installed** — see below. |
 | 3 | | | | | |
 | 4 | | | | | |
 | 5 | | | | | |
@@ -143,6 +143,38 @@ numbers: DNS(4) → TLS/443(3), then stop. Oscillation means broken
 hysteresis.
 
 ---
+
+## setupRouting does not install the default route (found in Config 2)
+
+Config 2 selected the right path and built a working tunnel, but internet
+traffic never entered it. After connecting:
+
+    route get 8.8.8.8   -> interface en0, gateway 192.168.0.1
+
+The tunnel carries its own subnet (`10/24 -> utun6`, and 10.0.0.1 answers)
+but the default route is untouched, so the VPN protects nothing. The
+client reports "Protected" regardless, because it treats the ready line as
+success and `setupRouting` failures are non-fatal and only logged.
+
+Two causes, both real:
+
+1. **Several default routes exist.** `netstat -rn` shows defaults on en0,
+   bridge100 and bridge101. `route delete default` removes one entry --
+   not necessarily en0's -- so the subsequent `route add default
+   -interface <utun>` can fail with "file exists" while the original
+   default survives.
+2. **The bypass route is wrong for this topology.** `setupRouting` adds a
+   host route for the server via the *default* gateway
+   (`route add -host 192.168.97.2 192.168.0.1`), but the server sits on
+   bridge101 and is not reachable through that gateway. Had the default
+   route actually moved, the TLS transport's own packets would have been
+   routed into the tunnel they carry, and the session would have died.
+   This is the same class of bug the audit recorded as PROTO-008 for the
+   DNS resolver.
+
+Until this is fixed, a passing config proves **path selection only**, not
+that traffic is protected. Verify routing separately with
+`route get 8.8.8.8` and do not rely on the client's own indicator.
 
 ## The bootstrap API must be reachable in every config
 
