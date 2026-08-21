@@ -110,7 +110,7 @@ Record each run. Bugs found here become the first regression tests.
 | 0 | 2026-06 | TLS/443 | — | ✅ | Baseline, pre-harness, against the earlier VM |
 | — | 2026-08-21 | — | — | — | Harness retargeted to the Docker container. Server moved to real ports 443/53 so the guide's rules apply unchanged. |
 | 1 | | | | | |
-| 2 | 2026-08-21 | **TLS/443** | ~2s | ⚠️ partial | Path selection correct: `tls443: session established`, WireGuard handshake completed, `utun6` up at 10.0.0.2, 10.0.0.1 answers in ~2ms. **But full-tunnel routing never installed** — see below. |
+| 2 | 2026-08-21 | **TLS/443** | ~2s | ✅ path / ⚠️ egress | Path selection correct: `tls443: session established`, handshake completed, `utun6` up at 10.0.0.2, 10.0.0.1 answers in ~2ms. Routing since fixed and verified installing. Egress unverifiable here — see the ECN note. |
 | 3 | | | | | |
 | 4 | | | | | |
 | 5 | | | | | |
@@ -143,6 +143,33 @@ numbers: DNS(4) → TLS/443(3), then stop. Oscillation means broken
 hysteresis.
 
 ---
+
+## Forwarded traffic dies in this environment (ECN + OrbStack)
+
+Full-tunnel egress cannot be validated against the container. Traffic
+reaches the server and is forwarded correctly, but replies never return.
+
+A capture inside the container isolates it exactly:
+
+    FORWARDED   eth0 Out 192.168.97.2.63002 > 1.1.1.1.53  Flags [SEW]   no reply
+    ORIGINATED  eth0 Out 192.168.97.2.41409 > 1.1.1.1.53  Flags [S]     reply in 17ms
+
+Same source, same destination, same NAT rule. The difference is `[SEW]`:
+ECE+CWR, an ECN-capable SYN. macOS sets `net.inet.tcp.ecn_initiate_out=1`,
+so every TCP connection from the host is ECN-marked, and those packets are
+dropped once the container forwards them out. The container's own
+connections use a plain `[S]` and succeed.
+
+**This is not a Freewire defect.** The capture shows the tunnel delivering
+packets to the server, the server forwarding them, and MASQUERADE
+rewriting the source correctly. The drop happens past the container.
+
+To confirm it and unblock full-path testing, turn ECN off for the session:
+
+    sudo sysctl -w net.inet.tcp.ecn_initiate_out=0     # revert with =1
+
+Otherwise validate egress against a real server (Phase 3, EC2), and treat
+container runs as testing **path selection only**.
 
 ## setupRouting does not install the default route (found in Config 2)
 
