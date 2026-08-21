@@ -55,6 +55,26 @@ routes to CONN-2a or CONN-2b after the captive portal probe.
 
 ---
 
+## Awaiting portal authentication (CONN-2a continued)
+
+CONN-2a tells the user "Authenticate with this network, then Freewire will
+reconnect automatically." The client must stay in a state that reflects that
+promise while it waits, rather than dropping to "Not protected" the moment the
+login page opens — which contradicts the sentence the user just read and hides
+the fact that Freewire is still watching.
+
+| State | User-visible message | Behavior |
+|---|---|---|
+| Awaiting portal | "Waiting for you to finish signing in…" with a spinner. Secondary: "Freewire will connect as soon as this network lets it through." | Polls the portal probe; connects automatically once the intercept clears. A Cancel affordance returns to disconnected. |
+| Portal wait exhausted | "Still not connected. Finish signing in to this network, then try again." | Offered after the wait elapses. Retry re-enters the wait rather than failing outright. |
+
+The wait must not expire silently. Hotel portals routinely involve a payment
+form, an SMS code, or a room-number lookup, all of which take longer than a
+short timer; a user who completes login after the timer has lapsed would
+otherwise see nothing happen and the promise silently broken.
+
+---
+
 ## Error Type Taxonomy
 
 - **Silent failure** — logged internally; user not notified; connection continues or degrades gracefully

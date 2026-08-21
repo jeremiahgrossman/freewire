@@ -64,6 +64,10 @@ private struct PanelBody: View {
                 CaptivePortalBody(redirectURL: url, tunnelManager: tunnelManager)
             case .networkBlock:
                 NetworkBlockBody(tunnelManager: tunnelManager)
+            case .awaitingPortalAuth(let timedOut):
+                AwaitingPortalBody(timedOut: timedOut, tunnelManager: tunnelManager)
+            case .noNetwork:
+                NoNetworkBody(tunnelManager: tunnelManager)
             case .failed(let error):
                 FailedBody(error: error, tunnelManager: tunnelManager)
             }
@@ -169,6 +173,72 @@ private struct TransportIndicator: View {
                 .font(.caption2)
         }
         .foregroundStyle(transport.isReducedSpeed ? Color.orange : Color.secondary)
+    }
+}
+
+// MARK: - Awaiting portal sign-in
+
+/// Shown while Freewire waits out a captive portal login.
+///
+/// CONN-2a promises "Freewire will reconnect automatically"; previously the
+/// panel dropped straight to "Not protected", contradicting the sentence the
+/// user had just read and hiding the fact that anything was still happening.
+private struct AwaitingPortalBody: View {
+    let timedOut: Bool
+    @ObservedObject var tunnelManager: TunnelManager
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                if !timedOut { ProgressView().scaleEffect(0.6) }
+                Text(timedOut ? "Still not connected" : "Waiting for you to finish signing in…")
+                    .font(.subheadline.weight(.medium))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Text(timedOut
+                 ? "Finish signing in to this network, then try again."
+                 : "Freewire will connect as soon as this network lets it through.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer().frame(height: 4)
+            if timedOut {
+                Button("Try again") { tunnelManager.retryPortalWait() }
+                    .buttonStyle(PrimaryButtonStyle())
+                    .frame(maxWidth: .infinity)
+            }
+            Button("Cancel") {
+                Task { await tunnelManager.disconnect() }
+            }
+            .buttonStyle(SecondaryButtonStyle())
+            .frame(maxWidth: .infinity)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// MARK: - No network (CONN-1)
+
+private struct NoNetworkBody: View {
+    @ObservedObject var tunnelManager: TunnelManager
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("No internet connection")
+                .font(.subheadline.weight(.medium))
+            // Copy per error-states-spec.md CONN-1.
+            Text("Connect to a network and try again.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer().frame(height: 4)
+            Button("Try again") {
+                Task { await tunnelManager.connect() }
+            }
+            .buttonStyle(PrimaryButtonStyle())
+            .frame(maxWidth: .infinity)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

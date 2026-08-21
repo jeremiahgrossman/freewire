@@ -35,14 +35,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        // Kill tunnel process synchronously so routing is cleaned up before exit.
+        // Signal the tunnel, then wait for it to actually go.
+        //
+        // waitUntilExit() here waits for *pkill*, not for the tunnel to handle
+        // SIGTERM and run its routing cleanup. The app could exit first, so the
+        // tunnel's routes outlived it. That matters less since the tunnel stopped
+        // replacing the default route -- its routes now die with the interface --
+        // but waiting is still what makes cleanup deterministic rather than a race.
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-        p.arguments = ["/usr/bin/pkill", "-x", "freewire-tunnel"]
+        p.arguments = ["-n", "/usr/bin/pkill", "-x", "freewire-tunnel"]
         p.standardOutput = FileHandle.nullDevice
         p.standardError  = FileHandle.nullDevice
         try? p.run()
         p.waitUntilExit()
+
+        // Poll for the process to disappear, bounded so quit is never blocked
+        // for long by a tunnel that will not die.
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline {
+            let check = Process()
+            check.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+            check.arguments = ["-x", "freewire-tunnel"]
+            check.standardOutput = FileHandle.nullDevice
+            check.standardError  = FileHandle.nullDevice
+            try? check.run()
+            check.waitUntilExit()
+            if check.terminationStatus != 0 { break } // no match: it is gone
+            Thread.sleep(forTimeInterval: 0.1)
+        }
 
         // Free the server slot immediately. Reads the token from its lock-guarded
         // box and issues the DELETE directly: hopping to the main actor here would
@@ -127,6 +148,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .blocked:                  return "Freewire — Connection lost. Click to reconnect."
         case .captivePortal:            return "Freewire — Network login required"
         case .networkBlock:             return "Freewire — Network is blocking VPN"
+        case .awaitingPortalAuth:       return "Freewire — Waiting for network sign-in"
+        case .noNetwork:                return "Freewire — No internet connection"
         case .failed:                   return "Freewire — Not connected"
         }
     }

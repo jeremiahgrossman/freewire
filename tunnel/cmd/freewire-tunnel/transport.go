@@ -43,6 +43,33 @@ type transportCandidate struct {
 // caller's job to decide, because that is what lets a candidate that connects
 // but carries nothing fall through to the next one.
 func transportCandidates() []transportCandidate {
+	return orderCandidates(defaultCandidates(), "")
+}
+
+// orderCandidates moves preferred to the front, leaving the rest in priority
+// order so an upgrade that fails still falls through the normal chain.
+func orderCandidates(all []transportCandidate, preferred string) []transportCandidate {
+	if preferred == "" {
+		return all
+	}
+	out := make([]transportCandidate, 0, len(all))
+	for _, c := range all {
+		if c.name == preferred {
+			out = append(out, c)
+		}
+	}
+	if len(out) == 0 {
+		return all // unknown name: ignore rather than refuse to connect
+	}
+	for _, c := range all {
+		if c.name != preferred {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func defaultCandidates() []transportCandidate {
 	return []transportCandidate{
 		{
 			name: "http_connect",
@@ -335,7 +362,7 @@ func establishTunnel(
 ) (name string, localProxy net.PacketConn, transport net.Conn, err error) {
 	upped := false
 
-	for _, candidate := range transportCandidates() {
+	for _, candidate := range orderCandidates(defaultCandidates(), cfg.PreferredTransport) {
 		lp, tc, openErr := candidate.open(cfg)
 		if openErr != nil {
 			continue

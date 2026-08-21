@@ -86,3 +86,73 @@ func TestFragmentBudgetIsPositive(t *testing.T) {
 		t.Errorf("fragment budget is %d bytes, too small to make progress", got)
 	}
 }
+
+// A path upgrade relaunches the tunnel asking for a specific transport. Without
+// honouring that, the chain restarted from the top and reselected the same path
+// it had just been told to leave, so the upgrade tore the tunnel down and
+// rebuilt exactly what was there before -- then upgraded again, forever.
+func TestPreferredTransportGoesFirst(t *testing.T) {
+	all := defaultCandidates()
+	got := orderCandidates(all, "dns")
+	if got[0].name != "dns" {
+		t.Errorf("preferred path is %q, want dns first", got[0].name)
+	}
+	if len(got) != len(all) {
+		t.Errorf("ordering returned %d candidates, want all %d", len(got), len(all))
+	}
+}
+
+// The rest of the chain must survive, so a preferred path that fails still
+// falls through instead of stranding the client.
+func TestPreferredTransportKeepsTheRestOfTheChain(t *testing.T) {
+	all := defaultCandidates()
+	got := orderCandidates(all, "icmp_udp")
+
+	seen := map[string]bool{}
+	for _, c := range got {
+		if seen[c.name] {
+			t.Errorf("candidate %q appears twice", c.name)
+		}
+		seen[c.name] = true
+	}
+	for _, c := range all {
+		if !seen[c.name] {
+			t.Errorf("candidate %q was dropped", c.name)
+		}
+	}
+	// Remaining candidates keep their original relative order.
+	var rest []string
+	for _, c := range got[1:] {
+		rest = append(rest, c.name)
+	}
+	var want []string
+	for _, c := range all {
+		if c.name != "icmp_udp" {
+			want = append(want, c.name)
+		}
+	}
+	for i := range want {
+		if rest[i] != want[i] {
+			t.Errorf("chain order after the preferred path: got %v, want %v", rest, want)
+			break
+		}
+	}
+}
+
+func TestUnknownPreferredTransportIsIgnored(t *testing.T) {
+	all := defaultCandidates()
+	got := orderCandidates(all, "carrier-pigeon")
+	if len(got) != len(all) || got[0].name != all[0].name {
+		t.Error("an unknown preferred name should leave the chain untouched")
+	}
+}
+
+func TestNoPreferenceKeepsSpecOrder(t *testing.T) {
+	want := []string{"http_connect", "tls443", "dns", "icmp_udp", "wireguard"}
+	got := orderCandidates(defaultCandidates(), "")
+	for i, name := range want {
+		if got[i].name != name {
+			t.Errorf("position %d is %q, want %q", i, got[i].name, name)
+		}
+	}
+}

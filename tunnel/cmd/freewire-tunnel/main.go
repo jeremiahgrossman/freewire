@@ -32,6 +32,11 @@ type Config struct {
 	TLSPort         int    `json:"tls_port"`          // default 443; server reports its own
 	DNSTunnelPort   int    `json:"dns_tunnel_port"`   // default 53; server reports its own
 	ICMPUDPPort     int    `json:"icmp_udp_port"`     // default 4500
+	// PreferredTransport names a path to attempt before the normal chain.
+	// Set when upgrading from a slower path: without it the relaunched tunnel
+	// restarts the chain from the top and reselects whatever it had before,
+	// so the upgrade tore the tunnel down and rebuilt the same thing.
+	PreferredTransport string `json:"preferred_transport,omitempty"`
 }
 
 func (c *Config) applyDefaults() {

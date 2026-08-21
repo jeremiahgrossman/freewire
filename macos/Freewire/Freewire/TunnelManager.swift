@@ -11,12 +11,16 @@ enum TunnelState {
     case reconnecting(attempt: Int)   // traffic NOT blocked: kill switch unimplemented
     case blocked                      // all reconnect attempts failed
     case captivePortal(redirectURL: URL?)  // CONN-2a: portal intercepting, need auth
+    case awaitingPortalAuth(timedOut: Bool) // CONN-2a: waiting out the sign-in
+    case noNetwork                    // CONN-1: no connectivity at all
     case networkBlock                 // CONN-2b: hard block, no portal
     case failed(Error)
 
     var iconSymbol: String {
         switch self {
         case .disconnected, .failed:   return "network"
+        case .awaitingPortalAuth:      return "wifi.exclamationmark"
+        case .noNetwork:               return "network.slash"
         case .connecting:              return "network.badge.shield.half.filled"
         case .connected:               return "checkmark.shield.fill"
         case .reconnecting:            return "exclamationmark.triangle.fill"
@@ -154,30 +158,50 @@ final class TunnelManager: ObservableObject {
     func openCaptivePortal(url: URL?) {
         let target = url ?? URL(string: "http://captive.apple.com")!
         NSWorkspace.shared.open(target)
-        state = .disconnected
 
-        // The panel tells the user Freewire will reconnect once they have
-        // authenticated, so actually watch for that. Nothing here can tell when
-        // the login completes, so poll the portal probe until the network comes
-        // back or the user gives up.
+        // Stay in a state that matches what the CONN-2a copy just promised.
+        // Dropping to .disconnected here contradicted the sentence the user had
+        // just read and hid the fact that Freewire was still watching.
+        state = .awaitingPortalAuth(timedOut: false)
+
         awaitPortalTask?.cancel()
         awaitPortalTask = Task { [weak self] in
-            for _ in 0..<30 {   // ~90s at 3s intervals
+            // Portals routinely involve a payment form, an SMS code, or a
+            // room-number lookup. The wait is generous, and when it does lapse
+            // it says so rather than expiring silently.
+            for _ in 0..<100 {   // ~5 minutes at 3s intervals
                 try? await Task.sleep(nanoseconds: 3_000_000_000)
                 guard let self, !Task.isCancelled else { return }
-                guard case .disconnected = self.state else { return }
+                guard case .awaitingPortalAuth = self.state else { return }
                 if case .genuineBlock = await probeCaptivePortal() {
                     // No portal intercept any more: the login went through.
                     await self.doConnect()
                     return
                 }
             }
+            guard let self, !Task.isCancelled else { return }
+            guard case .awaitingPortalAuth = self.state else { return }
+            self.state = .awaitingPortalAuth(timedOut: true)
         }
+    }
+
+    /// Re-enters the portal wait after it lapsed, rather than failing outright.
+    func retryPortalWait() {
+        guard case .awaitingPortalAuth = state else { return }
+        openCaptivePortal(url: nil)
     }
 
     // MARK: - Connect
 
     private func doConnect() async {
+        // CONN-1. Without this an offline user is told "Freewire's servers are
+        // unreachable right now", which points them at the wrong problem.
+        if !NetworkMonitor.hasNetwork() {
+            state = .noNetwork
+            startNetworkMonitor()
+            return
+        }
+
         state = .connecting(status: "Finding the best path for this network.")
 
         do {
@@ -201,7 +225,8 @@ final class TunnelManager: ObservableObject {
                 insecureTLS:     allowsSelfSignedCert,
                 tlsPort:         server.tlsEndpointPort,
                 dnsTunnelPort:   server.dnsTunnelPort,
-                icmpUDPPort:     server.icmpUDPPort
+                icmpUDPPort:     server.icmpUDPPort,
+                preferredTransport: nil
             )
 
             let (ifName, transport) = try await launchTunnel(config: cfg)
@@ -269,7 +294,8 @@ final class TunnelManager: ObservableObject {
                     insecureTLS:     allowsSelfSignedCert,
                     tlsPort:         server.tlsEndpointPort,
                     dnsTunnelPort:   server.dnsTunnelPort,
-                    icmpUDPPort:     server.icmpUDPPort
+                    icmpUDPPort:     server.icmpUDPPort,
+                    preferredTransport: nil
                 )
 
                 let (ifName, transport) = try await launchTunnel(config: cfg)
@@ -315,7 +341,7 @@ final class TunnelManager: ObservableObject {
     }
 
     private func performPathUpgrade(to transport: TunnelTransport) async {
-        guard case .connected(let ip, _, let at, let old) = state,
+        guard case .connected(_, _, let at, let old) = state,
               transport.priority < old.priority else { return }
         upgradeManager?.stop()
         // The watchdog polls for the tunnel process. During an upgrade the
@@ -341,17 +367,33 @@ final class TunnelManager: ObservableObject {
                 insecureTLS:     allowsSelfSignedCert,
                 tlsPort:         server.tlsEndpointPort,
                 dnsTunnelPort:   server.dnsTunnelPort,
-                icmpUDPPort:     server.icmpUDPPort
+                icmpUDPPort:     server.icmpUDPPort,
+                // Name the path we are upgrading to. Without this the relaunched
+                // tunnel restarts the chain from the top and reselects whatever
+                // it had before, so the upgrade rebuilt the same tunnel and then
+                // upgraded again, forever.
+                preferredTransport: transport.rawValue
             )
             let (ifName, newTransport) = try await launchTunnel(config: cfg)
+
+            // UX-003: the server issued a fresh address during re-registration.
+            // Reporting the old one left the panel showing an address the tunnel
+            // no longer used. connectedAt is deliberately preserved: an upgrade
+            // should not reset the session clock.
             state = .connected(
-                tunnelIP: ip,
+                tunnelIP: peer.tunnelIP,
                 interfaceName: ifName,
                 connectedAt: at,
                 transport: newTransport
             )
             startWatchdog()
-            startUpgradeManager(serverHost: api.serverHost, transport: newTransport)
+
+            // Only resume probing if the upgrade actually moved us. If the chain
+            // handed back the same path -- or a slower one -- restarting the
+            // manager on it would schedule the identical upgrade again.
+            if newTransport.priority < old.priority {
+                startUpgradeManager(serverHost: api.serverHost, transport: newTransport)
+            }
         } catch {
             reconnectTask?.cancel()
             reconnectTask = Task { await self.doReconnect(startingAt: 0) }
@@ -398,9 +440,15 @@ final class TunnelManager: ObservableObject {
         let m = NetworkMonitor()
         m.onNetworkAvailable = { @MainActor [weak self] in
             guard let self else { return }
-            if case .reconnecting = self.state {
+            switch self.state {
+            case .reconnecting:
                 self.reconnectTask?.cancel()
                 self.reconnectTask = Task { await self.doReconnect(startingAt: 0) }
+            case .noNetwork:
+                // CONN-1 resumes on its own once connectivity returns.
+                Task { await self.connect() }
+            default:
+                break
             }
         }
         m.onNetworkUnavailable = { @MainActor [weak self] in
@@ -594,6 +642,7 @@ private struct TunnelConfig: Encodable {
     let tlsPort:         Int
     let dnsTunnelPort:   Int
     let icmpUDPPort:     Int
+    let preferredTransport: String?
 
     enum CodingKeys: String, CodingKey {
         case privateKey      = "private_key"
@@ -607,6 +656,7 @@ private struct TunnelConfig: Encodable {
         case tlsPort         = "tls_port"
         case dnsTunnelPort   = "dns_tunnel_port"
         case icmpUDPPort     = "icmp_udp_port"
+        case preferredTransport = "preferred_transport"
     }
 }
 
