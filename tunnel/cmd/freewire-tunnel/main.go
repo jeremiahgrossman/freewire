@@ -181,10 +181,20 @@ func main() {
 	fmt.Printf("ready %s %s %s\n", tunName, cfg.TunnelIP, transportName)
 	os.Stdout.Sync() //nolint:errcheck
 
-	// Block until signal.
+	// Block until a signal arrives, or until the routes stop carrying traffic.
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
-	<-sigs
+
+	unhealthy := superviseRouting()
+
+	select {
+	case <-sigs:
+	case <-unhealthy:
+		// The tunnel owns the whole address space at this point, so a tunnel
+		// that has stopped forwarding leaves the host with no working network
+		// at all. Give the routes back rather than sitting on them.
+		fmt.Fprintln(os.Stderr, "freewire-tunnel: tunnel stopped carrying traffic; releasing routes")
+	}
 
 	wgDev.Close()
 	if transportConn != nil {
@@ -195,6 +205,80 @@ func main() {
 	}
 	cleanupRouting(tunName, bypassHost)
 }
+
+// superviseRouting watches whether traffic still survives the tunnel routes and
+// closes the returned channel when it stops.
+//
+// This covers the gap between the two failure modes that already heal
+// themselves. A clean exit runs cleanupRouting; a crash or kill -9 takes the
+// utun interface down, and the kernel drops routes bound to a vanished
+// interface, so the untouched system default takes over. Neither helps when the
+// process is alive and the routes are valid but the far end has stopped
+// answering — the transport dropped, the server went away, the network changed
+// underneath. Without this the host stays pointed into a tunnel that goes
+// nowhere, indefinitely.
+//
+// Health is judged the same way the initial check judges it, so a tunnel that
+// was good enough to start is measured against the same bar.
+func superviseRouting() <-chan struct{} {
+	const (
+		checkEvery       = 10 * time.Second
+		failuresToUnhook = 3 // ~30s of confirmed silence before acting
+	)
+
+	unhealthy := make(chan struct{})
+	go func() {
+		defer close(unhealthy)
+		tally := healthTally{limit: failuresToUnhook}
+		for {
+			time.Sleep(checkEvery)
+			err := probeThroughTunnel()
+			if err != nil {
+				fmt.Fprintf(os.Stderr,
+					"freewire-tunnel: health check %d/%d failed: %v\n",
+					tally.consecutive+1, failuresToUnhook, err)
+			}
+			if tally.record(err == nil) {
+				return
+			}
+		}
+	}()
+	return unhealthy
+}
+
+// healthTally decides when a run of failed checks means the tunnel should give
+// the routes back.
+type healthTally struct {
+	limit       int
+	consecutive int
+}
+
+// record accounts for one check and reports whether to give up. Only an
+// unbroken run counts: a single success clears the tally, so isolated packet
+// loss never tears down a working tunnel.
+func (h *healthTally) record(ok bool) bool {
+	if ok {
+		h.consecutive = 0
+		return false
+	}
+	h.consecutive++
+	return h.consecutive >= h.limit
+}
+
+// probeThroughTunnel performs one round trip over the current routes.
+func probeThroughTunnel() error {
+	c, err := net.DialTimeout("tcp", tunnelProbeAddr, 2*time.Second)
+	if err != nil {
+		return err
+	}
+	return c.Close()
+}
+
+// tunnelProbeAddr is dialed to decide whether traffic survives the tunnel
+// routes. A TCP handshake against a well-known anycast resolver: DNS
+// resolution is deliberately not used, since resolution itself may be what a
+// broken tunnel has taken down.
+const tunnelProbeAddr = "1.1.1.1:53"
 
 // bypassRoutes records the host routes pinned outside the tunnel so cleanup can
 // remove exactly what was added.
@@ -283,12 +367,9 @@ func setupRouting(tunName, bypassHost string) error {
 // post-routing path. Failing here is what turns a total loss of connectivity
 // into a clean teardown and an error message.
 func verifyTunnelCarriesTraffic() error {
-	// A TCP handshake against a well-known anycast resolver. DNS is not used:
-	// resolution itself may be what the tunnel has broken.
-	const probeAddr = "1.1.1.1:53"
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		c, err := net.DialTimeout("tcp", probeAddr, 2*time.Second)
+		c, err := net.DialTimeout("tcp", tunnelProbeAddr, 2*time.Second)
 		if err == nil {
 			c.Close()
 			return nil
@@ -296,7 +377,7 @@ func verifyTunnelCarriesTraffic() error {
 		lastErr = err
 		time.Sleep(300 * time.Millisecond)
 	}
-	return fmt.Errorf("no response from %s after 3 attempts: %w", probeAddr, lastErr)
+	return fmt.Errorf("no response from %s after 3 attempts: %w", tunnelProbeAddr, lastErr)
 }
 
 // pinOutsideTunnel adds a host route for ip along the path it currently uses,
