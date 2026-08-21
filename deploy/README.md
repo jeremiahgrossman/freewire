@@ -68,3 +68,18 @@ That NAT rule is the step most self-hosted VPN guides omit. Without it the
 tunnel comes up, the handshake completes, and no traffic passes: forwarded
 packets keep their `10.0.0.0/24` source and nothing upstream can route the
 replies back.
+
+## AWS credentials
+
+Do not use a root access key. Create an IAM user:
+
+IAM → Users → Create user → attach policies → Security credentials →
+Create access key → Command Line Interface. Then `aws configure`.
+
+`AmazonEC2FullAccess` plus `AmazonSSMReadOnlyAccess` will work and is the
+quickest way to get moving. `iam-policy.json` here is the scoped equivalent —
+the same capability without blanket EC2 rights — and can be attached as a
+customer-managed policy instead.
+
+The SSM permission is only there because the launch script asks AWS for the
+current Ubuntu AMI ID rather than pinning a stale one.
