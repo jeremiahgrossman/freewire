@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/freewire/server/internal/api"
+	"github.com/freewire/server/internal/certs"
 	"github.com/freewire/server/internal/config"
 	"github.com/freewire/server/internal/transport"
 	"github.com/freewire/server/internal/tunnel"
@@ -47,17 +48,25 @@ func main() {
 	}
 	defer wg.Close()
 
-	srv := api.NewServer(cfg, wg, log)
+	// One TLS configuration for the whole process, shared by the API and the
+	// TLS/443 transport. Building it twice would start two ACME managers racing
+	// for the port-80 challenge responder.
+	tlsCfg, err := certs.Build(cfg.TLSCertFile, cfg.TLSKeyFile, certs.ACMEOptions{
+		Domain:   cfg.ACMEDomain,
+		Email:    cfg.ACMEEmail,
+		CacheDir: cfg.ACMECacheDir,
+	}, log)
+	if err != nil {
+		log.Fatal("build tls config", zap.Error(err))
+	}
+
+	srv := api.NewServer(cfg, wg, tlsCfg, log)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
 	// TLS/443 transport.
-	tls443, err := transport.NewTLS443Server(cfg.TLSCertFile, cfg.TLSKeyFile, cfg.ListenPort, transport.ACMEOptions{
-		Domain:   cfg.ACMEDomain,
-		Email:    cfg.ACMEEmail,
-		CacheDir: cfg.ACMECacheDir,
-	}, log)
+	tls443, err := transport.NewTLS443Server(tlsCfg, cfg.ListenPort, log)
 	if err != nil {
 		log.Fatal("init tls443 server", zap.Error(err))
 	}

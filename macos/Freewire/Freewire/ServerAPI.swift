@@ -43,6 +43,8 @@ enum APIError: Error, LocalizedError {
     case capacityFull           // CONN-4 (503 on peer registration)
     case serverAtCapacity       // CONN-4 (capacity_available=false in config)
     case decodeFailed(Error)
+    case noServerPin
+    case serverKeyMismatch
 
     var errorDescription: String? {
         switch self {
@@ -53,7 +55,40 @@ enum APIError: Error, LocalizedError {
         case .capacityFull,
              .serverAtCapacity:    return "Freewire's servers are at capacity. Try again in a few minutes."
         case .decodeFailed:        return "Unexpected server response."
+        // Copy per error-states-spec.md, "Server identity (TRUST)".
+        case .noServerPin:
+            return "Freewire does not have a trusted key for this server. Add the server's key before connecting."
+        case .serverKeyMismatch:
+            return "This server's identity does not match the one Freewire trusts. Connection refused."
         }
+    }
+}
+
+/// Accepts a self-signed certificate only when the user has pinned a key.
+///
+/// A server on a bare IP cannot hold a CA-signed certificate, so requiring one
+/// would make self-hosting impossible. The pin is what establishes trust in
+/// that case, not the certificate: an attacker who intercepts the TLS session
+/// still has to return the pinned public key, and if they do, the WireGuard
+/// handshake that follows fails because they do not hold the matching private
+/// key. The worst they achieve is denial of service, not interception.
+///
+/// With no user pin, this delegate does nothing and the system's normal
+/// certificate validation applies.
+private final class PinnedTrustDelegate: NSObject, URLSessionDelegate {
+    func urlSession(
+        _ session: URLSession,
+        didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+    ) {
+        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+              let trust = challenge.protectionSpace.serverTrust,
+              let pinned = ServerTrust.userPinnedKey, !pinned.isEmpty
+        else {
+            completionHandler(.performDefaultHandling, nil)
+            return
+        }
+        completionHandler(.useCredential, URLCredential(trust: trust))
     }
 }
 
@@ -61,24 +96,44 @@ final class ServerAPI {
     let serverHost: String
     private let base: URL
     private let session: URLSession
+    private let trustDelegate = PinnedTrustDelegate()
 
     init(host: String = "127.0.0.1", port: Int = 8080) {
         serverHost = host
-        base = URL(string: "http://\(host):\(port)/v1")!
+        // HTTPS only. This endpoint hands over the server's WireGuard public
+        // key, which is the trust anchor for the tunnel; over plaintext anyone
+        // on the path could substitute their own and terminate the tunnel
+        // themselves.
+        base = URL(string: "https://\(host):\(port)/v1")!
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 10
-        session = URLSession(configuration: config)
+        session = URLSession(configuration: config,
+                             delegate: trustDelegate,
+                             delegateQueue: nil)
     }
 
     func fetchConfig() async throws -> ServerConfig {
         let url = base.appendingPathComponent("server/config")
+        let cfg: ServerConfig
         do {
             let (data, response) = try await session.data(from: url)
             try checkStatus(response, data)
-            return try decode(ServerConfig.self, from: data)
+            cfg = try decode(ServerConfig.self, from: data)
         } catch is URLError {
             throw APIError.serverUnreachable
         }
+
+        // The certificate proves we reached the host we asked for. It does not
+        // prove the key that host returned is the one this client should use:
+        // a single mis-issued certificate would be enough to swap it. The key
+        // is therefore checked against a pin carried independently.
+        guard ServerTrust.isPinned else {
+            throw APIError.noServerPin
+        }
+        guard ServerTrust.accepts(key: cfg.publicKey, host: serverHost) else {
+            throw APIError.serverKeyMismatch
+        }
+        return cfg
     }
 
     func registerPeer(publicKeyBase64: String) async throws -> RegisteredPeer {

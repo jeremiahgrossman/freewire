@@ -3,26 +3,16 @@ package transport
 import (
 	"bufio"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/binary"
-	"encoding/pem"
 	"fmt"
 	"io"
-	"math/big"
 	"net"
-	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
-	"golang.org/x/crypto/acme/autocert"
 )
 
 func isClosedErr(err error) bool {
@@ -49,55 +39,15 @@ type TLS443Server struct {
 // ACMEOptions configures automatic Let's Encrypt certificate management.
 // Domain empty means ACME is disabled and the server falls back to
 // certFile/keyFile or a generated self-signed certificate.
-type ACMEOptions struct {
-	Domain   string
-	Email    string
-	CacheDir string
-}
 
-// NewTLS443Server creates a TLS443Server.
+// NewTLS443Server creates a TLS443Server over a prebuilt TLS configuration.
 //
-// Certificate selection, in order:
-//  1. acme.Domain set — provision and auto-renew via Let's Encrypt. Requires
-//     port 80 reachable for the HTTP-01 challenge.
-//  2. certFile and keyFile point at readable files — use them.
-//  3. Otherwise — generate a self-signed P-256 certificate. Development only;
-//     clients must set insecure_tls to accept it.
-func NewTLS443Server(certFile, keyFile string, wgPort int, acme ACMEOptions, log *zap.Logger) (*TLS443Server, error) {
-	var tlsCfg *tls.Config
-
-	if acme.Domain != "" {
-		m := &autocert.Manager{
-			Prompt:     autocert.AcceptTOS,
-			HostPolicy: autocert.HostWhitelist(acme.Domain),
-			Cache:      autocert.DirCache(acme.CacheDir),
-			Email:      acme.Email,
-		}
-		// HTTP-01 challenge responder. Let's Encrypt reaches this on port 80.
-		go func() {
-			srv := &http.Server{
-				Addr:              ":80",
-				Handler:           m.HTTPHandler(nil),
-				ReadHeaderTimeout: 10 * time.Second,
-			}
-			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Error("tls443: acme http-01 responder", zap.Error(err))
-			}
-		}()
-		tlsCfg = m.TLSConfig()
-		tlsCfg.MinVersion = tls.VersionTLS12
-		log.Info("tls443: acme enabled", zap.String("domain", acme.Domain))
-	} else {
-		cert, err := loadOrGenerateCert(certFile, keyFile, log)
-		if err != nil {
-			return nil, fmt.Errorf("tls443: load cert: %w", err)
-		}
-		tlsCfg = &tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
-		}
+// The configuration is built once for the process and shared with the API
+// listener; see the certs package for why.
+func NewTLS443Server(tlsCfg *tls.Config, wgPort int, log *zap.Logger) (*TLS443Server, error) {
+	if tlsCfg == nil {
+		return nil, fmt.Errorf("tls443: nil tls config")
 	}
-
 	return &TLS443Server{
 		tlsConfig: tlsCfg,
 		wgPort:    wgPort,
@@ -339,63 +289,4 @@ func (p *peekedConn) Read(b []byte) (int, error) {
 		return n + 1, err
 	}
 	return p.Conn.Read(b)
-}
-
-// loadOrGenerateCert loads a TLS certificate from certFile/keyFile.
-// If either path is empty or the files don't exist, it generates an in-memory
-// self-signed P-256 certificate.
-//
-// The generated key is never written to disk. A fresh one is cheap to make on
-// each start, and writing it to a shared directory would leave key material
-// readable by anything else running as root.
-func loadOrGenerateCert(certFile, keyFile string, log *zap.Logger) (tls.Certificate, error) {
-	if certFile != "" && keyFile != "" {
-		if _, err := os.Stat(certFile); err == nil {
-			if _, err := os.Stat(keyFile); err == nil {
-				return tls.LoadX509KeyPair(certFile, keyFile)
-			}
-		}
-	}
-
-	log.Info("tls443: generating in-memory self-signed certificate")
-
-	// Generate P-256 private key.
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("generate ecdsa key: %w", err)
-	}
-
-	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
-	serial, err := rand.Int(rand.Reader, serialLimit)
-	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("generate serial: %w", err)
-	}
-
-	tmpl := &x509.Certificate{
-		SerialNumber: serial,
-		Subject: pkix.Name{
-			Organization: []string{"Freewire"},
-			CommonName:   "vpn.freewire.com",
-		},
-		DNSNames:              []string{"vpn.freewire.com", "localhost"},
-		NotBefore:             time.Now().Add(-time.Minute),
-		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		BasicConstraintsValid: true,
-	}
-
-	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
-	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("create certificate: %w", err)
-	}
-
-	keyDER, err := x509.MarshalECPrivateKey(priv)
-	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("marshal key: %w", err)
-	}
-
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	return tls.X509KeyPair(certPEM, keyPEM)
 }

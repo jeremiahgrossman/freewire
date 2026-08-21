@@ -9,6 +9,7 @@ final class Preferences {
         static let killSwitch = "killSwitch"
         static let dnsResolverOverride = "dnsResolverOverride"
         static let skipRouting = "skipRouting"
+        static let pinnedServerKey = "pinnedServerKey"
         static let autoConnect = "autoConnect"
         static let networkIntelligence = "networkIntelligence"
         static let initialized = "prefsInitialized"
@@ -38,6 +39,18 @@ final class Preferences {
         #else
         return false
         #endif
+    }
+
+    /// WireGuard public key the user supplied for a self-hosted server.
+    ///
+    /// Not a secret, so UserDefaults is appropriate; what matters is that the
+    /// user chose it rather than the network supplying it.
+    var pinnedServerKey: String? {
+        get {
+            let v = UserDefaults.standard.string(forKey: Key.pinnedServerKey)
+            return (v?.isEmpty ?? true) ? nil : v
+        }
+        set { UserDefaults.standard.set(newValue, forKey: Key.pinnedServerKey) }
     }
 
     var killSwitchEnabled: Bool {

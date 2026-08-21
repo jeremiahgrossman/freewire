@@ -1,0 +1,69 @@
+import Foundation
+
+/// Decides whether a server's identity can be trusted.
+///
+/// The API is where the client learns the server's WireGuard public key, and
+/// that key is the trust anchor for the whole tunnel: whoever supplies it can
+/// terminate the tunnel and read everything inside it. Transport security alone
+/// is not enough, because a single mis-issued certificate for the API host
+/// would be enough to swap the key — so the key is pinned independently of the
+/// certificate that delivered it.
+enum ServerTrust {
+
+    /// WireGuard public keys accepted for the managed server.
+    ///
+    /// More than one so a key can be rotated without stranding clients: publish
+    /// the successor here, ship it, and only then switch the server over. A
+    /// single-valued pin would make every rotation a forced-update event.
+    static let managedServerKeys: Set<String> = [
+        // Populated at release time with the managed server's public key(s).
+        // Empty during development, which `isPinned` treats as "no managed
+        // server configured" rather than "trust anything".
+    ]
+
+    /// A key the user supplied out of band for a self-hosted server.
+    ///
+    /// Servers on a bare IP cannot hold a CA-signed certificate, so there is no
+    /// authenticated channel to learn their key over. The user carries it
+    /// across themselves — pasted or scanned from the server dashboard — and
+    /// that value, not the certificate, is what makes the server trustworthy.
+    static var userPinnedKey: String? {
+        get { Preferences.shared.pinnedServerKey }
+        set { Preferences.shared.pinnedServerKey = newValue }
+    }
+
+    /// Whether `key` is an acceptable identity for `host`.
+    static func accepts(key: String, host: String) -> Bool {
+        if let pinned = userPinnedKey, !pinned.isEmpty {
+            return constantTimeEquals(key, pinned)
+        }
+        guard !managedServerKeys.isEmpty else { return false }
+        for candidate in managedServerKeys where constantTimeEquals(key, candidate) {
+            return true
+        }
+        return false
+    }
+
+    /// Whether any pin is configured at all.
+    ///
+    /// Distinguishes "this build has no managed server and the user has not
+    /// supplied a key" from "the key presented does not match", so the client
+    /// can explain which of the two happened.
+    static var isPinned: Bool {
+        if let pinned = userPinnedKey, !pinned.isEmpty { return true }
+        return !managedServerKeys.isEmpty
+    }
+
+    /// Compares without leaking where two keys diverge.
+    ///
+    /// A public key is not secret, so this is belt and braces rather than
+    /// strictly required — but comparison routines get copied, and the copy is
+    /// not always about public data.
+    private static func constantTimeEquals(_ a: String, _ b: String) -> Bool {
+        let x = Array(a.utf8), y = Array(b.utf8)
+        guard x.count == y.count else { return false }
+        var diff: UInt8 = 0
+        for i in x.indices { diff |= x[i] ^ y[i] }
+        return diff == 0
+    }
+}

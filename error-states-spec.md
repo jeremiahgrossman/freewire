@@ -75,6 +75,33 @@ otherwise see nothing happen and the promise silently broken.
 
 ---
 
+## Server identity (TRUST)
+
+The API is where a client learns the server's WireGuard public key. Whoever
+supplies that key can terminate the tunnel and read everything inside it, so it
+is the trust anchor for the entire product.
+
+Transport security alone is not sufficient. A CA-signed certificate proves the
+client reached the host it asked for; it does not prove the key that host
+returned is the right one, and a single mis-issued certificate would be enough
+to substitute it. The key is therefore pinned independently of the certificate
+that delivered it.
+
+| ID | Condition | User-visible message | Type |
+|---|---|---|---|
+| TRUST-1 | No pinned key is configured for this server | "Freewire does not have a trusted key for this server. Add the server's key before connecting." | Hard block |
+| TRUST-2 | The server returned a key that does not match the pin | "This server's identity does not match the one Freewire trusts. Connection refused." | Hard block |
+
+TRUST-2 is never retried automatically and never offers "connect anyway". A
+mismatch is either a server that rotated its key without publishing the
+successor, or an attacker — and the client cannot distinguish them. Offering a
+bypass would hand the user the one decision they have no way to make correctly.
+
+Rotation is handled by accepting more than one key: the successor is published
+and shipped before the server switches, so no client is ever stranded.
+
+---
+
 ## Error Type Taxonomy
 
 - **Silent failure** — logged internally; user not notified; connection continues or degrades gracefully

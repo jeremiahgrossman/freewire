@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -16,11 +17,20 @@ import (
 type Server struct {
 	cfg *config.Config
 	wg  *tunnel.Manager
+	tls *tls.Config
 	log *zap.Logger
 }
 
-func NewServer(cfg *config.Config, wg *tunnel.Manager, log *zap.Logger) *Server {
-	return &Server{cfg: cfg, wg: wg, log: log}
+// NewServer creates the API server.
+//
+// tlsCfg is required. The API is where a client learns the server's WireGuard
+// public key, which is the trust anchor for the entire tunnel: served over
+// plaintext HTTP, anyone on the path could substitute their own key and
+// endpoint and terminate the tunnel themselves, with uTLS and the tunnel's own
+// cryptography protecting nothing. client-server-api-spec.md has always said
+// HTTPS only.
+func NewServer(cfg *config.Config, wg *tunnel.Manager, tlsCfg *tls.Config, log *zap.Logger) *Server {
+	return &Server{cfg: cfg, wg: wg, tls: tlsCfg, log: log}
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -31,19 +41,25 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("GET /v1/health", s.handleHealth)
 
 	addr := fmt.Sprintf(":%d", s.cfg.APIPort)
+	if s.tls == nil {
+		return fmt.Errorf("api: refusing to serve without TLS")
+	}
+
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           http.MaxBytesHandler(mux, 64*1024),
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		TLSConfig:         s.tls,
 	}
 
-	s.log.Info("api listening", zap.String("addr", addr))
+	s.log.Info("api listening (https)", zap.String("addr", addr))
 
 	errCh := make(chan error, 1)
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		// Certificates come from TLSConfig, so the file arguments are empty.
+		if err := srv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
 	}()
