@@ -14,22 +14,28 @@ are reproducible.
 Everything reads `config.env`. Fill it in first:
 
 ```bash
-route -n get 192.168.64.2 | grep interface   # -> UPLINK_IF
-ipconfig getifaddr bridge100                 # -> GATEWAY_IP
+docker inspect freewire-server \
+  --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'  # -> SERVER_IP
+route -n get "$SERVER_IP" | grep interface                        # -> UPLINK_IF
+ifconfig "$UPLINK_IF" | awk '/inet /{print $2}'                   # -> GATEWAY_IP
 ```
 
 | Variable | Meaning |
 |---|---|
-| `SERVER_IP` | UTM VM running `freewire-server` |
+| `SERVER_IP` | Container running `freewire-server`, on its routable address |
 | `UPLINK_IF` | Interface carrying traffic toward the server |
 | `GATEWAY_IP` | Where `proxy.py` binds for Config 1 |
 | `AUTO_REVERT_SECONDS` | Lockout protection — see Safety |
 
 ## Which directory
 
-**`macos/`** — for the current Mac + UTM VM setup. pf rules on the Mac
-restrict egress toward the VM, simulating the portal without extra
-hardware. Start here.
+**`macos/`** — for the current single-machine setup: client on the Mac,
+server in Docker. pf rules restrict egress toward the container address,
+simulating the portal without extra hardware. Start here.
+
+The container must be reached on its own address, not `127.0.0.1`.
+Loopback traffic does not traverse pf rules, so a run over loopback
+passes every config without testing anything.
 
 **`linux/`** — the guide's iptables rules, for a dedicated
 Linux/Raspberry Pi gateway with the test device behind it. Use when you
@@ -101,8 +107,8 @@ Record each run. Bugs found here become the first regression tests.
 
 | Config | Date | Path observed | Time | Pass | Notes |
 |---|---|---|---|---|---|
-| 0 | 2026-06 | TLS/443 | — | ✅ | Baseline, pre-harness, against the UTM VM |
-| — | 2026-08-21 | — | — | — | Harness retargeted from UTM to the OrbStack container at 192.168.97.2. Server moved to real ports 443/53 so the guide's rules apply unchanged. |
+| 0 | 2026-06 | TLS/443 | — | ✅ | Baseline, pre-harness, against the earlier VM |
+| — | 2026-08-21 | — | — | — | Harness retargeted to the Docker container. Server moved to real ports 443/53 so the guide's rules apply unchanged. |
 | 1 | | | | | |
 | 2 | | | | | |
 | 3 | | | | | |
@@ -146,7 +152,7 @@ machine's real default gateway. `config1.sh` puts the proxy at
 different addresses and always will be, so the CONNECT path can never
 succeed here no matter what the rules allow.
 
-This predates the move to Docker; the UTM setup had the same mismatch,
+This predates the move to Docker; the earlier VM setup had the same mismatch,
 which is why Config 1 was never recorded as passing.
 
 Two ways to fix it, neither done yet:

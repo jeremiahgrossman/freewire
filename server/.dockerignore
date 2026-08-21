@@ -1,6 +1,12 @@
-freewire-server.json
-freewire-server-dev.json
-freewire-server
-freewire-server-linux
+# Runtime config and server keypair — must never enter an image layer.
 data/
+freewire-server.json
+
+# Build artifacts; the image builds from source.
+freewire-server
+freewire-server-*
+
+# Certificate cache.
+acme-cache/
+
 .DS_Store

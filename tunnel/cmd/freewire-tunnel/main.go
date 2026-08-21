@@ -29,8 +29,8 @@ type Config struct {
 	ServerTunnelIP  string `json:"server_tunnel_ip"`  // e.g. 10.0.0.1
 	Keepalive       int    `json:"keepalive"`         // seconds, typically 25
 	InsecureTLS     bool   `json:"insecure_tls"`      // dev only: skip cert verify
-	TLSPort         int    `json:"tls_port"`          // default 443; override for dev (e.g. 8443)
-	DNSTunnelPort   int    `json:"dns_tunnel_port"`   // default 53; override for dev (e.g. 5353)
+	TLSPort         int    `json:"tls_port"`          // default 443; server reports its own
+	DNSTunnelPort   int    `json:"dns_tunnel_port"`   // default 53; server reports its own
 	ICMPUDPPort     int    `json:"icmp_udp_port"`     // default 4500
 }
 

@@ -1,25 +1,34 @@
-.PHONY: setup build run clean
+.PHONY: build test vet docker-up docker-down docker-logs docker-rebuild clean
 
-BINARY  = freewire-server
-CONFIG  = freewire-server.json
+BINARY = freewire-server
 
-# Fetch dependencies and tidy go.mod / go.sum.
-setup:
-	go get go.uber.org/zap@latest
-	go get golang.org/x/crypto@latest
-	go get golang.zx2c4.com/wireguard@latest
-	go mod tidy
+# The server runs in Docker (see ../docker-compose.yml). These targets cover
+# local build and test; use the docker-* targets to run it.
 
-# Build a local macOS binary (arm64 or amd64 based on host).
-build: setup
+build:
 	CGO_ENABLED=0 go build -o $(BINARY) ./cmd/freewire-server
 
-# Run the server.
-# Requires root for utun interface creation and route configuration.
-# Enable IP forwarding first so tunnel clients can reach the internet:
-#   sudo sysctl -w net.inet.ip.forwarding=1
-run: build
-	sudo ./$(BINARY) $(CONFIG)
+vet:
+	go vet ./...
+
+test:
+	go test -race -count=1 ./...
+
+# ---- Docker (the supported way to run the server) ----
+
+# Build and start. Config and keys persist in ./data, which is gitignored.
+docker-up:
+	cd .. && docker compose up --build -d
+
+docker-down:
+	cd .. && docker compose down
+
+docker-logs:
+	docker logs -f freewire-server
+
+# Pick up source changes.
+docker-rebuild:
+	cd .. && docker compose up --build -d --force-recreate
 
 clean:
-	rm -f $(BINARY) $(CONFIG)
+	rm -f $(BINARY)

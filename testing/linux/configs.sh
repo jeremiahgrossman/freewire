@@ -5,7 +5,7 @@
 # Usage:  sudo ./configs.sh <0|1|2|3|4|5|6|reset>
 #
 # Use this when running a dedicated Linux/Raspberry Pi gateway with the
-# test device behind it. For the Mac + UTM VM setup, use ../macos/ instead.
+# test device behind it. For the single-machine Docker setup, use ../macos/ instead.
 
 set -euo pipefail
 

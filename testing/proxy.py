@@ -3,7 +3,7 @@
 Minimal HTTP CONNECT proxy for Freewire test Configuration 1.
 
 Simulates a captive portal that exposes a CONNECT proxy on port 443.
-Run on the gateway machine (or the Mac, for the UTM VM setup):
+Run on the gateway machine (see README "Config 1 does not work on a single machine"):
 
     sudo python3 proxy.py [--port 443] [--bind 0.0.0.0]
 

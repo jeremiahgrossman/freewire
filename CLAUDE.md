@@ -13,8 +13,23 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 - **Active phase:** Phase 2 — Captive portal
 - **In progress:** nothing
-- **Last completed:** Server moved from the UTM VM to Docker (`docker-compose.yml` at repo root; `server/Dockerfile`; dev config in `server/data/`, ports 8080/8443/5353/4500/51820 on `127.0.0.1`). uTLS integrated on both TLS paths with Chrome/Safari/Firefox fingerprint rotation. ACME/Let's Encrypt added to the server (set `acme_domain` to enable; self-signed remains the dev default). 53-finding audit applied — see below. First test suite and `.github/workflows/ci.yml` added.
-- **Blocked on:** nothing — run configs 1–6 via `testing/README.md`. Config 0 passes against Docker at `127.0.0.1`.
+- **Next action:** run captive portal configs 2, 3, 5 via `testing/README.md`. Config 1 is blocked (see below), 4 needs a local NXDOMAIN resolver, 6 needs 3 to pass first.
+- **Blocked on:** nothing
+
+### Dev environment (as of 2026-08-21)
+
+The server runs in Docker, not a VM. Start it with `make -C server docker-up`; logs via `make -C server docker-logs`.
+
+| | |
+|---|---|
+| Server address | The container's routable address. Find it: `docker inspect freewire-server --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'` (currently `192.168.97.2`) |
+| Ports | API `8080`, TLS `443`, DNS `53`, ICMP/UDP `4500`, WireGuard `51820` — the real ports, so the harness rules from the guide apply unchanged |
+| Config + keys | `server/data/freewire-server.json`, generated on first start, gitignored |
+| Client target | `AppDelegate.swift` points at the container address. **Not `127.0.0.1`** — loopback bypasses the pf rules, so every harness config would pass without testing anything |
+| Build + run the app | `xcodebuild build -project macos/Freewire/Freewire.xcodeproj -scheme Freewire -configuration Debug CODE_SIGNING_ALLOWED=NO`, then `open` the product. No Xcode GUI needed |
+| Tunnel binary | `cd tunnel && go build -o freewire-tunnel ./cmd/freewire-tunnel`. Debug builds fall back to this path; release builds require it bundled |
+
+**Recent work:** uTLS on both TLS paths with Chrome/Safari/Firefox fingerprint rotation. ACME/Let's Encrypt on the server (set `acme_domain`; self-signed stays the dev default). 53-finding audit applied in full. First test suite (`go test -race ./...` in `server/`) and `.github/workflows/ci.yml`, which fails on any `RemoteAddr` or private-key logging. CI has been written but never executed — nothing has been pushed yet.
 
 **Fixed in the 2026-08-21 audit pass:**
 
@@ -31,12 +46,15 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 All 53 audit findings are now closed except the privileged helper below. Second pass added: ICMP anti-replay window (64-entry sliding window, checked before decryption), ICMP activation re-entry guard, session-token collision handling, in-memory dev TLS key, EDNS0 on DNS queries, exit paths for both client run loops, `replace_allowed_ips` on the client, cached AEADs, bounded worker pools on both UDP listeners, coalesced frame writes, O(1) IP pool, a correct gateway-based HTTP CONNECT probe, and the client UX fixes (dead Connect button, network-drop handling, captive-portal reconnect, timer granularity).
 
-**Known Phase 2 gaps** (do not block configs 1–6):
+**Known Phase 2 gaps** (none block configs 2–6):
 
-- `FreewireHelper` does not exist — the pf kill switch is unimplemented, and `TunnelManager.reconnecting` claims "kill switch active" while nothing enforces it. This is the one audit item deliberately left open: it is not a fix but a project (signing configuration, install and update flow, and a decision about how pf rules are torn down if the helper dies). Build it against `SMAppService`, not SMJobBless, which Apple deprecated in macOS 13. Needed before GA.
-- `PathUpgradeManager` still returns false for the DNS and ICMP paths; probing either requires a full handshake.
+- **`FreewireHelper` does not exist — the pf kill switch is unimplemented.** The one audit item deliberately left open, because it is a project rather than a fix: signing configuration, an install and update flow, and fail-mode semantics. The UI no longer claims it (see `error-states-spec.md` §"Interim: kill switch not yet enforced"); the toggle is disabled and defaults off. **Resolved:** build against `SMAppService`, not SMJobBless (deprecated in macOS 13), and **fail closed** — pf rules persist if the helper dies, and release only on explicit user action. Needed before GA.
+- **Config 1 is untestable on one machine.** `tryHTTPConnect` probes the machine's real default gateway; `config1.sh` puts the proxy on the container bridge. They can never match. Needs a second machine or a pf `rdr`. See `testing/README.md`.
+- `PathUpgradeManager` returns false for the DNS and ICMP paths; probing either requires a full handshake.
 - ECH is not implemented. uTLS hides the handshake fingerprint, but SNI still names the destination in cleartext. Requires publishing ECH config in DNS — design the Phase 3 server DNS setup so this can be added without rework.
 - DoH is hardcoded to Cloudflare 1.1.1.1: a single point of failure and a single point of trust for a privacy-sensitive signal. Should become a list with fallback.
+- No Swift tests. `FreewireTests/` is empty; the suite is Go-only so far.
+- Privacy Pass is not implemented — `peers_handler.go` accepts any registration. Phase 4.
 - `captive-portal-testing-guide.md`'s `proxy.py` listing is broken — its relay threads never iterate. `testing/proxy.py` is a working replacement; fold it back into the guide.
 
 ---
@@ -119,9 +137,9 @@ product-review-checklist.md       (QA/launch review process — not a coding spe
 
 | Component | Technology |
 |---|---|
-| macOS client | Swift, wireguard-go (userspace via utun — no NetworkExtension), pf kill switch via SMJobBless privileged helper, NWPathMonitor for network change detection, Sparkle (auto-update) |
+| macOS client | Swift, wireguard-go (userspace via utun — no NetworkExtension), pf kill switch via an `SMAppService` privileged helper (**not built yet**; supersedes SMJobBless, deprecated in macOS 13), uTLS for TLS fingerprint rotation, NWPathMonitor for network change detection, Sparkle (auto-update) |
 | iOS client | **Deferred.** Will require Swift, WireGuardKit, NetworkExtension (NEPacketTunnelProvider), and Apple entitlement approval when resumed. |
-| Server | Go, wireguard-go (reference userspace implementation) |
+| Server | Go, wireguard-go (reference userspace implementation). Runs in Docker for development — see Current State |
 | DNS resolver | Cloudflare 1.1.1.1 (DoH, hardcoded — not user-configurable at launch) |
 | Hosting | AWS (EC2, CloudFormation, S3, Route 53) |
 | CI/CD | GitHub Actions |
@@ -136,7 +154,7 @@ product-review-checklist.md       (QA/launch review process — not a coding spe
 freewire/
 ├── macos/                  # macOS app (Swift)
 │   ├── Freewire/           # App target (menu bar UI, settings, onboarding)
-│   ├── FreewireHelper/     # Privileged helper (SMJobBless) — pf kill switch, utun setup
+│   ├── FreewireHelper/     # Privileged helper (SMAppService) — pf kill switch. NOT YET BUILT
 │   └── FreewireTests/
 ├── server/                 # Go server binary
 │   ├── cmd/freewire-server/
@@ -236,10 +254,10 @@ Load only the specs for the active phase. The full list is 24 files — loading 
 **Swift (macOS — iOS is deferred):**
 - All network operations have explicit timeouts — no indefinite waits
 - WireGuard is handled by `wireguard-go` (userspace) via direct `utun` — do NOT use WireGuardKit or NetworkExtension on macOS
-- Privileged operations (pf kill switch, utun setup) go in the `FreewireHelper` SMJobBless target — not the main app target
+- Privileged operations (pf kill switch) go in the `FreewireHelper` `SMAppService` target — not the main app target. The target does not exist yet; see Current State
 - Keychain access via a dedicated `KeychainHelper` — no direct SecItem calls scattered through the codebase
 - Error states: implement exact user-visible strings from `error-states-spec.md` — no paraphrasing
-- uTLS on the TLS/443 path: rotate among Chrome, Safari/iOS, and Firefox fingerprints
+- uTLS on the TLS/443 and HTTP CONNECT paths: rotate among Chrome, Safari, and Firefox fingerprints (implemented in `tunnel/cmd/freewire-tunnel/utls.go`)
 
 **Go (server):**
 - Static binary: `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build`

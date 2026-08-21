@@ -10,13 +10,36 @@ services:
       - NET_RAW
     devices:
       - /dev/net/tun
+
+    # The container gets its own routable address (OrbStack assigns one on a
+    # bridge interface; find it with:
+    #   docker inspect freewire-server \
+    #     --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'
+    #
+    # Reach the server at that address directly. Two reasons not to rely on
+    # published ports here:
+    #   - The server binds the real ports (443, 53) inside the container, which
+    #     would collide with the host on 53.
+    #   - The captive portal harness filters traffic with pf. Loopback does not
+    #     traverse those rules, so testing over 127.0.0.1 would pass every
+    #     config without exercising anything.
+    #
+    # Only the API is published, for convenience from the host.
     ports:
-      - "51820:51820/udp"   # WireGuard
-      - "8080:8080/tcp"     # API
-      - "8443:8443/tcp"     # TLS/443 transport (mapped from 443 to avoid root requirement)
-      - "5353:5353/udp"     # DNS tunnel (mapped from 53)
-      - "4500:4500/udp"     # ICMP/UDP tunnel
+      - "127.0.0.1:8080:8080/tcp"   # HTTP API
+
+    # Transport ports, reachable on the container address:
+    #   443/tcp    TLS/443
+    #   53/udp     DNS tunnel
+    #   4500/udp   ICMP/UDP tunnel
+    #   51820/udp  WireGuard
+    expose:
+      - "443"
+      - "53"
+      - "4500"
+      - "51820"
+
     volumes:
-      - ./server/data:/data  # config + key persisted here
+      - ./server/data:/data   # config and server keypair; gitignored
     environment:
       - TZ=UTC
