@@ -90,6 +90,41 @@ func TestReleasedIPIsReused(t *testing.T) {
 	}
 }
 
+// A double release must not push the address onto the free list twice, or two
+// peers would later be handed the same tunnel IP.
+func TestDoubleReleaseIsIgnored(t *testing.T) {
+	p := testPool(t, "10.0.0.0/24", "10.0.0.1")
+	ip, err := p.Allocate()
+	if err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	p.Release(ip)
+	p.Release(ip)
+
+	seen := map[string]bool{}
+	for {
+		got, err := p.Allocate()
+		if err != nil {
+			break
+		}
+		if seen[got] {
+			t.Fatalf("address %s handed out twice after a double release", got)
+		}
+		seen[got] = true
+	}
+}
+
+func TestReleaseUnknownAddressIsIgnored(t *testing.T) {
+	p := testPool(t, "10.0.0.0/24", "10.0.0.1")
+	before := p.Size()
+	p.Release("10.0.0.99") // never allocated
+	p.Release("not-an-ip")
+	p.Release("192.168.1.1") // outside the pool
+	if got := p.Size(); got != before {
+		t.Errorf("size changed from %d to %d after releasing unallocated addresses", before, got)
+	}
+}
+
 func TestPoolSurvivesRepeatedChurn(t *testing.T) {
 	p := testPool(t, "10.0.0.0/24", "10.0.0.1")
 	for i := 0; i < 5000; i++ {

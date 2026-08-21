@@ -207,11 +207,12 @@ func runLocalProxy(localProxy net.PacketConn, transport net.Conn) {
 	// packets length-framed to the transport.
 	go func() {
 		defer closeAll()
-		buf := make([]byte, 1<<16)
-		lb := make([]byte, 2)
+		// Length prefix and body share one buffer so each packet is a single
+		// Write, and therefore a single TLS record.
+		frame := make([]byte, 2+(1<<16))
 		first := true
 		for {
-			n, peer, err := localProxy.ReadFrom(buf)
+			n, peer, err := localProxy.ReadFrom(frame[2:])
 			if err != nil {
 				return
 			}
@@ -219,11 +220,8 @@ func runLocalProxy(localProxy net.PacketConn, transport net.Conn) {
 				first = false
 				peerCh <- peer
 			}
-			binary.BigEndian.PutUint16(lb, uint16(n))
-			if _, err := transport.Write(lb); err != nil {
-				return
-			}
-			if _, err := transport.Write(buf[:n]); err != nil {
+			binary.BigEndian.PutUint16(frame[:2], uint16(n))
+			if _, err := transport.Write(frame[:2+n]); err != nil {
 				return
 			}
 		}

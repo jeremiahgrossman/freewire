@@ -56,8 +56,8 @@ private struct PanelBody: View {
                 ConnectingBody(status: status, tunnelManager: tunnelManager)
             case .connected(_, _, let connectedAt, let transport):
                 ConnectedBody(connectedAt: connectedAt, transport: transport, tunnelManager: tunnelManager)
-            case .reconnecting:
-                ReconnectingBody(tunnelManager: tunnelManager)
+            case .reconnecting(let attempt):
+                ReconnectingBody(attempt: attempt, tunnelManager: tunnelManager)
             case .blocked:
                 BlockedBody(tunnelManager: tunnelManager)
             case .captivePortal(let url):
@@ -127,7 +127,11 @@ private struct ConnectedBody: View {
     @State private var ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     var duration: String {
-        let mins = max(0, Int(now.timeIntervalSince(connectedAt) / 60))
+        let secs = max(0, Int(now.timeIntervalSince(connectedAt)))
+        // Below a minute, show seconds. "0 min" for the first full minute read
+        // as a broken timer at exactly the moment the user is checking it.
+        if secs < 60 { return "\(secs) sec" }
+        let mins = secs / 60
         if mins < 60 { return "\(mins) min" }
         return "\(mins / 60) hr \(mins % 60) min"
     }
@@ -171,6 +175,7 @@ private struct TransportIndicator: View {
 // MARK: - Reconnecting
 
 private struct ReconnectingBody: View {
+    let attempt: Int
     @ObservedObject var tunnelManager: TunnelManager
 
     var body: some View {
@@ -180,11 +185,14 @@ private struct ReconnectingBody: View {
                 Text("Reconnecting...")
                     .font(.subheadline.weight(.medium))
             }
-            Text("Your traffic is blocked until reconnected.")
+            Text("Attempt \(attempt + 1) of 3. Your traffic is blocked until reconnected.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             Spacer().frame(height: 4)
-            Button("Disconnect and restore unprotected access") {
+            // F13: the full sentence overflowed the 240pt panel. The explanation
+            // lives in the caption above.
+            Button("Disconnect") {
                 Task { await tunnelManager.disconnect() }
             }
             .buttonStyle(SecondaryButtonStyle())

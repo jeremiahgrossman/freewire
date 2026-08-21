@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base32"
@@ -22,10 +23,10 @@ import (
 // DNSServer is an authoritative DNS server for tunnel.freewire.com.
 // It handles the Freewire DNS tunnel protocol:
 //
-//   h.1.<b32(clientPub)>.tunnel.freewire.com  → ClientHello
-//   h.3.<b32(mac)>.<b32(token)>.tunnel.freewire.com → ClientConfirm
-//   t.<b32(seq)>.<b32(token)>.<...data...>.tunnel.freewire.com → data
-//   k.<b32(token)>.tunnel.freewire.com → keepalive
+//	h.1.<b32(clientPub)>.tunnel.freewire.com  → ClientHello
+//	h.3.<b32(mac)>.<b32(token)>.tunnel.freewire.com → ClientConfirm
+//	t.<b32(seq)>.<b32(token)>.<...data...>.tunnel.freewire.com → data
+//	k.<b32(token)>.tunnel.freewire.com → keepalive
 type DNSServer struct {
 	wgPort   int
 	sessions sync.Map // base32(token) → *dnsSession
@@ -34,31 +35,44 @@ type DNSServer struct {
 
 // dnsSession holds the server-side state for one DNS tunnel session.
 type dnsSession struct {
-	token      [10]byte
+	token [10]byte
 	// sessionKey authenticates the ClientConfirm MAC only.
 	sessionKey [32]byte
 	// Directional keys. Both peers number packets from zero, so a single shared
 	// key would repeat the (key, nonce) pair across directions.
 	keyC2S [32]byte // client → server: server opens with this
 	keyS2C [32]byte // server → client: server seals with this
+	// AEADs built once at activation rather than per packet.
+	aeadRx cipher.AEAD
+	aeadTx cipher.AEAD
 	// Each session gets its own UDP socket dialing the local WG port.
 	localConn *net.UDPConn
 	wgAddr    *net.UDPAddr
 	// Sequence counters.
-	rxSeq  uint32
-	txSeq  uint32
-	mu     sync.Mutex
+	rxSeq uint32
+	txSeq uint32
+	mu    sync.Mutex
 	// Handshake state: pending until ClientConfirm received.
-	serverPriv  [32]byte
-	serverPub   []byte
-	confirmMAC  []byte // expected MAC from client
-	activated   bool
-	lastSeen    time.Time
+	serverPriv [32]byte
+	serverPub  []byte
+	confirmMAC []byte // expected MAC from client
+	activated  bool
+	lastSeen   time.Time
 	// Inbound WG packets queued for piggybacking in data responses.
 	wgInbound chan []byte
 }
 
+// Worker pool sizing for the UDP read loop.
+const (
+	dnsWorkers    = 16
+	dnsQueueDepth = 256
+)
+
 var srvB32enc = base32.StdEncoding.WithPadding(base32.NoPadding)
+
+// dnsTunnelSuffix is the authoritative zone, uppercased once at init rather
+// than rebuilt per query.
+const dnsTunnelSuffix = ".TUNNEL.FREEWIRE.COM"
 
 // NewDNSServer creates a DNSServer that bridges to WireGuard on wgPort.
 func NewDNSServer(wgPort int, log *zap.Logger) *DNSServer {
@@ -81,8 +95,25 @@ func (s *DNSServer) Run(ctx context.Context, port int) error {
 		ln.Close()
 	}()
 
-	buf := make([]byte, 4096)
 	uc := ln.(*net.UDPConn)
+
+	// Bounded worker pool, same rationale as the ICMP listener: a goroutine per
+	// query is unbounded under load.
+	type job struct {
+		pkt  []byte
+		addr *net.UDPAddr
+	}
+	jobs := make(chan job, dnsQueueDepth)
+	defer close(jobs)
+	for i := 0; i < dnsWorkers; i++ {
+		go func() {
+			for j := range jobs {
+				s.handleQuery(j.pkt, j.addr, uc)
+			}
+		}()
+	}
+
+	buf := make([]byte, 4096)
 	for {
 		n, srcAddr, err := uc.ReadFromUDP(buf)
 		if err != nil {
@@ -94,7 +125,12 @@ func (s *DNSServer) Run(ctx context.Context, port int) error {
 		}
 		pkt := make([]byte, n)
 		copy(pkt, buf[:n])
-		go s.handleQuery(pkt, srcAddr, uc)
+		select {
+		case jobs <- job{pkt: pkt, addr: srcAddr}:
+		default:
+			// Queue full: drop. A dropped query looks like packet loss to the
+			// client, which the tunnel already handles.
+		}
 	}
 }
 
@@ -140,13 +176,12 @@ func (s *DNSServer) handleQuery(buf []byte, srcAddr *net.UDPAddr, conn *net.UDPC
 		return
 	}
 	name = strings.ToUpper(strings.TrimSuffix(name, "."))
-	suffix := strings.ToUpper("." + "TUNNEL.FREEWIRE.COM")
-	if !strings.HasSuffix(name, suffix) {
+	if !strings.HasSuffix(name, dnsTunnelSuffix) {
 		s.sendNXDomain(conn, srcAddr, qid)
 		return
 	}
 	// Strip the tunnel domain suffix.
-	label := strings.TrimSuffix(name, strings.ToUpper(".TUNNEL.FREEWIRE.COM"))
+	label := strings.TrimSuffix(name, dnsTunnelSuffix)
 
 	parts := strings.Split(label, ".")
 	if len(parts) < 2 {
@@ -292,6 +327,18 @@ func (s *DNSServer) handleClientConfirm(conn *net.UDPConn, srcAddr *net.UDPAddr,
 		return
 	}
 
+	// Build both AEADs once; the keys are fixed for the session lifetime.
+	aeadRx, err := chacha20poly1305.New(sess.keyC2S[:])
+	if err != nil {
+		s.sendNXDomain(conn, srcAddr, qid)
+		return
+	}
+	aeadTx, err := chacha20poly1305.New(sess.keyS2C[:])
+	if err != nil {
+		s.sendNXDomain(conn, srcAddr, qid)
+		return
+	}
+
 	// Activate session: open per-session WG bridge socket.
 	wgAddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("127.0.0.1:%d", s.wgPort))
 	if err != nil {
@@ -304,6 +351,8 @@ func (s *DNSServer) handleClientConfirm(conn *net.UDPConn, srcAddr *net.UDPAddr,
 		s.sendNXDomain(conn, srcAddr, qid)
 		return
 	}
+	sess.aeadRx = aeadRx
+	sess.aeadTx = aeadTx
 	sess.localConn = uc
 	sess.wgAddr = wgAddr
 	sess.activated = true
@@ -346,14 +395,23 @@ func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, qid []by
 		return
 	}
 	sess := v.(*dnsSession)
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
 
+	// Take everything needed from the session under the lock, then release it
+	// before any network I/O. A blocked UDP write while holding sess.mu would
+	// stall every other query on this session.
+	sess.mu.Lock()
 	if !sess.activated {
+		sess.mu.Unlock()
 		s.sendNXDomain(conn, srcAddr, qid)
 		return
 	}
 	sess.lastSeen = time.Now()
+	rxAEAD := sess.aeadRx
+	txAEAD := sess.aeadTx
+	localConn := sess.localConn
+	txSeq := sess.txSeq
+	sess.txSeq++
+	sess.mu.Unlock()
 
 	seqBytes, err := srvB32enc.DecodeString(parts[0])
 	if err != nil || len(seqBytes) != 4 {
@@ -370,14 +428,9 @@ func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, qid []by
 		return
 	}
 
-	rxAEAD, err := chacha20poly1305.New(sess.keyC2S[:])
-	if err != nil {
-		s.sendNXDomain(conn, srcAddr, qid)
-		return
-	}
-
-	nonce := srvDNSMakeNonce(seq)
-	plain, err := rxAEAD.Open(nil, nonce, ciphertext, nil)
+	var nonce [12]byte
+	srvDNSNonceInto(seq, &nonce)
+	plain, err := rxAEAD.Open(nil, nonce[:], ciphertext, nil)
 	if err != nil {
 		s.log.Error("dns: decrypt data", zap.Error(err))
 		s.sendNXDomain(conn, srcAddr, qid)
@@ -385,7 +438,7 @@ func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, qid []by
 	}
 
 	// Forward plaintext to WireGuard.
-	sess.localConn.Write(plain) //nolint:errcheck
+	localConn.Write(plain) //nolint:errcheck
 
 	// Piggyback any pending WG inbound response.
 	var wgPkt []byte
@@ -401,16 +454,9 @@ func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, qid []by
 		return
 	}
 
-	// Encrypt WG response packet.
-	txSeq := sess.txSeq
-	sess.txSeq++
-	txAEAD, err := chacha20poly1305.New(sess.keyS2C[:])
-	if err != nil {
-		s.sendNXDomain(conn, srcAddr, qid)
-		return
-	}
-	txNonce := srvDNSMakeNonce(txSeq)
-	encrypted := txAEAD.Seal(nil, txNonce, wgPkt, nil)
+	var txNonce [12]byte
+	srvDNSNonceInto(txSeq, &txNonce)
+	encrypted := txAEAD.Seal(nil, txNonce[:], wgPkt, nil)
 
 	// Encode response: <b32(txSeq)>.<b32(encrypted)>
 	txSeqB32 := srvB32enc.EncodeToString(uint32BESrv(txSeq))
@@ -480,9 +526,9 @@ func buildDNSTXTResponse(qid []byte, txt string) []byte {
 	buf = append(buf, 0x00, 0x00) // NSCOUNT = 0
 	buf = append(buf, 0x00, 0x00) // ARCOUNT = 0
 
-	buf = append(buf, 0x00)       // NAME = root label
-	buf = append(buf, 0x00, 0x10) // TYPE = TXT (16)
-	buf = append(buf, 0x00, 0x01) // CLASS = IN
+	buf = append(buf, 0x00)                   // NAME = root label
+	buf = append(buf, 0x00, 0x10)             // TYPE = TXT (16)
+	buf = append(buf, 0x00, 0x01)             // CLASS = IN
 	buf = append(buf, 0x00, 0x00, 0x00, 0x3C) // TTL = 60
 
 	// Build RDATA: one or more length-prefixed character-strings of ≤255 bytes each.
@@ -518,11 +564,12 @@ func buildDNSNXDomain(qid []byte) []byte {
 	return buf
 }
 
-// srvDNSMakeNonce builds a 12-byte ChaCha20-Poly1305 nonce: seq(4B big-endian) || 0x00(8B).
-func srvDNSMakeNonce(seq uint32) []byte {
-	nonce := make([]byte, 12)
-	binary.BigEndian.PutUint32(nonce[:4], seq)
-	return nonce
+// srvDNSNonceInto writes a 12-byte ChaCha20-Poly1305 nonce into out:
+// seq(4B big-endian) || 0x00(8B). Filling a caller-owned array keeps the nonce
+// off the heap in the packet path.
+func srvDNSNonceInto(seq uint32, out *[12]byte) {
+	*out = [12]byte{}
+	binary.BigEndian.PutUint32(out[:4], seq)
 }
 
 // uint32BESrv encodes a uint32 as 4-byte big-endian.

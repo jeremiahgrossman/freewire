@@ -258,24 +258,20 @@ func (s *TLS443Server) bridgeToWireGuard(transport net.Conn) {
 	}()
 
 	// WireGuard UDP → transport.
-	buf := make([]byte, 1<<16)
-	lb := make([]byte, 2)
+	//
+	// The length prefix and body go out in one Write. Splitting them emitted two
+	// TLS records per packet, doubling record overhead and syscalls.
+	frame := make([]byte, 2+(1<<16))
 	for {
-		n, err := udpConn.Read(buf)
+		n, err := udpConn.Read(frame[2:])
 		if err != nil {
 			if !isClosedErr(err) {
 				s.log.Error("tls443: bridge: read from wg udp", zap.Error(err))
 			}
 			return
 		}
-		binary.BigEndian.PutUint16(lb, uint16(n))
-		if _, err := transport.Write(lb); err != nil {
-			if !isClosedErr(err) {
-				s.log.Error("tls443: bridge: write length to transport", zap.Error(err))
-			}
-			return
-		}
-		if _, err := transport.Write(buf[:n]); err != nil {
+		binary.BigEndian.PutUint16(frame[:2], uint16(n))
+		if _, err := transport.Write(frame[:2+n]); err != nil {
 			if !isClosedErr(err) {
 				s.log.Error("tls443: bridge: write packet to transport", zap.Error(err))
 			}
@@ -308,8 +304,12 @@ func (p *peekedConn) Read(b []byte) (int, error) {
 }
 
 // loadOrGenerateCert loads a TLS certificate from certFile/keyFile.
-// If either path is empty or the files don't exist, it generates a self-signed
-// P-256 certificate valid for 10 years and saves it to /tmp/.
+// If either path is empty or the files don't exist, it generates an in-memory
+// self-signed P-256 certificate.
+//
+// The generated key is never written to disk. A fresh one is cheap to make on
+// each start, and writing it to a shared directory would leave key material
+// readable by anything else running as root.
 func loadOrGenerateCert(certFile, keyFile string, log *zap.Logger) (tls.Certificate, error) {
 	if certFile != "" && keyFile != "" {
 		if _, err := os.Stat(certFile); err == nil {
@@ -319,9 +319,7 @@ func loadOrGenerateCert(certFile, keyFile string, log *zap.Logger) (tls.Certific
 		}
 	}
 
-	log.Info("tls443: generating self-signed certificate")
-	devCert := "/tmp/freewire-dev-cert.pem"
-	devKey := "/tmp/freewire-dev-key.pem"
+	log.Info("tls443: generating in-memory self-signed certificate")
 
 	// Generate P-256 private key.
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -354,36 +352,12 @@ func loadOrGenerateCert(certFile, keyFile string, log *zap.Logger) (tls.Certific
 		return tls.Certificate{}, fmt.Errorf("create certificate: %w", err)
 	}
 
-	// Write cert PEM.
-	certOut, err := os.OpenFile(devCert, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
-	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("open cert file: %w", err)
-	}
-	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: certDER}); err != nil {
-		certOut.Close()
-		return tls.Certificate{}, fmt.Errorf("encode cert pem: %w", err)
-	}
-	certOut.Close()
-
-	// Write key PEM.
-	keyOut, err := os.OpenFile(devKey, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("open key file: %w", err)
-	}
 	keyDER, err := x509.MarshalECPrivateKey(priv)
 	if err != nil {
-		keyOut.Close()
 		return tls.Certificate{}, fmt.Errorf("marshal key: %w", err)
 	}
-	if err := pem.Encode(keyOut, &pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}); err != nil {
-		keyOut.Close()
-		return tls.Certificate{}, fmt.Errorf("encode key pem: %w", err)
-	}
-	keyOut.Close()
 
-	log.Info("tls443: self-signed cert written",
-		zap.String("cert", devCert),
-		zap.String("key", devKey),
-	)
-	return tls.LoadX509KeyPair(devCert, devKey)
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return tls.X509KeyPair(certPEM, keyPEM)
 }

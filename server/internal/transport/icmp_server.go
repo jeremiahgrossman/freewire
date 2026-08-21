@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -44,6 +45,10 @@ type icmpSrvSession struct {
 	keyS2C [32]byte // server → client: server seals with this
 	// sessionKey is retained only to authenticate the ClientConfirm MAC.
 	sessionKey [32]byte
+	// AEADs built once at activation. Constructing them per packet showed up as
+	// pure overhead in the forwarding path.
+	aeadRx cipher.AEAD // opens client → server
+	aeadTx cipher.AEAD // seals server → client
 	// Client address — all responses go here.
 	clientAddr *net.UDPAddr
 	// Per-session WG bridge socket.
@@ -52,11 +57,56 @@ type icmpSrvSession struct {
 	txSeq    uint32
 	mu       sync.Mutex
 	lastSeen time.Time
+	// Anti-replay state for the inbound direction: the highest sequence seen and
+	// a bitmap of the 64 below it. Without this a captured packet can be replayed
+	// indefinitely — it decrypts cleanly every time, since its nonce is valid.
+	rxHighest uint32
+	rxBitmap  uint64
 	// Pending handshake state (before ClientConfirm).
 	serverPriv [32]byte
 	activated  bool
 	// Inbound WG packets to forward to client.
 	wgInbound chan []byte
+}
+
+// Worker pool sizing for the UDP read loop.
+const (
+	icmpWorkers    = 16
+	icmpQueueDepth = 256
+)
+
+// icmpReplayWindow is how far behind the highest received sequence a packet may
+// arrive and still be accepted. Matches the WireGuard/IPsec convention.
+const icmpReplayWindow = 64
+
+// checkReplay reports whether seq is fresh, recording it when so.
+// Callers must hold sess.mu.
+func (sess *icmpSrvSession) checkReplay(seq uint32) bool {
+	switch {
+	case seq > sess.rxHighest:
+		// Advance the window, shifting the bitmap by the gap.
+		shift := seq - sess.rxHighest
+		if shift >= icmpReplayWindow {
+			sess.rxBitmap = 0
+		} else {
+			sess.rxBitmap <<= shift
+		}
+		sess.rxBitmap |= 1
+		sess.rxHighest = seq
+		return true
+
+	case sess.rxHighest-seq >= icmpReplayWindow:
+		// Too old to prove it is not a replay.
+		return false
+
+	default:
+		bit := uint64(1) << (sess.rxHighest - seq)
+		if sess.rxBitmap&bit != 0 {
+			return false // already seen
+		}
+		sess.rxBitmap |= bit
+		return true
+	}
 }
 
 // NewICMPServer creates an ICMPServer bridging to WireGuard on wgPort.
@@ -81,6 +131,23 @@ func (s *ICMPServer) Run(ctx context.Context, port int) error {
 	}()
 
 	uc := ln.(*net.UDPConn)
+
+	// Bounded worker pool. Spawning a goroutine per datagram let any burst -- or
+	// a flood -- create unbounded goroutines and heap copies.
+	type job struct {
+		pkt  []byte
+		addr *net.UDPAddr
+	}
+	jobs := make(chan job, icmpQueueDepth)
+	defer close(jobs)
+	for i := 0; i < icmpWorkers; i++ {
+		go func() {
+			for j := range jobs {
+				s.handlePacket(j.pkt, j.addr, uc)
+			}
+		}()
+	}
+
 	buf := make([]byte, 1600)
 	for {
 		n, srcAddr, err := uc.ReadFromUDP(buf)
@@ -93,7 +160,12 @@ func (s *ICMPServer) Run(ctx context.Context, port int) error {
 		}
 		pkt := make([]byte, n)
 		copy(pkt, buf[:n])
-		go s.handlePacket(pkt, srcAddr, uc)
+		select {
+		case jobs <- job{pkt: pkt, addr: srcAddr}:
+		default:
+			// Queue full: drop rather than block the read loop. The tunnel
+			// protocol already tolerates loss.
+		}
 	}
 }
 
@@ -198,9 +270,25 @@ func (s *ICMPServer) handleHello(pkt []byte, srcAddr *net.UDPAddr, conn *net.UDP
 		return
 	}
 
-	// Assign session token (2 random bytes).
+	// Assign session token (2 random bytes). The space is only 65536 wide, so
+	// collisions are realistic; storing over a live entry would strand that
+	// session's goroutines with no one left to close their channel.
 	var token [2]byte
-	if _, err := rand.Read(token[:]); err != nil {
+	var tokenKey uint16
+	claimed := false
+	sess := &icmpSrvSession{}
+	for attempt := 0; attempt < 8; attempt++ {
+		if _, err := rand.Read(token[:]); err != nil {
+			return
+		}
+		tokenKey = binary.BigEndian.Uint16(token[:])
+		if _, loaded := s.sessions.LoadOrStore(tokenKey, sess); !loaded {
+			claimed = true
+			break
+		}
+	}
+	if !claimed {
+		s.log.Error("icmp server: could not allocate a free session token")
 		return
 	}
 
@@ -218,7 +306,7 @@ func (s *ICMPServer) handleHello(pkt []byte, srcAddr *net.UDPAddr, conn *net.UDP
 		return
 	}
 
-	sess := &icmpSrvSession{
+	*sess = icmpSrvSession{
 		sessionToken: token,
 		sessionKey:   sessionKey,
 		keyC2S:       keyC2S,
@@ -229,8 +317,6 @@ func (s *ICMPServer) handleHello(pkt []byte, srcAddr *net.UDPAddr, conn *net.UDP
 		lastSeen:     time.Now(),
 		wgInbound:    make(chan []byte, 32),
 	}
-	tokenKey := binary.BigEndian.Uint16(token[:])
-	s.sessions.Store(tokenKey, sess)
 
 	// Send HANDSHAKE_ACK: header(8) + serverPub(32) + token(2) = 42 bytes.
 	ack := make([]byte, 8+32+2)
@@ -253,9 +339,26 @@ func (s *ICMPServer) handleConfirm(pkt []byte, srcAddr *net.UDPAddr, conn *net.U
 	sess.mu.Lock()
 	defer sess.mu.Unlock()
 
+	// Activation is idempotent. A retransmitted CONFIRM would otherwise open a
+	// second bridge socket and start a second pair of goroutines, orphaning the
+	// first pair against a socket nothing will close.
+	if sess.activated {
+		return
+	}
+
 	expectedMAC := icmpSrvConfirmMAC(sess.sessionKey, sess.sessionToken)
 	if !icmpHmacEqual(clientMAC, expectedMAC) {
 		s.log.Error("icmp server: confirm MAC mismatch")
+		return
+	}
+
+	// Build both AEADs once; the keys are fixed for the session lifetime.
+	aeadRx, err := chacha20poly1305.New(sess.keyC2S[:])
+	if err != nil {
+		return
+	}
+	aeadTx, err := chacha20poly1305.New(sess.keyS2C[:])
+	if err != nil {
 		return
 	}
 
@@ -269,6 +372,8 @@ func (s *ICMPServer) handleConfirm(pkt []byte, srcAddr *net.UDPAddr, conn *net.U
 		s.log.Error("icmp server: dial wg udp", zap.Error(err))
 		return
 	}
+	sess.aeadRx = aeadRx
+	sess.aeadTx = aeadTx
 	sess.localConn = uc
 	sess.activated = true
 	sess.lastSeen = time.Now()
@@ -299,7 +404,7 @@ func (s *ICMPServer) handleConfirm(pkt []byte, srcAddr *net.UDPAddr, conn *net.U
 			sess.mu.Lock()
 			seq := sess.txSeq
 			sess.txSeq++
-			key := sess.keyS2C
+			aead := sess.aeadTx
 			tok := sess.sessionToken
 			clientA := sess.clientAddr
 			sess.mu.Unlock()
@@ -310,12 +415,9 @@ func (s *ICMPServer) handleConfirm(pkt []byte, srcAddr *net.UDPAddr, conn *net.U
 			copy(hdr[2:4], tok[:])
 			binary.BigEndian.PutUint32(hdr[4:8], seq)
 
-			aead, err := chacha20poly1305.New(key[:])
-			if err != nil {
-				continue
-			}
-			nonce := icmpSrvMakeNonce(seq)
-			ciphertext := aead.Seal(nil, nonce, pkt, hdr)
+			var nonce [12]byte
+			icmpSrvNonceInto(seq, &nonce)
+			ciphertext := aead.Seal(nil, nonce[:], pkt, hdr)
 			out := append(hdr, ciphertext...)
 			udpConn.WriteToUDP(out, clientA) //nolint:errcheck
 		}
@@ -335,19 +437,23 @@ func (s *ICMPServer) handleData(pkt []byte, srcAddr *net.UDPAddr, conn *net.UDPC
 		return
 	}
 	sess.lastSeen = time.Now()
-	key := sess.keyC2S
+	aead := sess.aeadRx
+	seq := binary.BigEndian.Uint32(pkt[4:8])
+	fresh := sess.checkReplay(seq)
 	sess.mu.Unlock()
+
+	if !fresh {
+		// Replayed or too old to verify. Dropping before decryption also keeps
+		// a replay flood from costing any AEAD work.
+		return
+	}
 
 	hdr := pkt[:8]
 	ciphertext := pkt[8:]
-	seq := binary.BigEndian.Uint32(hdr[4:8])
 
-	aead, err := chacha20poly1305.New(key[:])
-	if err != nil {
-		return
-	}
-	nonce := icmpSrvMakeNonce(seq)
-	plain, err := aead.Open(nil, nonce, ciphertext, hdr)
+	var nonce [12]byte
+	icmpSrvNonceInto(seq, &nonce)
+	plain, err := aead.Open(nil, nonce[:], ciphertext, hdr)
 	if err != nil {
 		s.log.Error("icmp server: decrypt data", zap.Error(err))
 		return
@@ -365,11 +471,11 @@ func icmpSrvConfirmMAC(key [32]byte, token [2]byte) []byte {
 	return h.Sum(nil)[:16]
 }
 
-// icmpSrvMakeNonce builds a 12-byte nonce: seq(4B big-endian) || 0x00(8B).
-func icmpSrvMakeNonce(seq uint32) []byte {
-	nonce := make([]byte, 12)
-	binary.BigEndian.PutUint32(nonce[:4], seq)
-	return nonce
+// icmpSrvNonceInto writes a 12-byte nonce into out: seq(4B big-endian) || 0x00(8B).
+// Filling a caller-owned array keeps the nonce off the heap in the packet path.
+func icmpSrvNonceInto(seq uint32, out *[12]byte) {
+	*out = [12]byte{}
+	binary.BigEndian.PutUint32(out[:4], seq)
 }
 
 // icmpHmacEqual compares two byte slices in constant time.

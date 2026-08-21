@@ -101,13 +101,101 @@ final class PathUpgradeManager {
         switch transport {
         case .wireguard:
             return await probeWireGuard()
-        case .tls443, .httpConnect:
+        case .tls443:
             return await probeTCP443()
+        case .httpConnect:
+            return await probeHTTPConnect()
         case .dns:
             return false // DNS tunnel probe would require full handshake; skip in upgrade manager
         case .icmpUDP:
             return false
         }
+    }
+
+    /// HTTP CONNECT depends on a proxy running on the local gateway, not on the
+    /// VPN server. Probing the server's TCP/443 proved only that TLS/443 works,
+    /// so this path reported reachable on every network where TLS already was.
+    private func probeHTTPConnect() async -> Bool {
+        guard let gateway = Self.defaultGateway() else { return false }
+
+        for port in [3128, 8080] {
+            if await Self.connectSucceeds(host: gateway, port: port) { return true }
+        }
+        return false
+    }
+
+    /// Opens a CONNECT tunnel to the VPN endpoint through host:port and reports
+    /// whether the proxy answered 200.
+    private static func connectSucceeds(host: String, port: Int) async -> Bool {
+        await withCheckedContinuation { cont in
+            var done = false
+            let finish: (Bool) -> Void = { result in
+                guard !done else { return }
+                done = true
+                cont.resume(returning: result)
+            }
+
+            let conn = NWConnection(
+                host: NWEndpoint.Host(host),
+                port: NWEndpoint.Port(integerLiteral: UInt16(port)),
+                using: .tcp
+            )
+
+            conn.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    let request = "CONNECT vpn.freewire.com:443 HTTP/1.1\r\n" +
+                                  "Host: vpn.freewire.com:443\r\n\r\n"
+                    conn.send(content: Data(request.utf8), completion: .contentProcessed { error in
+                        if error != nil {
+                            conn.cancel(); finish(false); return
+                        }
+                        conn.receive(minimumIncompleteLength: 1, maximumLength: 256) { data, _, _, _ in
+                            let ok = data.flatMap { String(data: $0, encoding: .utf8) }?
+                                .hasPrefix("HTTP/1.1 200") ?? false
+                            conn.cancel()
+                            finish(ok)
+                        }
+                    })
+                case .failed, .cancelled:
+                    conn.cancel(); finish(false)
+                default:
+                    break
+                }
+            }
+            conn.start(queue: .global())
+
+            // The whole path is budgeted at 2s in the fallback chain; hold the
+            // probe to the same ceiling.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                conn.cancel()
+                finish(false)
+            }
+        }
+    }
+
+    /// Parses `route get default` for the gateway address.
+    private static func defaultGateway() -> String? {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/sbin/route")
+        p.arguments = ["-n", "get", "default"]
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = FileHandle.nullDevice
+        guard (try? p.run()) != nil else { return nil }
+
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        guard let out = String(data: data, encoding: .utf8) else { return nil }
+
+        for line in out.split(separator: "\n") {
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if t.hasPrefix("gateway:") {
+                let value = t.dropFirst("gateway:".count).trimmingCharacters(in: .whitespaces)
+                return value.isEmpty ? nil : value
+            }
+        }
+        return nil
     }
 
     private func probeWireGuard() async -> Bool {

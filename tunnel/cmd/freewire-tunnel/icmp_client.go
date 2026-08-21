@@ -50,12 +50,12 @@ type icmpClientSession struct {
 	sessionKey   [32]byte // authenticates the ClientConfirm MAC only
 	// Directional keys. Both peers number packets from zero, so one shared
 	// key would repeat the (key, nonce) pair across directions.
-	keyC2S       [32]byte // client → server: client seals with this
-	keyS2C       [32]byte // server → client: client opens with this
-	txSeq        uint32   // outbound sequence (atomic)
-	windowSize   int      // current sliding window size
-	conn         *net.UDPConn
-	mu           sync.Mutex
+	keyC2S     [32]byte // client → server: client seals with this
+	keyS2C     [32]byte // server → client: client opens with this
+	txSeq      uint32   // outbound sequence (atomic)
+	windowSize int      // current sliding window size
+	conn       *net.UDPConn
+	mu         sync.Mutex
 
 	// Rate limiter: token bucket, refilled every 50ms (20 pkt/s = 1 per 50ms).
 	rateMu    sync.Mutex
@@ -108,7 +108,7 @@ func runICMPUDPTunnel(cfg Config) (net.PacketConn, error) {
 // Step 3: Send HANDSHAKE_CONFIRM with derived-key MAC.
 func icmpHandshake(cfg Config, uc *net.UDPConn) (*icmpClientSession, error) {
 	deadline := time.Now().Add(icmpHandshakeTO)
-	uc.SetDeadline(deadline) //nolint:errcheck
+	uc.SetDeadline(deadline)          //nolint:errcheck
 	defer uc.SetDeadline(time.Time{}) //nolint:errcheck
 
 	// Generate ephemeral Curve25519 keypair.
@@ -217,12 +217,23 @@ func (s *icmpClientSession) run(lp net.PacketConn) {
 	ka := time.NewTicker(icmpKeepalive)
 	defer ka.Stop()
 
+	// done is closed when the local proxy goes away. Without it the keepalive
+	// loop below ran forever against a dead socket, holding the session and both
+	// goroutines for the lifetime of the process.
+	done := make(chan struct{})
+	var closeOnce sync.Once
+	finish := func() { closeOnce.Do(func() { close(done) }) }
+
+	// wgPeer is written by the main loop and read by the inbound goroutine.
+	var peerMu sync.Mutex
 	var wgPeer net.Addr
+
 	var peerOnce sync.Once
 	peerCh := make(chan net.Addr, 1)
 
 	// WireGuard → ICMP/UDP.
 	go func() {
+		defer finish()
 		buf := make([]byte, icmpMaxPayload)
 		for {
 			n, peer, err := lp.ReadFrom(buf)
@@ -238,6 +249,7 @@ func (s *icmpClientSession) run(lp net.PacketConn) {
 
 	// ICMP/UDP → WireGuard.
 	go func() {
+		defer finish()
 		buf := make([]byte, icmpHeaderLen+icmpMaxPayload+16+16) // header + overhead
 		for {
 			n, err := s.conn.Read(buf)
@@ -254,16 +266,24 @@ func (s *icmpClientSession) run(lp net.PacketConn) {
 			if err != nil {
 				continue
 			}
-			if wgPeer != nil {
-				lp.WriteTo(data, wgPeer) //nolint:errcheck
+			peerMu.Lock()
+			peer := wgPeer
+			peerMu.Unlock()
+			if peer != nil {
+				lp.WriteTo(data, peer) //nolint:errcheck
 			}
 		}
 	}()
 
 	for {
 		select {
+		case <-done:
+			s.conn.Close() //nolint:errcheck
+			return
 		case peer := <-peerCh:
+			peerMu.Lock()
 			wgPeer = peer
+			peerMu.Unlock()
 		case <-ka.C:
 			s.sendKeepalive() //nolint:errcheck
 		}

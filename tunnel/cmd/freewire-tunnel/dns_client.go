@@ -43,8 +43,9 @@ type dnsClientSession struct {
 	sessionKey [32]byte // authenticates the ClientConfirm MAC only
 	// Directional keys. Both peers number packets from zero, so a single shared
 	// key would repeat the (key, nonce) pair across directions.
-	keyC2S [32]byte // client → server: client seals with this
-	keyS2C [32]byte // server → client: client opens with this
+	keyC2S     [32]byte // client → server: client seals with this
+	keyS2C     [32]byte // server → client: client opens with this
+	tokenB32   string   // base32(token), cached: it is constant for the session
 	txSeq      uint32   // next outbound sequence number (atomic add)
 	windowSize int      // current sliding window size (AIMD)
 	dnsServer  string   // resolved DNS server IP
@@ -183,6 +184,7 @@ func dnsHandshake(cfg Config, dnsServer string) (*dnsClientSession, error) {
 
 	return &dnsClientSession{
 		token:      token,
+		tokenB32:   tokenB32,
 		sessionKey: sessionKey,
 		keyC2S:     keyC2S,
 		keyS2C:     keyS2C,
@@ -205,13 +207,22 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 	ka := time.NewTicker(dnsKeepaliveEvery)
 	defer ka.Stop()
 
+	// done is closed when the local proxy goes away, which is the signal that
+	// the tunnel is finished. Every goroutine below selects on it so none
+	// outlives the session.
+	done := make(chan struct{})
 	inboundCh := make(chan []byte, 64)
 	peerCh := make(chan net.Addr, 1)
-	var wgPeer net.Addr
 	var peerOnce sync.Once
+
+	// wgPeer is written by the main loop and read by the inbound writer, so it
+	// needs a lock rather than a bare variable.
+	var peerMu sync.Mutex
+	var wgPeer net.Addr
 
 	// WireGuard → DNS.
 	go func() {
+		defer close(done)
 		buf := make([]byte, 1416)
 		for {
 			n, peer, err := lp.ReadFrom(buf)
@@ -223,8 +234,12 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 			copy(pkt, buf[:n])
 			go func(p []byte) {
 				data, err := s.sendPacket(p)
-				if err == nil && len(data) > 0 {
-					inboundCh <- data
+				if err != nil || len(data) == 0 {
+					return
+				}
+				select {
+				case inboundCh <- data:
+				case <-done:
 				}
 			}(pkt)
 		}
@@ -232,17 +247,29 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 
 	// Inbound → WireGuard.
 	go func() {
-		for data := range inboundCh {
-			if wgPeer != nil {
-				lp.WriteTo(data, wgPeer) //nolint:errcheck
+		for {
+			select {
+			case <-done:
+				return
+			case data := <-inboundCh:
+				peerMu.Lock()
+				peer := wgPeer
+				peerMu.Unlock()
+				if peer != nil {
+					lp.WriteTo(data, peer) //nolint:errcheck
+				}
 			}
 		}
 	}()
 
 	for {
 		select {
+		case <-done:
+			return
 		case peer := <-peerCh:
+			peerMu.Lock()
 			wgPeer = peer
+			peerMu.Unlock()
 		case <-ka.C:
 			go s.sendKeepalive() //nolint:errcheck
 		}
@@ -262,14 +289,13 @@ func (s *dnsClientSession) sendPacket(pkt []byte) ([]byte, error) {
 	nonce := dnsMakeNonce(seq)
 	ciphertext := txAEAD.Seal(nil, nonce, pkt, nil)
 
-	tokenB32 := b32enc.EncodeToString(s.token)
 	seqB32 := b32enc.EncodeToString(uint32BE(seq))
 
 	// Encode ciphertext and split into ≤63-char DNS labels.
 	dataB32 := b32enc.EncodeToString(ciphertext)
 	labels := chunkLabels(dataB32, 63)
 
-	name := "t." + seqB32 + "." + tokenB32 + "." + strings.Join(labels, ".") + "." + dnsTunnelDomain + "."
+	name := "t." + seqB32 + "." + s.tokenB32 + "." + strings.Join(labels, ".") + "." + dnsTunnelDomain + "."
 
 	deadline := time.Now().Add(3 * time.Second)
 	resp, err := dnsQuery(s.dnsServer, name, deadline)
@@ -349,11 +375,21 @@ func chunkLabels(s string, maxLen int) []string {
 
 // dnsQuery sends a DNS TXT query for name to server:53 and returns the raw response packet.
 func dnsQuery(server, name string, deadline time.Time) ([]byte, error) {
-	c, err := net.DialTimeout("udp", server+":53", 2*time.Second)
+	c, err := dnsConnPool.get(server)
 	if err != nil {
 		return nil, fmt.Errorf("dns query: dial: %w", err)
 	}
-	defer c.Close()
+	// A socket is only returned to the pool after a clean exchange. Anything
+	// that errors may have a stale datagram queued on it, which would be read
+	// as the answer to somebody else's query.
+	reusable := false
+	defer func() {
+		if reusable {
+			dnsConnPool.put(server, c)
+		} else {
+			c.Close()
+		}
+	}()
 	c.SetDeadline(deadline) //nolint:errcheck
 
 	query := buildDNSQuery(name, 16 /* TXT */)
@@ -366,7 +402,42 @@ func dnsQuery(server, name string, deadline time.Time) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("dns query: read: %w", err)
 	}
+	reusable = true
 	return buf[:n], nil
+}
+
+// dnsConnPool reuses connected UDP sockets to the local resolver. Dialing per
+// packet cost a socket create and teardown on every tunnel datagram.
+var dnsConnPool = &udpConnPool{conns: map[string][]net.Conn{}}
+
+type udpConnPool struct {
+	mu    sync.Mutex
+	conns map[string][]net.Conn
+}
+
+const udpPoolPerServer = 8
+
+func (p *udpConnPool) get(server string) (net.Conn, error) {
+	p.mu.Lock()
+	if list := p.conns[server]; len(list) > 0 {
+		c := list[len(list)-1]
+		p.conns[server] = list[:len(list)-1]
+		p.mu.Unlock()
+		return c, nil
+	}
+	p.mu.Unlock()
+	return net.DialTimeout("udp", server+":53", 2*time.Second)
+}
+
+func (p *udpConnPool) put(server string, c net.Conn) {
+	c.SetDeadline(time.Time{}) //nolint:errcheck
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.conns[server]) >= udpPoolPerServer {
+		c.Close()
+		return
+	}
+	p.conns[server] = append(p.conns[server], c)
 }
 
 // buildDNSQuery constructs a minimal DNS query packet.
@@ -382,7 +453,7 @@ func buildDNSQuery(name string, qtype uint16) []byte {
 	buf = append(buf, 0x00, 0x01) // QDCOUNT = 1
 	buf = append(buf, 0x00, 0x00) // ANCOUNT = 0
 	buf = append(buf, 0x00, 0x00) // NSCOUNT = 0
-	buf = append(buf, 0x00, 0x00) // ARCOUNT = 0
+	buf = append(buf, 0x00, 0x01) // ARCOUNT = 1 (the EDNS0 OPT RR below)
 
 	// QNAME: strip trailing dot, encode each label.
 	qname := strings.TrimSuffix(name, ".")
@@ -396,8 +467,22 @@ func buildDNSQuery(name string, qtype uint16) []byte {
 	buf = append(buf, byte(qtype>>8), byte(qtype))
 	buf = append(buf, 0x00, 0x01)
 
+	// EDNS0 OPT pseudo-RR (RFC 6891). Without it responses are capped at the
+	// RFC 1035 512-byte limit, which truncates every tunnel data packet.
+	var optClass [2]byte
+	binary.BigEndian.PutUint16(optClass[:], dnsEDNS0PayloadSize)
+	buf = append(buf, 0x00)                   // NAME = root
+	buf = append(buf, 0x00, 0x29)             // TYPE = OPT (41)
+	buf = append(buf, optClass[:]...)         // CLASS = advertised UDP payload size
+	buf = append(buf, 0x00, 0x00, 0x00, 0x00) // extended RCODE, version 0, flags
+	buf = append(buf, 0x00, 0x00)             // RDLENGTH = 0
+
 	return buf
 }
+
+// dnsEDNS0PayloadSize is the UDP response size advertised to the resolver.
+// 4096 is the common ceiling; larger values often fail to traverse middleboxes.
+const dnsEDNS0PayloadSize uint16 = 4096
 
 // isDNSNXDomain returns true if the DNS response has RCODE=3 (NXDOMAIN).
 func isDNSNXDomain(resp []byte) bool {

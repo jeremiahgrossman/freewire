@@ -8,12 +8,16 @@ import (
 )
 
 // ipPool hands out IPv4 addresses from a CIDR block. Thread-safe.
+//
+// Addresses are tracked as uint32 and handed out from a free list, so Allocate
+// is O(1) and does no string work. An earlier linear scan formatted every
+// candidate address to a string on each attempt, all while holding the lock.
 type ipPool struct {
 	mu        sync.Mutex
 	network   *net.IPNet
-	allocated map[string]bool
-	base      uint32 // first usable address (.2)
-	last      uint32 // exclusive upper bound (broadcast address)
+	free      []uint32          // available addresses, taken from the tail
+	allocated map[uint32]struct{}
+	reserved  int // addresses excluded from the pool (network, server, broadcast)
 }
 
 func newIPPool(network *net.IPNet, serverIP string) *ipPool {
@@ -21,32 +25,63 @@ func newIPPool(network *net.IPNet, serverIP string) *ipPool {
 	mask := binary.BigEndian.Uint32(net.IP(network.Mask).To4())
 	broadcast := base | ^mask
 
-	return &ipPool{
-		network:   network,
-		allocated: map[string]bool{serverIP: true},
-		base:      base + 2, // .0 is network, .1 is server
-		last:      broadcast, // broadcast excluded by < comparison in Allocate
+	// Usable range is base+2 (skipping .0 network and .1 server) up to but not
+	// including the broadcast address.
+	var free []uint32
+	for n := base + 2; n < broadcast; n++ {
+		free = append(free, n)
 	}
+	// Reverse so the lowest address is at the tail and gets handed out first,
+	// which keeps assignment order predictable for anyone reading logs.
+	for i, j := 0, len(free)-1; i < j; i, j = i+1, j-1 {
+		free[i], free[j] = free[j], free[i]
+	}
+
+	p := &ipPool{
+		network:   network,
+		free:      free,
+		allocated: make(map[uint32]struct{}, len(free)),
+	}
+
+	// The server address is never handed out. It is counted in Size so callers
+	// see the same occupancy the old string-keyed map reported.
+	if ip := net.ParseIP(serverIP); ip != nil && ip.To4() != nil {
+		p.allocated[ipToUint32(ip.To4())] = struct{}{}
+		p.reserved = 1
+	}
+	return p
 }
 
 func (p *ipPool) Allocate() (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	for n := p.base; n < p.last; n++ {
-		ip := uint32ToIPStr(n)
-		if !p.allocated[ip] {
-			p.allocated[ip] = true
-			return ip, nil
-		}
+	if len(p.free) == 0 {
+		return "", fmt.Errorf("ip pool exhausted")
 	}
-	return "", fmt.Errorf("ip pool exhausted")
+	n := p.free[len(p.free)-1]
+	p.free = p.free[:len(p.free)-1]
+	p.allocated[n] = struct{}{}
+	return uint32ToIPStr(n), nil
 }
 
 func (p *ipPool) Release(ip string) {
+	parsed := net.ParseIP(ip)
+	if parsed == nil || parsed.To4() == nil {
+		return
+	}
+	n := ipToUint32(parsed.To4())
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	delete(p.allocated, ip)
+
+	// Releasing an address that is not allocated must not grow the free list, or
+	// a double release would hand the same address to two peers.
+	if _, ok := p.allocated[n]; !ok {
+		return
+	}
+	delete(p.allocated, n)
+	p.free = append(p.free, n)
 }
 
 func (p *ipPool) Size() int {

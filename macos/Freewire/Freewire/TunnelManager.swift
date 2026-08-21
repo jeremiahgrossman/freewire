@@ -59,6 +59,7 @@ final class TunnelManager: ObservableObject {
     private var watchTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     private var upgradeManager: PathUpgradeManager?
+    private var awaitPortalTask: Task<Void, Never>?
 
     init(api: ServerAPI, identity: DeviceIdentity) {
         self.api = api
@@ -83,8 +84,14 @@ final class TunnelManager: ObservableObject {
     // MARK: - Public API
 
     func connect() async {
-        guard case .disconnected = state else { return }
-        await doConnect()
+        // `.failed` must be allowed through: the failure panel shows a Connect
+        // button, and rejecting the call left that button visibly dead.
+        switch state {
+        case .disconnected, .failed:
+            await doConnect()
+        default:
+            return
+        }
     }
 
     func cancelConnect() {
@@ -118,6 +125,24 @@ final class TunnelManager: ObservableObject {
         let target = url ?? URL(string: "http://captive.apple.com")!
         NSWorkspace.shared.open(target)
         state = .disconnected
+
+        // The panel tells the user Freewire will reconnect once they have
+        // authenticated, so actually watch for that. Nothing here can tell when
+        // the login completes, so poll the portal probe until the network comes
+        // back or the user gives up.
+        awaitPortalTask?.cancel()
+        awaitPortalTask = Task { [weak self] in
+            for _ in 0..<30 {   // ~90s at 3s intervals
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                guard let self, !Task.isCancelled else { return }
+                guard case .disconnected = self.state else { return }
+                if case .genuineBlock = await probeCaptivePortal() {
+                    // No portal intercept any more: the login went through.
+                    await self.doConnect()
+                    return
+                }
+            }
+        }
     }
 
     // MARK: - Connect
@@ -255,6 +280,10 @@ final class TunnelManager: ObservableObject {
         guard case .connected(let ip, _, let at, let old) = state,
               transport.priority < old.priority else { return }
         upgradeManager?.stop()
+        // The watchdog polls for the tunnel process. During an upgrade the
+        // process is deliberately absent, and a watchdog firing in that window
+        // would start a reconnect that races this upgrade.
+        watchTask?.cancel(); watchTask = nil
         await killTunnel()
         await deregisterPeer()
 
@@ -336,7 +365,17 @@ final class TunnelManager: ObservableObject {
                 self.reconnectTask = Task { await self.doReconnect(startingAt: 0) }
             }
         }
-        m.onNetworkUnavailable = { @MainActor in }
+        m.onNetworkUnavailable = { @MainActor [weak self] in
+            guard let self else { return }
+            // The tunnel cannot survive the interface going away. Without this
+            // the panel kept showing "Protected" with a running timer until the
+            // 10s watchdog poll noticed, which reads as the app lying.
+            guard case .connected = self.state else { return }
+            self.watchTask?.cancel(); self.watchTask = nil
+            self.stopUpgradeManager()
+            self.reconnectTask?.cancel()
+            self.reconnectTask = Task { await self.doReconnect(startingAt: 0) }
+        }
         m.start()
         networkMonitor = m
     }
@@ -349,8 +388,9 @@ final class TunnelManager: ObservableObject {
     // MARK: - Helpers
 
     private func cancelTasks() {
-        watchTask?.cancel();     watchTask = nil
-        reconnectTask?.cancel(); reconnectTask = nil
+        watchTask?.cancel();       watchTask = nil
+        reconnectTask?.cancel();   reconnectTask = nil
+        awaitPortalTask?.cancel(); awaitPortalTask = nil
     }
 
     private func deregisterPeer() async {
@@ -381,9 +421,16 @@ final class TunnelManager: ObservableObject {
            FileManager.default.isExecutableFile(atPath: bundled.path) {
             return bundled
         }
+        #if DEBUG
+        // Development convenience only. This path is under the user's home and
+        // therefore user-writable, and the helper is executed via sudo — so it
+        // must never be reachable in a release build.
         let dev = URL(fileURLWithPath: NSHomeDirectory())
             .appendingPathComponent("Claude/Projects/FreewireVPN/tunnel/freewire-tunnel")
         return FileManager.default.isExecutableFile(atPath: dev.path) ? dev : nil
+        #else
+        return nil
+        #endif
     }
 
     private func launchTunnel(config: TunnelConfig) async throws -> (String, TunnelTransport) {

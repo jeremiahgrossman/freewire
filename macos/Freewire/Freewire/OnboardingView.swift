@@ -70,13 +70,15 @@ struct OnboardingView: View {
                 .buttonStyle(OnboardingPrimaryButton())
                 .frame(width: 240)
 
-                Button("Set up self-hosting →") {
-                    // Phase 3: opens AWS deploy flow.
-                    Preferences.shared.hasCompletedOnboarding = true
-                    onDismiss()
-                }
-                .buttonStyle(.link)
-                .foregroundStyle(.secondary)
+                // The AWS deploy flow lands in Phase 3. Until then the button
+                // stays disabled: marking onboarding complete and dismissing
+                // dropped the user on an unconfigured "Not protected" panel with
+                // nothing to act on.
+                Button("Set up self-hosting →") { }
+                    .buttonStyle(.link)
+                    .foregroundStyle(.tertiary)
+                    .disabled(true)
+                    .help("Self-hosted servers are coming in a later release.")
             }
             .padding(.bottom, 40)
         }

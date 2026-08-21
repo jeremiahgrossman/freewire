@@ -109,9 +109,13 @@ func main() {
 		keepalive = 25
 	}
 
+	// replace_allowed_ips makes the allowed_ip lines below authoritative rather
+	// than additive. Without it a second IpcSetOperation on the same device
+	// accumulates entries instead of replacing them.
 	ipcConf := "private_key=" + privKeyHex + "\n" +
 		"public_key=" + pubKeyHex + "\n" +
 		"endpoint=" + wgEndpoint + "\n" +
+		"replace_allowed_ips=true\n" +
 		"allowed_ip=0.0.0.0/0\n" +
 		"allowed_ip=::/0\n" +
 		fmt.Sprintf("persistent_keepalive_interval=%d\n", keepalive) +
@@ -262,8 +266,10 @@ func configureInterface(tunName, tunnelIP, peerIP string) error {
 // (last_handshake_time_sec > 0) or the deadline passes.
 func waitForHandshake(dev *device.Device, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
+	// One buffer for the whole poll, reset per iteration.
+	var buf bytes.Buffer
 	for time.Now().Before(deadline) {
-		var buf bytes.Buffer
+		buf.Reset()
 		if err := dev.IpcGetOperation(&buf); err == nil {
 			for _, line := range strings.Split(buf.String(), "\n") {
 				line = strings.TrimSpace(line)

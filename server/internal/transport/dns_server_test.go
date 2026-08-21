@@ -127,10 +127,8 @@ func TestNXDomainResponse(t *testing.T) {
 }
 
 func TestNonceLayout(t *testing.T) {
-	n := srvDNSMakeNonce(0x01020304)
-	if len(n) != 12 {
-		t.Fatalf("nonce is %d bytes, want 12", len(n))
-	}
+	var n [12]byte
+	srvDNSNonceInto(0x01020304, &n)
 	if got := binary.BigEndian.Uint32(n[:4]); got != 0x01020304 {
 		t.Errorf("sequence = %08x, want 01020304", got)
 	}
@@ -141,13 +139,29 @@ func TestNonceLayout(t *testing.T) {
 	}
 }
 
+// The helper writes into a reused array, so it must clear any prior contents
+// rather than only overwriting the first four bytes.
+func TestNonceIntoClearsPriorContents(t *testing.T) {
+	var n [12]byte
+	for i := range n {
+		n[i] = 0xFF
+	}
+	srvDNSNonceInto(7, &n)
+	for i, b := range n[4:] {
+		if b != 0 {
+			t.Errorf("stale byte at %d: %02x, want 00", i+4, b)
+		}
+	}
+}
+
 func TestNoncesAreUniquePerSequence(t *testing.T) {
-	seen := map[string]uint32{}
+	seen := map[[12]byte]uint32{}
 	for _, seq := range []uint32{0, 1, 2, 255, 256, 65535, 65536, 1 << 24, ^uint32(0)} {
-		key := string(srvDNSMakeNonce(seq))
-		if prev, dup := seen[key]; dup {
+		var n [12]byte
+		srvDNSNonceInto(seq, &n)
+		if prev, dup := seen[n]; dup {
 			t.Errorf("sequences %d and %d produce the same nonce", prev, seq)
 		}
-		seen[key] = seq
+		seen[n] = seq
 	}
 }
