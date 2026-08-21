@@ -56,6 +56,10 @@ server/*.state.json
 *.tfstate.*
 aws-credentials
 
+# ---- Python (test harness) ----
+__pycache__/
+*.py[cod]
+
 # ---- Editor / tooling ----
 # Machine-local Claude permissions; .claude/settings.json (shared) is tracked
 .claude/settings.local.json
