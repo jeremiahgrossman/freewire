@@ -11,7 +11,15 @@ banner 5 "All external traffic blocked" \
 apply_rules <<EOF
 # Config 5 — hard block. The captive portal probe must also fail,
 # so nothing is allowed out at all.
-block out on $UPLINK_IF all
+# Scoped to the server, not the whole interface.
+#
+# This was "block out on $UPLINK_IF all" while UPLINK_IF was a container bridge,
+# where it only affected traffic to the test server. Once the server moved to
+# the internet and UPLINK_IF became the physical interface, the same line cut
+# the machine off the network entirely -- including DHCP, DNS and the operator's
+# own session. The configs only ever needed to control which paths to the server
+# are reachable.
+block out on $UPLINK_IF to $SERVER_IP
 EOF
 
 cat <<NOTE

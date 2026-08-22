@@ -9,15 +9,17 @@ banner 4 "Local DNS resolver returns NXDOMAIN, ICMP allowed" \
   "close to 10s (full chain timeout)"
 
 cat <<PRE
-This config needs a local resolver that NXDOMAINs everything, so that
-*.$TUNNEL_DOMAIN never reaches the server. Start dnsmasq first:
+This config needs a resolver that NXDOMAINs everything, and the client
+pointed at it, so the DNS transport fails and the chain falls to icmp_udp.
 
-    # /usr/local/etc/dnsmasq.conf  (or /opt/homebrew/etc/dnsmasq.conf)
-    no-resolv
-    address=/#/
-    port=5353
+    dnsmasq -C testing/dnsmasq-nxdomain.conf -d &
 
-    sudo brew services restart dnsmasq
+and in the client config:
+
+    "dns_resolver": "127.0.0.1:5353"
+
+The rules below are scoped to the server: they control which paths to it are
+reachable and leave the rest of the machine's networking alone.
 
 PRE
 
@@ -28,12 +30,22 @@ apply_rules <<EOF
 # Note the transport is icmp_udp: it rides UDP 4500, not the ICMP protocol.
 # An earlier version of this config passed "inet proto icmp" and blocked
 # UDP 4500, so it blocked the very path it was meant to force.
-# pf requires rules grouped in order: options, normalization, queueing,
-# translation, filtering. The rdr below is translation and must precede every
-# filter rule, or pfctl rejects the whole ruleset and nothing is applied.
-rdr pass on $UPLINK_IF proto udp to port 53 -> 127.0.0.1 port 5353
-
-block out on $UPLINK_IF all
+# No rdr here.
+#
+# Redirecting every port-53 packet to the NXDOMAIN resolver would take the
+# operator's own DNS down with it, and it is not needed: the client is pointed
+# at that resolver directly with dns_resolver in its config, which makes the DNS
+# transport fail for the same reason without touching anything else on the
+# machine.
+# Scoped to the server, not the whole interface.
+#
+# This was "block out on $UPLINK_IF all" while UPLINK_IF was a container bridge,
+# where it only affected traffic to the test server. Once the server moved to
+# the internet and UPLINK_IF became the physical interface, the same line cut
+# the machine off the network entirely -- including DHCP, DNS and the operator's
+# own session. The configs only ever needed to control which paths to the server
+# are reachable.
+block out on $UPLINK_IF to $SERVER_IP
 # Bootstrap API. In production this shares 443; see config.env.
 pass out on $UPLINK_IF proto tcp to $SERVER_IP port $API_PORT
 pass out on $UPLINK_IF proto udp to $SERVER_IP port $ICMP_UDP_PORT

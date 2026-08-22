@@ -220,6 +220,22 @@ Until this is fixed, a passing config proves **path selection only**, not
 that traffic is protected. Verify routing separately with
 `route get 8.8.8.8` and do not rely on the client's own indicator.
 
+## The configs are scoped to the server, and must stay that way
+
+Every config blocks traffic **to `$SERVER_IP`**, not everything on the
+interface. That distinction did not matter while `UPLINK_IF` was a container
+bridge carrying only test traffic. Once the server moved to the internet and
+`UPLINK_IF` became the physical interface, `block out on $UPLINK_IF all` stopped
+meaning "restrict paths to the server" and started meaning "take this machine
+off the network" — which is exactly what it did, including DHCP, DNS, and the
+operator's own session.
+
+The same applies to `rdr`: redirecting all port-53 traffic to a test resolver
+takes the operator's DNS down too. Config 4 points the *client* at the NXDOMAIN
+resolver instead, which fails the DNS transport without touching anything else.
+
+If you add a config, scope every rule to `$SERVER_IP`.
+
 ## Config 4 must pass UDP 4500, not "proto icmp"
 
 The fourth transport is named `icmp_udp` and rides **UDP port 4500**, not the

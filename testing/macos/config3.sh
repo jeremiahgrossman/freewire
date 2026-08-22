@@ -10,7 +10,15 @@ banner 3 "DNS forwards upstream, port 443 blocked" \
 
 apply_rules <<EOF
 # Config 3 — DNS and ICMP only. No 443.
-block out on $UPLINK_IF all
+# Scoped to the server, not the whole interface.
+#
+# This was "block out on $UPLINK_IF all" while UPLINK_IF was a container bridge,
+# where it only affected traffic to the test server. Once the server moved to
+# the internet and UPLINK_IF became the physical interface, the same line cut
+# the machine off the network entirely -- including DHCP, DNS and the operator's
+# own session. The configs only ever needed to control which paths to the server
+# are reachable.
+block out on $UPLINK_IF to $SERVER_IP
 # Bootstrap API. In production this shares 443; see config.env.
 pass out on $UPLINK_IF proto tcp to $SERVER_IP port $API_PORT
 pass out on $UPLINK_IF proto udp to any port 53
