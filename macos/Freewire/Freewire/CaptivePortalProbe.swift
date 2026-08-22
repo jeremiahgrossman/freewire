@@ -21,6 +21,9 @@ func probeCaptivePortal() async -> CaptivePortalResult {
         cfg.timeoutIntervalForRequest  = 1.0
         cfg.timeoutIntervalForResource = 1.0
         let session = URLSession(configuration: cfg, delegate: delegate, delegateQueue: nil)
+    // URLSession retains its delegate until invalidated, so a probe per
+    // connection attempt leaked a session and a delegate each time.
+    defer { session.finishTasksAndInvalidate() }
         var req = URLRequest(url: url)
         req.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
 

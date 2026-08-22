@@ -176,19 +176,24 @@ func (m *Manager) AddPeer(peerToken, publicKeyBase64 string, capacity int) (*Pee
 	return peer, nil
 }
 
-func (m *Manager) RemovePeer(peerToken string) error {
+// RemovePeer removes the peer registered under peerToken.
+//
+// The bool reports whether a peer was actually removed, so the caller can
+// distinguish an unknown token from a successful removal. Returning success for
+// both told a client its peer was gone when nothing had been removed.
+func (m *Manager) RemovePeer(peerToken string) (bool, error) {
 	m.mu.Lock()
 	peer, ok := m.peers[peerToken]
 	if !ok {
 		m.mu.Unlock()
-		return nil
+		return false, nil
 	}
 	delete(m.peers, peerToken)
 	m.mu.Unlock()
 
 	publicKeyBytes, err := base64.StdEncoding.DecodeString(peer.PublicKey)
 	if err != nil {
-		return err
+		return true, err
 	}
 
 	// The map entry is already gone, so the address must return to the pool even
@@ -198,11 +203,11 @@ func (m *Manager) RemovePeer(peerToken string) error {
 
 	ipcConf := fmt.Sprintf("public_key=%s\nremove=true\n\n", hex.EncodeToString(publicKeyBytes))
 	if err := m.dev.IpcSet(ipcConf); err != nil {
-		return fmt.Errorf("remove peer from wireguard: %w", err)
+		return true, fmt.Errorf("remove peer from wireguard: %w", err)
 	}
 
 	m.log.Info("peer removed", zap.String("session", redactToken(peerToken)))
-	return nil
+	return true, nil
 }
 
 func (m *Manager) PeerCount() int {

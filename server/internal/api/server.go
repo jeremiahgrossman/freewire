@@ -49,9 +49,12 @@ func (s *Server) Run(ctx context.Context) error {
 		Addr:              addr,
 		Handler:           http.MaxBytesHandler(mux, 64*1024),
 		ReadHeaderTimeout: 5 * time.Second,
-		WriteTimeout:      10 * time.Second,
-		IdleTimeout:       60 * time.Second,
-		TLSConfig:         s.tls,
+		// Without this a slow body holds a connection until the write deadline.
+		// Every request here is a few hundred bytes.
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  60 * time.Second,
+		TLSConfig:    s.tls,
 	}
 
 	s.log.Info("api listening (https)", zap.String("addr", addr))

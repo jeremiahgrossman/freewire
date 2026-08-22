@@ -128,7 +128,11 @@ private struct ConnectedBody: View {
     let transport: TunnelTransport
     @ObservedObject var tunnelManager: TunnelManager
     @State private var now = Date()
-    @State private var ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    // Connected on appear and cancelled on disappear rather than autoconnected:
+    // the popover is closed almost all of the time, and a timer firing every
+    // second behind it is pure wakeups for a view nobody is looking at.
+    private let ticker = Timer.publish(every: 1, on: .main, in: .common)
+    @State private var tickerConnection: Cancellable?
 
     var duration: String {
         let secs = max(0, Int(now.timeIntervalSince(connectedAt)))
@@ -158,6 +162,14 @@ private struct ConnectedBody: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .onReceive(ticker) { t in now = t }
+        .onAppear {
+            now = Date()
+            tickerConnection = ticker.connect()
+        }
+        .onDisappear {
+            tickerConnection?.cancel()
+            tickerConnection = nil
+        }
     }
 }
 

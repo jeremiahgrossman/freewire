@@ -34,6 +34,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    deinit {
+        // NSEvent global monitors are not tied to the observer's lifetime and
+        // must be removed explicitly.
+        if let m = clickMonitor { NSEvent.removeMonitor(m) }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         // Signal the tunnel, then wait for it to actually go.
         //
@@ -150,7 +156,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .networkBlock:             return "Freewire — Network is blocking VPN"
         case .awaitingPortalAuth:       return "Freewire — Waiting for network sign-in"
         case .noNetwork:                return "Freewire — No internet connection"
-        case .failed:                   return "Freewire — Not connected"
+        case .failed(let error):
+            // Saying only "Not connected" hid the reason at the one moment the
+            // user is hovering to find out what went wrong.
+            return "Freewire — \(error.localizedDescription)"
         }
     }
 

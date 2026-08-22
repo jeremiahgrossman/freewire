@@ -59,8 +59,16 @@ func (s *Server) handleRegisterPeer(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRemovePeer(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
-	if err := s.wg.RemovePeer(token); err != nil {
+	removed, err := s.wg.RemovePeer(token)
+	if err != nil {
 		s.log.Error("remove peer failed", zap.String("session", redactToken(token)), zap.Error(err))
+	}
+	// 204 for an unknown token told the client its removal succeeded when
+	// nothing was removed. The spec distinguishes them, and the client relies on
+	// 404 meaning "already gone" rather than "your token was wrong".
+	if !removed {
+		writeError(w, http.StatusNotFound, "PEER_NOT_FOUND", "No peer with that token.")
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
