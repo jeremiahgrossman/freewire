@@ -5,37 +5,77 @@ import Combine
 
 struct PanelView: View {
     @ObservedObject var tunnelManager: TunnelManager
-    let onPreferences: () -> Void
     let onQuit: () -> Void
+
+    // Settings live inside this popover rather than a separate window, so the
+    // whole app is one dialog. The gear pushes to .settings, "What Freewire
+    // sees" pushes to .privacy, and each has a back button.
+    private enum Screen { case main, settings, privacy }
+    @State private var screen: Screen = .main
 
     var body: some View {
         VStack(spacing: 0) {
-            PanelHeader(onPreferences: onPreferences)
-            Divider()
-            PanelBody(tunnelManager: tunnelManager)
-            Divider()
-            PanelFooter(onQuit: onQuit)
+            switch screen {
+            case .main:
+                PanelHeader(onSettings: { screen = .settings })
+                Divider()
+                PanelBody(tunnelManager: tunnelManager)
+                Divider()
+                PanelFooter(onQuit: onQuit)
+            case .settings:
+                SubHeader(title: "Settings", onBack: { screen = .main })
+                Divider()
+                PanelSettingsView(onPrivacy: { screen = .privacy })
+            case .privacy:
+                SubHeader(title: "What Freewire sees", onBack: { screen = .settings })
+                Divider()
+                PanelPrivacyView()
+            }
         }
-        .frame(width: 240)
+        .frame(width: 320)
+        // Bump every semantic font one step up so labels and buttons are easier
+        // to read and hit. Applied at the root so all screens inherit it.
+        .dynamicTypeSize(.xLarge)
         .background(.background)
     }
 }
 
-// MARK: - Header
+// MARK: - Headers
 
 private struct PanelHeader: View {
-    let onPreferences: () -> Void
+    let onSettings: () -> Void
 
     var body: some View {
         HStack {
             Text("Freewire")
                 .font(.headline)
             Spacer()
-            Button(action: onPreferences) {
+            Button(action: onSettings) {
                 Image(systemName: "gearshape")
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+}
+
+// A sub-screen header with a back chevron and a title.
+private struct SubHeader: View {
+    let title: String
+    let onBack: () -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Button(action: onBack) {
+                Image(systemName: "chevron.left")
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            Text(title)
+                .font(.headline)
+            Spacer()
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -421,11 +461,6 @@ private struct PanelFooter: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            FooterButton(label: "What is a VPN?") {
-                if let url = URL(string: "https://freewire.com/what-is-a-vpn") {
-                    NSWorkspace.shared.open(url)
-                }
-            }
             FooterButton(label: "Quit Freewire", action: onQuit)
         }
     }
@@ -446,6 +481,111 @@ private struct FooterButton: View {
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
         .font(.subheadline)
+    }
+}
+
+// MARK: - Settings (in-popover)
+
+// The former separate Preferences window, laid out to live inside the popover.
+// Reads and writes Preferences.shared directly, same as the old window did.
+private struct PanelSettingsView: View {
+    let onPrivacy: () -> Void
+
+    @State private var killSwitch      = Preferences.shared.killSwitchEnabled
+    @State private var autoConnect     = Preferences.shared.autoConnect
+    @State private var launchAtLogin   = Preferences.shared.launchAtLogin
+    @State private var netIntelligence = Preferences.shared.networkIntelligenceEnabled
+    private let fingerprint = (try? DeviceIdentity())?.fingerprint ?? "—"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Toggle("Launch at login", isOn: $launchAtLogin)
+                .onChange(of: launchAtLogin) { _, v in Preferences.shared.launchAtLogin = v }
+            Toggle("Connect automatically on launch", isOn: $autoConnect)
+                .onChange(of: autoConnect) { _, v in Preferences.shared.autoConnect = v }
+
+            VStack(alignment: .leading, spacing: 3) {
+                // Disabled until FreewireHelper installs the pf rules. Copy per
+                // error-states-spec.md "Interim: kill switch not yet enforced".
+                Toggle("Kill switch", isOn: $killSwitch)
+                    .onChange(of: killSwitch) { _, v in Preferences.shared.killSwitchEnabled = v }
+                    .disabled(true)
+                Text("Not available yet. When the VPN drops, traffic is not blocked. Coming in a future release.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Toggle("Help improve captive portal detection", isOn: $netIntelligence)
+                    .onChange(of: netIntelligence) { _, v in Preferences.shared.networkIntelligenceEnabled = v }
+                Text("Shares which connection method worked on this network. No personal data collected.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
+            Button("What Freewire sees \u{203A}", action: onPrivacy)
+                .buttonStyle(.link)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Key fingerprint")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text(fingerprint)
+                    .font(.system(.caption, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+            HStack {
+                Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button("Privacy Policy") {
+                    if let url = URL(string: "https://freewire.com/privacy") { NSWorkspace.shared.open(url) }
+                }
+                .buttonStyle(.link)
+                .font(.caption)
+            }
+        }
+        .padding(12)
+    }
+}
+
+// MARK: - "What Freewire sees" (in-popover)
+
+private struct PanelPrivacyView: View {
+    // Copy is specified in ux-workflows.md and must match privacy-policy.md; kept
+    // in sync with the old PrivacyDetailView. A true flag marks what Freewire can
+    // see in order to forward, not what it stores.
+    private let items: [(Bool, String, String)] = [
+        (false, "Your IP address",              "Never logged."),
+        (true,  "Which sites you connect to",   "Visible while forwarding. Never recorded."),
+        (false, "What you send and receive",    "Encrypted end to end. We cannot read it."),
+        (false, "When you connected",           "No connection logs."),
+        (false, "Your identity",                "No account. No email."),
+        (true,  "Anonymous rate-limit tokens",  "Cryptographically unlinked to your device. Deleted after 30 days."),
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            ForEach(items, id: \.1) { item in
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: item.0 ? "checkmark.circle.fill" : "xmark.circle.fill")
+                        .foregroundStyle(item.0 ? .green : .red)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(item.1).font(.subheadline.weight(.medium))
+                        Text(item.2).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            Button("Read our privacy policy") {
+                if let url = URL(string: "https://freewire.com/privacy") { NSWorkspace.shared.open(url) }
+            }
+            .buttonStyle(.link)
+            .padding(.top, 2)
+        }
+        .padding(12)
     }
 }
 

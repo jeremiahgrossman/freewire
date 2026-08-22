@@ -96,15 +96,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let pop = NSPopover()
-        pop.contentSize  = NSSize(width: 240, height: 300)
+        pop.contentSize  = NSSize(width: 300, height: 340)
         pop.behavior     = .transient
-        pop.contentViewController = NSHostingController(
+        let host = NSHostingController(
             rootView: PanelView(
                 tunnelManager: mgr,
-                onPreferences: { [weak self] in self?.openPreferences() },
                 onQuit:        { NSApp.terminate(nil) }
             )
         )
+        // Let the popover size itself to the SwiftUI content, so the larger fonts
+        // and the taller error/portal states are never clipped by a fixed height.
+        host.sizingOptions = [.preferredContentSize]
+        pop.contentViewController = host
         popover = pop
 
         // Dismiss popover on outside click.
@@ -133,6 +136,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if pop.isShown {
             closePanel()
         } else {
+            // Activate first. An accessory (LSUIElement) app is often inactive
+            // when its status item is clicked, and showing a popover from an
+            // inactive app is where AppKit has been seen to place it against the
+            // wrong screen/space rather than under the button.
+            NSApp.activate(ignoringOtherApps: true)
             pop.show(relativeTo: btn.bounds, of: btn, preferredEdge: .minY)
             pop.contentViewController?.view.window?.becomeKey()
         }
@@ -174,12 +182,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: - Preferences
-
-    private func openPreferences() {
-        closePanel()
-        PreferencesWindowController.shared.showWindow(nil)
-        NSApp.activate(ignoringOtherApps: true)
-    }
 
     // MARK: - Error handling
 
