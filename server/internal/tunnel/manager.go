@@ -213,16 +213,24 @@ func (m *Manager) AddPeer(peerToken, publicKeyBase64 string, capacity int) (*Pee
 // distinguish an unknown token from a successful removal. Returning success for
 // both told a client its peer was gone when nothing had been removed.
 func (m *Manager) RemovePeer(peerToken string) (bool, error) {
+	// The fields are copied under the lock, not the pointer.
+	//
+	// Taking the pointer and reading through it after unlocking raced AddPeer,
+	// which fills TunnelIP in under the same lock once the WireGuard IPC
+	// succeeds. Removing a token while it was being registered could therefore
+	// read a half-written entry -- and release an address that was either empty
+	// or not yet the one in use.
 	m.mu.Lock()
 	peer, ok := m.peers[peerToken]
 	if !ok {
 		m.mu.Unlock()
 		return false, nil
 	}
+	publicKey, tunnelIP := peer.PublicKey, peer.TunnelIP
 	delete(m.peers, peerToken)
 	m.mu.Unlock()
 
-	publicKeyBytes, err := base64.StdEncoding.DecodeString(peer.PublicKey)
+	publicKeyBytes, err := base64.StdEncoding.DecodeString(publicKey)
 	if err != nil {
 		return true, err
 	}
@@ -230,7 +238,7 @@ func (m *Manager) RemovePeer(peerToken string) (bool, error) {
 	// The map entry is already gone, so the address must return to the pool even
 	// if the WireGuard IPC fails. Leaving it allocated would drain the pool one
 	// address per failed removal, with nothing left to retry the release.
-	defer m.pool.Release(peer.TunnelIP)
+	defer m.pool.Release(tunnelIP)
 
 	ipcConf := fmt.Sprintf("public_key=%s\nremove=true\n\n", hex.EncodeToString(publicKeyBytes))
 	if err := m.dev.IpcSet(ipcConf); err != nil {

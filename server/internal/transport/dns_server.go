@@ -400,11 +400,28 @@ func (s *DNSServer) handleClientHello(conn *net.UDPConn, srcAddr *net.UDPAddr, r
 	}
 
 	// Refuse to allocate past the pending ceiling.
-	if s.pending.Load() >= maxPendingDNSSessions {
+	// Claim the slot by incrementing and rolling back if that took it past the
+	// ceiling. Load-then-add let every hello in a concurrent burst read the
+	// same under-limit value and all proceed, so the bound could be overshot by
+	// as many sessions as arrived together -- which is exactly the shape of the
+	// flood it exists to stop.
+	if s.pending.Add(1) > maxPendingDNSSessions {
+		s.pending.Add(-1)
 		s.log.Warn("dns: pending session limit reached; rejecting hello")
 		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
+	// Give the slot back on every path that does not go on to store a session.
+	// Several early returns lie between here and the store, and a slot leaked
+	// on one of them is never reclaimed -- the ceiling would ratchet down until
+	// it refused every hello, which is a denial of service reachable by
+	// whatever made key derivation fail.
+	stored := false
+	defer func() {
+		if !stored {
+			s.pending.Add(-1)
+		}
+	}()
 
 	// Generate session token (10 bytes).
 	var token [10]byte
@@ -450,7 +467,10 @@ func (s *DNSServer) handleClientHello(conn *net.UDPConn, srcAddr *net.UDPAddr, r
 	}
 	key := srvB32enc.EncodeToString(token[:])
 	s.sessions.Store(key, sess)
-	s.pending.Add(1)
+	stored = true
+	// The pending slot was already claimed above; incrementing again here would
+	// double-count it and let the ceiling drift down until it refused
+	// everything.
 
 	// Build TXT response: <b32(serverPub)>.<b32(token)>
 	txt := srvB32enc.EncodeToString(serverPub) + "." + srvB32enc.EncodeToString(token[:])
@@ -509,11 +529,18 @@ func (s *DNSServer) handleClientConfirm(conn *net.UDPConn, srcAddr *net.UDPAddr,
 
 	// Refuse to promote past the established ceiling, before any socket is
 	// opened. The pending session stays pending and expires on its own.
-	if s.established.Load() >= maxEstablishedDNSSessions {
+	if s.established.Add(1) > maxEstablishedDNSSessions {
+		s.established.Add(-1)
 		s.log.Warn("dns: established session limit reached; refusing to activate")
 		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
+	activated := false
+	defer func() {
+		if !activated {
+			s.established.Add(-1)
+		}
+	}()
 
 	// Activate session: open per-session WG bridge socket.
 	wgAddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("127.0.0.1:%d", s.wgPort))
@@ -533,7 +560,7 @@ func (s *DNSServer) handleClientConfirm(conn *net.UDPConn, srcAddr *net.UDPAddr,
 	sess.wgAddr = wgAddr
 	sess.activated = true
 	s.pending.Add(-1) // promoted from pending to established
-	s.established.Add(1)
+	activated = true
 	sess.lastSeen = time.Now()
 
 	// Start goroutine to read WG responses for piggybacking.

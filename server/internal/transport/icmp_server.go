@@ -284,10 +284,23 @@ func (s *ICMPServer) handleHello(pkt []byte, srcAddr *net.UDPAddr, conn *net.UDP
 	// Refuse to allocate past the pending ceiling. This is checked before any
 	// key material is generated, so a flood costs the server a comparison
 	// rather than a curve25519 operation per datagram.
-	if s.pending.Load() >= maxPendingICMPSessions {
+	// Claim by incrementing and roll back if that took it past the ceiling.
+	// Load-then-add let a concurrent burst of hellos all read the same
+	// under-limit value and all proceed, overshooting the bound by however many
+	// arrived together -- the exact shape of the flood it exists to stop.
+	if s.pending.Add(1) > maxPendingICMPSessions {
+		s.pending.Add(-1)
 		s.log.Warn("icmp server: pending session limit reached; rejecting hello")
 		return
 	}
+	claimed := true
+	defer func() {
+		// Released on every path that does not end with a stored session; a
+		// slot leaked here is never reclaimed and the ceiling ratchets down.
+		if claimed {
+			s.pending.Add(-1)
+		}
+	}()
 
 	// Generate server ephemeral keypair.
 	var serverPriv [32]byte
@@ -364,7 +377,7 @@ func (s *ICMPServer) handleHello(pkt []byte, srcAddr *net.UDPAddr, conn *net.UDP
 		s.log.Error("icmp server: could not allocate a free session token")
 		return
 	}
-	s.pending.Add(1)
+	claimed = false // the session is stored; the slot is now its own
 	// Send HANDSHAKE_ACK: header(8) + serverPub(32) + token(2) = 42 bytes.
 	ack := make([]byte, 8+32+2)
 	ack[0] = 0x01
@@ -417,10 +430,17 @@ func (s *ICMPServer) handleConfirm(pkt []byte, srcAddr *net.UDPAddr, conn *net.U
 
 	// Refuse to promote past the established ceiling, before any socket is
 	// opened. The pending session stays pending and expires on its own.
-	if s.established.Load() >= maxEstablishedICMPSessions {
+	if s.established.Add(1) > maxEstablishedICMPSessions {
+		s.established.Add(-1)
 		s.log.Warn("icmp server: established session limit reached; refusing to activate")
 		return
 	}
+	activated := false
+	defer func() {
+		if !activated {
+			s.established.Add(-1)
+		}
+	}()
 
 	// Open WG bridge socket.
 	wgAddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("127.0.0.1:%d", s.wgPort))
@@ -438,7 +458,7 @@ func (s *ICMPServer) handleConfirm(pkt []byte, srcAddr *net.UDPAddr, conn *net.U
 	sess.activated = true
 	sess.lastSeen = time.Now()
 	s.pending.Add(-1) // promoted from pending to established
-	s.established.Add(1)
+	activated = true
 
 	// Read WG inbound packets for delivery to client.
 	// Closing wgInbound on exit unblocks the push goroutine below.

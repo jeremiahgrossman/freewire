@@ -72,6 +72,8 @@ the O(n²) eviction alone was reported 9 times under 9 different ids.
 | FW-A18, FW-C-017, FW-M06 | medium | The HTTP CONNECT probe asked proxies for `vpn.freewire.com`, so against a self-hosted server it reported a path that does not exist and triggered an upgrade that tore down a working tunnel | probes the configured server |
 | FW-A10 (privacy sheet) | high | "No connection logs" was false: every registration, session and eviction wrote a timestamped line, and wireguard-go logged peers by public-key fragment from vendored code | events counted, hourly rollup; wireguard-go's logger redacts peer references; two tests hold the line |
 | CRYPTO-013, REL-20, CRYPTO-016, REL-020 | medium | Sequence counters wrapped with no rekey. The nonce is derived from the sequence number, so a wrap repeats a (key, nonce) pair — for ChaCha20-Poly1305 that leaks the XOR of two plaintexts and forfeits authentication. The ICMP client also rebuilt its AEAD per packet while the prebuilt fields sat unused | `maxSessionSeq` refuses to send at half the space, ending the session; prebuilt `aeadTx` used |
+| FW-M02 | medium | `RemovePeer` took the `*Peer` under the lock and read its fields after unlocking, racing `AddPeer`, which fills `TunnelIP` in under the same lock. Removing a token mid-registration could read a half-written entry and release the wrong address | fields copied under the lock |
+| REL-019 | low | The session ceilings were load-then-add, so every caller in a concurrent burst read the same under-limit value and all proceeded — overshooting by however many arrived together, which is the shape of the flood they exist to stop. Five early returns between the claim and the store would also have leaked a slot permanently, ratcheting the ceiling down until it refused everything | claim-then-rollback with a deferred release; concurrency test |
 | CRYPTO-13, CRYPTO-14, FW-L02 | low | Scheme name `PrivateToken` contradicted the docs' `PrivacyPass`, and quote trimming used a cutset that would strip interior quotes | docs corrected to RFC 9577's `PrivateToken` (the code was right, the spec was wrong); at most one surrounding quote pair stripped |
 
 ---
@@ -104,9 +106,9 @@ server: 320 concurrent connections produced exactly 64 refusals.
 
 **Genuine, deferred as lower value than the work:**
 
-- FW-M02, FW-M03, REL-019: data races on `Peer.TunnelIP`, `sess.localConn`, and
-  a non-atomic check-then-increment on the DNS pending counter. Narrow windows;
-  `go test -race` does not currently reach them.
+- FW-M03: both eviction loops read `sess.localConn` outside the session lock
+  that guards its write. Narrow, and the read is of a pointer written once at
+  activation; left open rather than fixed blind.
 - CRYPTO-007, CRYPTO-08: neither tunnel client applies a replay window to the
   server-to-client direction.
 - The kill-switch cluster (SEC-004, FW-C-008, FW-S09, FW-H07, CRYPTO-011,
