@@ -95,9 +95,23 @@ struct PreferencesView: View {
 private struct PrivacyDetailView: View {
     @Environment(\.dismiss) var dismiss
 
+    /// Copy is specified in `ux-workflows.md` and must match `privacy-policy.md`.
+    ///
+    /// "What you browse — We see only encrypted data" was here and was false. A
+    /// VPN server forwards packets to their destination, so it necessarily knows
+    /// the destination; and TLS still sends the hostname in the clear, so it
+    /// currently sees that too. Packet capture on the server's own uplink showed
+    /// wikipedia.org, github.com and duckduckgo.com in plain text while
+    /// connected. Claiming otherwise in the one screen a user opens to check is
+    /// worse than the exposure itself.
+    ///
+    /// The first flag marks what Freewire can see, not what it stores. Seeing a
+    /// destination in order to forward to it and writing it down are different
+    /// acts, and the second is the one that survives to be handed over.
     private let items: [(Bool, String, String)] = [
         (false, "Your IP address",    "Never logged."),
-        (false, "What you browse",    "We see only encrypted data."),
+        (true,  "Which sites you connect to", "Visible while forwarding. Never recorded."),
+        (false, "What you send and receive", "Encrypted end to end. We cannot read it."),
         (false, "When you connected", "No connection logs."),
         (false, "Your identity",      "No account. No email."),
         (true,  "Anonymous rate-limit tokens", "Cryptographically unlinked to your device. Deleted after 30 days."),

@@ -685,9 +685,13 @@ Settings are accessed via the gear icon on the main screen.
 │  ✕  Your IP address             │
 │     We never log it.            │
 │                                 │
-│  ✕  What you browse             │
-│     We see only encrypted       │
-│     data.                       │
+│  ✓  Which sites you connect to  │
+│     Visible while forwarding.   │
+│     Never recorded.             │
+│                                 │
+│  ✕  What you send and receive   │
+│     Encrypted end to end. We    │
+│     cannot read it.             │
 │                                 │
 │  ✕  When you connected          │
 │     No connection logs.         │

@@ -27,7 +27,11 @@ This section matters as much as what we do collect.
 
 **No connection logs.** We do not record when you connected, how long you were connected, or how much data you transferred. We cannot tell you when your device last connected to our servers, because we don't store that information.
 
-**No traffic content or metadata.** Freewire sees the encrypted tunnel between your device and our servers. We do not see which websites you visit, what applications you use, or any other information about your internet activity.
+**No traffic content.** Freewire carries an encrypted tunnel between your device and our servers. We cannot read what you send or receive: the contents of your traffic are encrypted end to end with the sites you visit, and we do not hold those keys.
+
+**We can see where your traffic goes, and we do not record it.** This is worth stating plainly, because an earlier version of this policy said we could not, and that was wrong. A VPN server forwards your packets to their destination, so it necessarily knows the destination address — that is what forwarding means, and no VPN can avoid it. Today our servers can also see the hostname you asked for, because TLS still sends it in the clear; we intend to close that with Encrypted Client Hello, though it will only work for sites that support it. None of this is written down: connections are counted in hourly totals, never logged individually, and there is nothing on our servers that could later say which sites a device visited.
+
+**If you want a provider that cannot know where you go,** no single-hop VPN can offer that, ours included. It takes two independent operators — one that knows who you are and not where you went, another that knows where you went and not who you are — as used by systems like iCloud Private Relay and Tor.
 
 **No DNS query logs.** Even on the DNS tunnel path — where your VPN traffic is encoded into DNS queries to our servers — we do not log the content of those queries. The DNS labels carry encrypted payload; the content is invisible to us without the ephemeral session key, which we never retain.
 
