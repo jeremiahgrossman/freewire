@@ -74,12 +74,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Thread.sleep(forTimeInterval: 0.1)
         }
 
-        // Free the server slot immediately. Reads the token from its lock-guarded
-        // box and issues the DELETE directly: hopping to the main actor here would
-        // deadlock, since this handler already owns the main thread.
-        if let token = tunnelManager?.peerTokenBox.token {
-            api.removePeerBlocking(token: token)
-        }
+        // Single-user: the peer registration is persistent (see deregisterPeer /
+        // data-model.md). We do NOT delete it on quit, so the next launch can
+        // reconnect through a captive portal using the cached registration.
+        // Freeing the slot on quit was multi-user behavior, deferred with the
+        // rest of multi-user.
     }
 
     // MARK: - Status item + popover

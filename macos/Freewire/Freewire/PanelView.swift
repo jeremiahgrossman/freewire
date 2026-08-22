@@ -601,7 +601,8 @@ private struct StatusRow: View {
             Image(systemName: symbol)
                 .foregroundStyle(color)
             Text(label)
-                .font(.subheadline.weight(.semibold))
+                // Regular weight to read like a native menu item, not a heading.
+                .font(.subheadline)
         }
     }
 }

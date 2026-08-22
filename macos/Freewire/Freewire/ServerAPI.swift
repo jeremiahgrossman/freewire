@@ -40,6 +40,43 @@ struct RegisteredPeer: Decodable {
     }
 }
 
+// CachedConnection is the non-secret control-plane state from a successful
+// connect, persisted so a later connect can proceed when the control plane
+// (fetchConfig + registerPeer) is unreachable -- which is exactly what a captive
+// portal does before login. The private key is never stored here; it stays in
+// the Keychain. This is what lets Freewire connect on a locked portal: the DNS
+// transport survives the portal, and the peer is still registered server-side
+// (the portal blocks the disconnect's peer-removal too, so it persists).
+//
+// Single-user by design: the first connect to a server must happen on an open
+// network to populate this. You set up your own server, so that always holds.
+struct CachedConnection: Codable {
+    let serverPublicKey: String
+    let serverEndpoint: String
+    let tlsPort: Int
+    let dnsTunnelPort: Int
+    let icmpUDPPort: Int
+    let dnsTunnelDomain: String?
+    let tunnelIP: String
+    let keepalive: Int
+    let peerToken: String
+
+    private static func key(host: String) -> String { "cachedConnection.\(host)" }
+
+    func save(host: String) {
+        if let data = try? JSONEncoder().encode(self) {
+            UserDefaults.standard.set(data, forKey: Self.key(host: host))
+        }
+    }
+    static func load(host: String) -> CachedConnection? {
+        guard let data = UserDefaults.standard.data(forKey: key(host: host)) else { return nil }
+        return try? JSONDecoder().decode(CachedConnection.self, from: data)
+    }
+    static func clear(host: String) {
+        UserDefaults.standard.removeObject(forKey: key(host: host))
+    }
+}
+
 enum APIError: Error, LocalizedError {
     case badURL
     case httpError(Int)

@@ -274,6 +274,20 @@ final class TunnelManager: ObservableObject {
                 return
             }
             lastGoodTransport = transport
+            // Cache the control-plane state so a later connect can succeed when a
+            // portal blocks fetchConfig/registerPeer. Only cached after a real
+            // connection, so we never cache a config that did not work.
+            CachedConnection(
+                serverPublicKey: server.publicKey,
+                serverEndpoint:  server.endpoint,
+                tlsPort:         server.tlsEndpointPort,
+                dnsTunnelPort:   server.dnsTunnelPort,
+                icmpUDPPort:     server.icmpUDPPort,
+                dnsTunnelDomain: server.dnsTunnelDomain,
+                tunnelIP:        peer.tunnelIP,
+                keepalive:       peer.keepaliveInterval,
+                peerToken:       peer.peerToken
+            ).save(host: api.serverHost)
             state = .connected(
                 tunnelIP: peer.tunnelIP,
                 interfaceName: ifName,
@@ -310,6 +324,28 @@ final class TunnelManager: ObservableObject {
             // them. That is the exact situation the product exists for, and it
             // reported the one thing guaranteed not to be the cause.
             await killTunnel()
+            guard !Task.isCancelled else { await deregisterPeer(); return }
+
+            // Before deciding this is a portal to log into, try the cached
+            // connection. If we have connected to this server before, the DNS
+            // transport can carry the tunnel through the portal without the
+            // blocked control-plane calls -- the whole point of the product.
+            if let cached = CachedConnection.load(host: api.serverHost),
+               let result = await connectFromCache(cached) {
+                lastGoodTransport = result.transport
+                peerToken = cached.peerToken
+                state = .connected(
+                    tunnelIP: cached.tunnelIP,
+                    interfaceName: result.ifName,
+                    connectedAt: Date(),
+                    transport: result.transport
+                )
+                startNetworkMonitor()
+                startWatchdog()
+                startUpgradeManager(serverHost: api.serverHost, transport: result.transport)
+                return
+            }
+
             await deregisterPeer()
             guard !Task.isCancelled else { return }
             switch await probeCaptivePortal() {
@@ -618,9 +654,16 @@ final class TunnelManager: ObservableObject {
     }
 
     private func deregisterPeer() async {
-        guard let token = peerToken else { return }
+        // Single-user: the peer registration is persistent. The device's identity
+        // is its WireGuard key (see data-model.md), and keeping it registered on
+        // the server is what lets a later connect on a captive portal reuse it via
+        // CachedConnection when the API is blocked. We drop only the local session
+        // token here; the server keeps the peer. Re-registering the same key later
+        // displaces the old entry, so this never leaks slots for the one device.
+        //
+        // Removing the peer on every disconnect was the multi-user, free-the-slot
+        // behavior; it is deferred with the rest of multi-user (see CLAUDE.md).
         peerToken = nil
-        try? await api.removePeer(token: token)
     }
 
     private func killTunnel() async {
@@ -670,6 +713,36 @@ final class TunnelManager: ObservableObject {
         #endif
     }
 
+    /// Brings the tunnel up from cached control-plane state, without any API
+    /// call. Used when a portal blocks fetchConfig/registerPeer but we have
+    /// connected to this server before. Returns nil if no transport carries the
+    /// tunnel (e.g. the peer is no longer registered), leaving the caller to fall
+    /// back to captive-portal handling.
+    private func connectFromCache(_ cached: CachedConnection) async -> (ifName: String, transport: TunnelTransport)? {
+        state = .connecting(status: "Using your saved connection for this network.")
+        let cfg = TunnelConfig(
+            privateKey:      identity.privateKeyBase64,
+            serverPublicKey: cached.serverPublicKey,
+            serverEndpoint:  cached.serverEndpoint,
+            serverHost:      api.serverHost,
+            tunnelIP:        cached.tunnelIP,
+            serverTunnelIP:  "10.0.0.1",
+            keepalive:       cached.keepalive,
+            insecureTLS:     ServerTrust.trustsSelfSignedCertificate(host: api.serverHost),
+            tlsPort:         cached.tlsPort,
+            dnsTunnelPort:   cached.dnsTunnelPort,
+            icmpUDPPort:     cached.icmpUDPPort,
+            preferredTransport: nil,
+            dnsResolver:     Preferences.shared.dnsResolverOverride,
+            dnsTunnelDomain: cached.dnsTunnelDomain
+        )
+        guard let (ifName, transport) = try? await launchTunnel(config: cfg), !Task.isCancelled else {
+            await killTunnel()
+            return nil
+        }
+        return (ifName, transport)
+    }
+
     private func launchTunnel(config: TunnelConfig) async throws -> (String, TunnelTransport) {
         guard let helperURL = Self.tunnelHelperURL else {
             throw TunnelError.helperNotFound
@@ -690,10 +763,18 @@ final class TunnelManager: ObservableObject {
         // world-writable directory. Invoking the fixed binary path also closes
         // the window where that script existed on disk before it ran.
         let helperPath = helperURL.path
-        let stderrPipe = Pipe()
+        // Tee the helper's stderr (the transport-chain diagnostics) to a file, so
+        // it survives every outcome -- success, failure, and the captive-portal
+        // branch -- and can be read after the fact:
+        //   cat /tmp/freewire-tunnel-stderr.log
+        // The old pipe was only drained on the failure path and only its buffered
+        // tail, so the dns/tls reasons were lost exactly when they mattered.
+        let stderrLogURL = URL(fileURLWithPath: "/tmp/freewire-tunnel-stderr.log")
+        FileManager.default.createFile(atPath: stderrLogURL.path, contents: nil)
+        let stderrLog = try? FileHandle(forWritingTo: stderrLogURL)
         let skipRouting = Preferences.shared.skipRouting
 
-        Task.detached { [helperPath, configData, readyFile, stderrPipe, skipRouting] in
+        Task.detached { [helperPath, configData, readyFile, stderrLog, skipRouting] in
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
             // -n: never prompt. Without it sudo blocks on a password nobody can
@@ -711,7 +792,7 @@ final class TunnelManager: ObservableObject {
             if let out = try? FileHandle(forWritingTo: readyFile) {
                 p.standardOutput = out
             }
-            p.standardError = stderrPipe.fileHandleForWriting
+            p.standardError = stderrLog ?? FileHandle.nullDevice
 
             let stdin = Pipe()
             p.standardInput = stdin
@@ -719,15 +800,12 @@ final class TunnelManager: ObservableObject {
             try? stdin.fileHandleForWriting.write(contentsOf: configData)
             try? stdin.fileHandleForWriting.close()
             p.waitUntilExit()
-            try? stderrPipe.fileHandleForWriting.close()
+            try? stderrLog?.close()
         }
 
         func failure() -> TunnelError {
             let out = (try? String(contentsOf: readyFile, encoding: .utf8)) ?? ""
-            let err = String(
-                data: stderrPipe.fileHandleForReading.availableData,
-                encoding: .utf8
-            ) ?? ""
+            let err = (try? String(contentsOf: stderrLogURL, encoding: .utf8)) ?? ""
             try? FileManager.default.removeItem(at: readyFile)
 
             if out.contains("all_paths_failed") { return .allPathsFailed }
