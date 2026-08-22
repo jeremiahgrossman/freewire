@@ -123,7 +123,7 @@ The client attempts each path in order, moving to the next on failure:
 
 1. **HTTP CONNECT probe** — Attempt TCP tunnel through the captive portal's HTTP proxy on port 443. Fast; works on portals that expose HTTP CONNECT. ~5% of networks.
 2. **TLS/443 direct** — Connect to Freewire server on port 443 with traffic that presents a valid TLS handshake. Works on portals that leave 443 open without deep packet inspection. ~80% of networks.
-3. **DNS tunnel** — Encode all traffic as DNS queries to Freewire's authoritative Domain Name System (DNS) server for `tunnel.freewire.com`. Works on any network where DNS queries reach the public internet, which captive portals must allow to display their own portal page. ~14% of remaining networks.
+3. **DNS tunnel** — Encode all traffic as DNS queries to Freewire's authoritative Domain Name System (DNS) server for `t.pinghop.net`. Works on any network where DNS queries reach the public internet, which captive portals must allow to display their own portal page. ~14% of remaining networks.
 4. **ICMP tunnel** — Encode traffic in Internet Control Message Protocol (ICMP) echo packets. Last resort; works on networks that allow external ping but block everything else. ~1% of remaining networks.
 
 Once any path establishes a tunnel, the client renegotiates: if a faster path is now reachable through the tunnel, it upgrades transparently. The user is never asked to choose a path.
@@ -325,7 +325,7 @@ NEPacketTunnelProvider does not expose.
 - **TestFlight**: Beta distribution for iOS pre-release builds
 - **Sparkle**: Auto-update for macOS direct download path (decided; see §6.8)
 - **Protocol libraries**: wireguard-go over `utun` (fast path on open networks), custom DNS and ICMP tunnel implementations in Go (captive portal bypass), uTLS for the TLS/443 and HTTP CONNECT paths — **not the platform TLS stack**, because the fingerprint has to be rotated among real browser profiles so a portal's DPI cannot identify the handshake. The control plane uses `Network.framework` with its own verification, since App Transport Security rejects a self-signed certificate before any pinning code is consulted.
-- **Authoritative DNS infrastructure**: Single authoritative DNS server for `tunnel.freewire.com` at launch (US-East, unicast). Anycast (BGP, multi-region) is a post-launch optimization — see `anycast-dns-infrastructure.md`
+- **Authoritative DNS infrastructure**: Single authoritative DNS server for `t.pinghop.net` at launch (US-East, unicast). Anycast (BGP, multi-region) is a post-launch optimization — see `anycast-dns-infrastructure.md`
 
 ---
 
@@ -378,7 +378,7 @@ NEPacketTunnelProvider does not expose.
 
 ### Open Questions
 
-- **OQ-4 (open):** DNS tunnel delegation. The transport needs `tunnel.freewire.com` delegated to the server so a portal's own resolver forwards its queries. `freewire.com` is registered to a third party and no delegation exists, so the DNS tunnel — the one transport that gets through an unauthenticated portal — cannot be exercised against a real captive portal. Testing to date has pointed the client straight at the server's IP, which a real portal would block. Resolving this needs a domain under Freewire's control, and it gates any field test of the product's core premise.
+- **OQ-4 (in progress):** DNS tunnel delegation. The transport needs its zone delegated to the server so a portal's own resolver forwards its queries. `freewire.com` belongs to a third party, so a dedicated domain was chosen instead: **`pinghop.net`**, tunnel zone **`t.pinghop.net`**. The code no longer hardcodes the zone — the server config owns it and advertises it to the client (default `t.pinghop.net`), so registering and delegating is now a config-and-DNS task, not a rebuild. **Remaining, and both are the operator's to execute:** (1) register `pinghop.net`; (2) create two records in its zone — `ns1.pinghop.net A 52.203.246.145` and `t.pinghop.net NS ns1.pinghop.net`. Until those exist, testing still points the client straight at the server IP (`dnsResolver` override), which a real portal would block, so the product's central premise remains unexercised against a real captive portal. A separate domain for the API endpoint (so a block on one does not take out both) is a later registration.
 - **OQ-5 (open):** Kill switch delivery. `SMAppService` registration requires a Developer ID; the machine has none. The helper is buildable and runnable under `sudo`, which is enough to develop and test against real pf, but not to ship. Distribution needs the certificate regardless, and no workaround should be entertained — the alternatives all end in instructing users to bypass Gatekeeper to install a VPN that asks for root.
 - **OQ-2 (closed):** ~~Server software open-source repository location~~ — resolved: Freewire software is proprietary. No public repository. Server software is distributed as a deployable binary only. Decision #18.
 - **OQ-3 (closed):** ~~Privacy Pass token issuance timing~~ — resolved: Decision #19.
