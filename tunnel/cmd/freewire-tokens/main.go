@@ -31,9 +31,11 @@ import (
 	"fmt"
 	"io/fs"
 	"math/big"
+	"math/bits"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -206,7 +208,16 @@ func issue(c *http.Client, base string, pub *rsa.PublicKey, count int) ([]string
 		blinded[i] = base64.RawURLEncoding.EncodeToString(b)
 	}
 
-	body, _ := json.Marshal(map[string]any{"blinded": blinded})
+	challenge, nonce, err := solveChallenge(c, base)
+	if err != nil {
+		return nil, err
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"blinded":   blinded,
+		"challenge": challenge,
+		"nonce":     nonce,
+	})
 	r, err := c.Post(base+"/v1/tokens/issue", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("issuance request: %w", err)
@@ -244,6 +255,66 @@ func issue(c *http.Client, base string, pub *rsa.PublicKey, count int) ([]string
 		return nil, fmt.Errorf("no token in the batch verified")
 	}
 	return out, nil
+}
+
+// solveChallenge pays the server's proof of work for this batch.
+//
+// The server cannot rate-limit issuance by caller: the client IP must not exist
+// in its process and a device handle would defeat blind signing. So the price is
+// paid in CPU instead of in identity. A batch costs a fraction of a second here
+// and costs a flooder the same per batch, which is the point.
+func solveChallenge(c *http.Client, base string) (challenge, nonce string, err error) {
+	r, err := c.Get(base + "/v1/tokens/challenge")
+	if err != nil {
+		return "", "", fmt.Errorf("fetch challenge: %w", err)
+	}
+	defer r.Body.Close()
+	if r.StatusCode == http.StatusNotImplemented {
+		// A server that does not issue tokens has nothing to charge for.
+		return "", "", fmt.Errorf("this server does not issue tokens")
+	}
+	if r.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("challenge request returned HTTP %d", r.StatusCode)
+	}
+
+	var ch struct {
+		Challenge  string `json:"challenge"`
+		Difficulty int    `json:"difficulty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&ch); err != nil {
+		return "", "", fmt.Errorf("decode challenge: %w", err)
+	}
+	if ch.Challenge == "" {
+		return "", "", fmt.Errorf("server returned an empty challenge")
+	}
+	// A server asking for more than this is either broken or trying to burn the
+	// client's battery; 28 bits is already ~30x the intended cost.
+	if ch.Difficulty < 0 || ch.Difficulty > 28 {
+		return "", "", fmt.Errorf("server asked for an unreasonable difficulty (%d)", ch.Difficulty)
+	}
+
+	// Search is a plain counter rather than random: the challenge already
+	// differs per window, and a counter makes the work reproducible when
+	// something goes wrong.
+	for i := uint64(0); i < 1<<32; i++ {
+		candidate := strconv.FormatUint(i, 16)
+		sum := sha256.Sum256([]byte(ch.Challenge + ":" + candidate))
+		if leadingZeroBits(sum[:]) >= ch.Difficulty {
+			return ch.Challenge, candidate, nil
+		}
+	}
+	return "", "", fmt.Errorf("could not solve the challenge at difficulty %d", ch.Difficulty)
+}
+
+func leadingZeroBits(b []byte) int {
+	n := 0
+	for _, c := range b {
+		if c != 0 {
+			return n + bits.LeadingZeros8(c)
+		}
+		n += 8
+	}
+	return n
 }
 
 func tokenInput(nonce [32]byte) []byte {

@@ -14,6 +14,37 @@ import (
 type issueRequest struct {
 	// Base64url-encoded blinded messages, one per token requested.
 	Blinded []string `json:"blinded"`
+	// Proof of work, from GET /v1/tokens/challenge. See proofofwork.go for why
+	// issuance is priced in CPU rather than keyed on the caller.
+	Challenge string `json:"challenge"`
+	Nonce     string `json:"nonce"`
+}
+
+type challengeResponse struct {
+	Challenge  string `json:"challenge"`
+	Difficulty int    `json:"difficulty"`
+	// Seconds the challenge remains valid, so a client knows when to refetch
+	// rather than discovering it by being refused.
+	ExpiresIn int `json:"expires_in"`
+}
+
+// handleTokenChallenge hands out the current proof-of-work challenge.
+//
+// Unauthenticated and identical for every caller within a window: a per-caller
+// challenge would require a caller identity, which is the thing that must not
+// exist here.
+func (s *Server) handleTokenChallenge(w http.ResponseWriter, r *http.Request) {
+	if s.issuer == nil || s.pow == nil {
+		writeError(w, http.StatusNotImplemented, "NOT_IMPLEMENTED",
+			"This server does not issue tokens.")
+		return
+	}
+	challenge, difficulty := s.pow.Challenge()
+	writeJSON(w, http.StatusOK, challengeResponse{
+		Challenge:  challenge,
+		Difficulty: int(difficulty),
+		ExpiresIn:  int(s.pow.window.Seconds()),
+	})
 }
 
 type issueResponse struct {
@@ -58,10 +89,24 @@ func (s *Server) handleIssueTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Charge the batch against the global issuance budget before signing any of
-	// it. Unmetered issuance would make Privacy Pass ceremonial: the endpoint is
+	// Price the batch in CPU before spending any of the global budget. The
+	// budget alone let one caller exhaust issuance for everyone, because with no
+	// usable rate-limit key there was nothing to charge them individually
+	// against. Proof of work is that charge: it costs the caller time without
+	// telling the server anything about who they are.
+	if s.pow != nil {
+		if err := s.pow.Verify(req.Challenge, req.Nonce); err != nil {
+			writeError(w, http.StatusTooManyRequests, "PROOF_OF_WORK_REQUIRED", err.Error())
+			return
+		}
+	}
+
+	// Then charge the batch against the global issuance budget. Unmetered
+	// issuance would make Privacy Pass ceremonial: the endpoint is
 	// unauthenticated by design, so anyone could mint tokens without limit and
 	// the rate limit those tokens exist to impose would cost nothing to bypass.
+	// Proof of work sets the price; this caps the absolute rate, which proof of
+	// work alone cannot do against an attacker with more cores.
 	//
 	// 429 rather than 402: the API conventions reserve 402 for a token that was
 	// presented and rejected, and the client maps the two to different retries.

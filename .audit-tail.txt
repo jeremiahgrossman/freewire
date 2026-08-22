@@ -1,0 +1,209 @@
+critical	FW-S02	deploy/provision.sh	Unauthenticated peers get unrestricted forwarding into the cloud metadata service and the VPC
+critical	PP-02	macos/Freewire/Freewire/TokenStore.swift	Issuance is triggered from the redemption code path, correlating the two events by IP and timestamp
+critical	FW-A01	macos/Freewire/Freewire/TunnelManager.swift	`.noNetwork` is a terminal dead end: both the Try again button and the automatic resume are silently rejected
+critical	SEC-004	macos/FreewireHelper/KillSwitchController.swift	Kill switch replaces the system-wide pf ruleset and release() destroys it permanently
+critical	REL-02	macos/TunnelManager.swift	Reconnect and path upgrade register peers without a Privacy Pass token, so both always fail on a managed server
+critical	FW-A01	macos/TunnelManager.swift	Reconnect and path-upgrade register without a Privacy Pass token, so every automatic recovery fails with 402
+critical	FW-A02	macos/TunnelManager.swift	CONN-1 is a terminal dead end: the 'Try again' button and the automatic resume are both no-ops
+critical	FW-A04	macos/TunnelManager.swift	Path upgrade keeps the UI on 'Protected' while it kills the tunnel and releases the routes
+critical	REL-001	macos/TunnelManager.swift	killTunnel invokes sudo without -n and can block the main actor forever
+critical	REL-002	macos/TunnelManager.swift	failure() calls FileHandle.availableData on the main actor and blocks until the helper writes or exits
+critical	FW-C01	macos/TunnelManager.swift	Reconnect and path-upgrade register a peer without a Privacy Pass token, so both always fail on the managed server
+critical	FW-S01	server/internal/api/server.go	Go's default http.Server error logger writes client IP addresses to disk
+critical	SEC-003	server/internal/api/tokens_handler.go	Unauthenticated token issuance: unbounded RSA private-key work and unlimited token minting
+critical	SEC-002	server/internal/privacypass/spent.go	O(n^2) eviction under the store mutex hangs the whole server at the ceiling
+critical	REL-01	server/internal/privacypass/spent.go	Spent-token eviction is O(n²) while holding the store mutex, stalling every redemption
+critical	FW-A05	server/internal/privacypass/spent.go	SpentStore eviction is O(n²) at the 5M-entry ceiling and runs holding the redemption mutex
+critical	FW-S03	server/internal/privacypass/spent.go	evictOldestLocked is O(n^2) at the 5M ceiling and permanently wedges the server under a lock an attacker can reach
+critical	CRYPTO-003	server/internal/transport/dns_server.go	DNS tunnel commits the replay window before decrypting, and the sequence number is visible to every resolver on the path
+critical	FW-C-001	server/internal/transport/dns_server.go	Replay window is advanced before AEAD verification, so one forged packet permanently wedges a session
+critical	CRYPTO-002	server/internal/transport/icmp_server.go	Anti-replay window is committed before AEAD authentication, letting an unauthenticated packet permanently desynchronise the session
+critical	CRYPTO-01	server/internal/transport/icmp_server.go	Replay window is committed before the AEAD tag is verified, letting an unauthenticated attacker permanently wedge a session
+critical	SEC-001	server/internal/transport/tls443.go	Client IP addresses reach the logs via wrapped net.OpError
+critical	CRYPTO-001	server/internal/transport/tls443.go	Client IP addresses are written to logs via net.OpError in the TLS/443 bridge
+critical	FW-A03	server/internal/transport/tls443.go	Client IP addresses are written to the server log through net.OpError in the TLS bridge
+critical	CRYPTO-03	server/internal/transport/tls443.go	Client IP addresses reach the logs through net.OpError, bypassing the RemoteAddr CI lint
+critical	FW-C02	server/internal/tunnel/manager.go	Duplicate-public-key refusal plus absent peer eviction permanently locks a device out after any lost DELETE
+critical	PP-02	tunnel/cmd/freewire-tokens/main.go	Issuer public key fetched over a connection that may skip certificate verification, with no pinning fallback
+critical	CRYPTO-004	tunnel/cmd/freewire-tokens/main.go	Privacy Pass issuer public key is accepted from the server with no pinning or consistency check, allowing a silent per-client tagging attack
+critical	FW-S04	tunnel/cmd/freewire-tokens/main.go	Issuer RSA public key is fetched over an unverified TLS connection and never validated, silently breaking unlinkability
+critical	FW-C-002	tunnel/cmd/freewire-tunnel/main.go	IPv6 traffic bypasses the tunnel entirely while the UI reports Protected
+critical	FW-A02	tunnel/cmd/freewire-tunnel/main.go	The system DNS resolver is pinned outside the tunnel on every transport, leaking every DNS query to the hostile network while the UI says 'Protected'
+critical	FW-A03	tunnel/cmd/freewire-tunnel/main.go	Tunnel health is probed against 1.1.1.1:53, which the resolver pin can route outside the tunnel - both the startup verification and the ongoing supervisor then pass on a dead tunnel
+critical	FW-C-003	tunnel/cmd/freewire-tunnel/transport.go	waitForHandshake reads a stale handshake timestamp from an earlier candidate, so the chain can select a transport that carries nothing
+high	SEC-008	deploy/provision.sh	NAT rules give every VPN client unrestricted access to the instance metadata service and the host itself
+high	FW-A09	macos/Freewire/Freewire/PathUpgradeManager.swift	The HTTP CONNECT upgrade probe asks the proxy for a hardcoded hostname, so it reports a path the tunnel cannot actually use
+high	FW-A06	macos/Freewire/Freewire/ServerAPI.swift	Four user-visible APIError strings are invented; none has an entry in error-states-spec.md
+high	FW-A04	macos/Freewire/Freewire/TunnelManager.swift	performPathUpgrade tears down the tunnel and rebuilds it while the UI keeps showing 'Protected'
+high	FW-A05	macos/Freewire/Freewire/TunnelManager.swift	Cancel is dead during connects started by retryFromNetworkBlock and the captive-portal auto-resume, and the stale connect overwrites the cancelled state
+high	SEC-009	macos/FreewireHelper/KillSwitchController.swift	isEngaged() reports the kill switch active based on a file's existence, not on the loaded ruleset
+high	FW-A07	macos/FreewireHelper/KillSwitchController.swift	The kill switch replaces the system-wide pf ruleset and release() flushes everything, never restoring /etc/pf.conf
+high	FW-A08	macos/FreewireHelper/KillSwitchController.swift	isEngaged() infers 'kill switch active' from a file that exists even when the ruleset was rejected
+high	FW-C-008	macos/FreewireHelper/KillSwitchController.swift	The kill switch replaces the entire pf ruleset instead of loading into its anchor, and release flushes every other consumer's rules
+high	FW-S09	macos/FreewireHelper/KillSwitchController.swift	Kill switch loads into the global pf ruleset instead of its anchor and flushes every other consumer's rules on release
+high	FW-H07	macos/FreewireHelper/KillSwitchController.swift	engage loads the ruleset as pf's main ruleset and release flushes all of pf, despite claiming to use an anchor
+high	FW-A08	macos/FreewireHelper/KillSwitchController.swift	The kill switch replaces and then flushes the entire system pf ruleset, contrary to its own anchor design, destroying other software's firewall rules
+high	SEC-005	macos/KillSwitchRules.swift	sanitize() strips characters instead of validating, so a server-supplied host of "any" makes the kill switch fail open
+high	FW-C-009	macos/KillSwitchRules.swift	The kill switch ruleset blocks the traffic three of the four fallback transports need to rebuild the tunnel
+high	CRYPTO-008	macos/PinnedHTTPClient.swift	Certificate verification is fully disabled whenever a key is pinned, but the pin only covers the WireGuard public key and not the rest of the control-plane response
+high	CRYPTO-04	macos/PinnedHTTPClient.swift	Certificate verification is disabled wholesale whenever a user pin exists, but only public_key is pinned — everything else in the config response, and the Privacy Pass token, are attacker-controlled
+high	FW-S10	macos/PinnedHTTPClient.swift	Certificate verification is unconditionally disabled whenever a key is pinned, exposing Privacy Pass tokens and peer tokens in transit
+high	FW-A12	macos/ServerAPI.swift	Four user-facing APIError strings are invented with no entry in error-states-spec.md
+high	PP-03	macos/TokenStore.swift	Synchronous issuance immediately before redemption makes the two events trivially correlatable by timing
+high	REL-05	macos/TokenStore.swift	Token issuance subprocess has no timeout; a hung helper blocks connect() forever
+high	REL-06	macos/TokenStore.swift	refresh() does not collapse concurrent calls — the second caller returns without tokens instead of waiting
+high	FW-A13	macos/TokenStore.swift	On an empty store, issuance and redemption happen back to back from the same address, defeating blind signing
+high	FW-A07	macos/TokenStore.swift	A missing or failing token helper strands the user in an unrecoverable retry loop whose copy tells them retrying will work
+high	REL-04	macos/TunnelManager.swift	CONN-1 never auto-recovers: the network-available handler calls connect(), which returns immediately in state .noNetwork
+high	FW-A09	macos/TunnelManager.swift	insecureTLS is decided by address while API cert acceptance is decided by the pin, so the documented deployment can never use TLS/443 or HTTP CONNECT
+high	FW-A10	macos/TunnelManager.swift	Cancel during connect can leave a live tunnel running with routes installed while the UI says 'Not protected'
+high	FW-A11	macos/TunnelManager.swift	Connect attempts started from retryFromNetworkBlock and the portal wait are not cancellable — the Cancel button is inert
+high	FW-C-004	macos/TunnelManager.swift	Reconnect and path upgrade register a peer with no Privacy Pass token, so every recovery fails with 402 on a managed server
+high	FW-C-007	macos/TunnelManager.swift	insecureTLS uses an RFC1918 address test while the rest of the client uses the key pin, so TLS paths fail on any self-hosted server with a public IP
+high	REL-003	macos/TunnelManager.swift	performPathUpgrade is untracked and can silently re-establish a tunnel after the user disconnects
+high	FW-H02	macos/TunnelManager.swift	The generic connect failure path never kills the tunnel helper, leaving an orphan process holding the split-default routes
+high	CRYPTO-005	server/internal/api/tokens_handler.go	Token issuance is completely unauthenticated and unmetered, so the anonymous rate limit it exists to enforce can be bypassed at will
+high	FW-H06	server/internal/api/tokens_handler.go	Token issuance is unauthenticated and unlimited, so Privacy Pass provides no rate limiting at all
+high	CRYPTO-006	server/internal/privacypass/spent.go	Spent-token eviction is O(n^2) under the global mutex and will hang the server permanently at the ceiling
+high	FW-C-010	server/internal/privacypass/spent.go	evictOldestLocked is an O(n^2) selection sort over five million entries while holding the store mutex
+high	PP-03	server/internal/privacypass/spent.go	Spent store is in-memory only — a server restart makes every previously spent token redeemable again
+high	PP-04	server/internal/privacypass/spent.go	Expired spent records are treated as fresh, but tokens carry no expiry — every token becomes permanently re-spendable after 30 days
+high	PP-05	server/internal/privacypass/spent.go	evictOldestLocked silently deletes spent records under memory pressure, letting an attacker flush the double-spend defence
+high	CRYPTO-06	server/internal/privacypass/spent.go	Tokens carry no expiry but spent records are deleted after 30 days, guaranteeing double-spend of every token once it ages out
+high	REL-004	server/internal/privacypass/spent.go	evictOldestLocked is O(n^2/10) with the store mutex held — the server stalls indefinitely at the ceiling
+high	FW-H03	server/internal/privacypass/spent.go	evictOldestLocked runs a selection sort over 5M entries while holding the store mutex, hanging every redemption
+high	REL-07	server/internal/transport/dns_server.go	Race between evictLoop and handleClientConfirm double-decrements the pending counter and tears down a live session
+high	FW-S05	server/internal/transport/dns_server.go	DNS keepalive/poll requires no proof of session ownership, letting any observer steal and consume a session's queued packets
+high	REL-005	server/internal/transport/dns_server.go	DNS evictLoop releases sess.mu before deleting, racing handleClientConfirm: pending counter underflows and a socket plus goroutine leak
+high	REL-007	server/internal/transport/dns_server.go	No cap on established DNS or ICMP tunnel sessions — unauthenticated handshakes exhaust file descriptors and goroutines
+high	SEC-006	server/internal/transport/icmp_server.go	Replay window is advanced before authentication, letting an off-path attacker permanently kill a live session
+high	SEC-007	server/internal/transport/icmp_server.go	ICMP server has no pending-session cap, and unauthenticated keepalives from any source prevent eviction
+high	FW-A14	server/internal/transport/icmp_server.go	Anti-replay state is advanced before authentication, so a guessed 2-byte session token silently kills a live tunnel
+high	FW-S06	server/internal/transport/icmp_server.go	ICMP tunnel has no cap on sessions and burns two X25519 operations per unauthenticated HELLO
+high	FW-S07	server/internal/transport/tls443.go	TLS/443 bridge still allocates 64KB and a UDP socket per unauthenticated connection, contradicting its own bound
+high	REL-03	server/internal/tunnel/manager.go	A peer whose client dies without DELETE is locked out permanently: duplicate keys are refused and nothing evicts idle peers
+high	FW-A06	server/internal/tunnel/manager.go	A device whose peer was never deleted can never register again, and the error surfaces as 'Server returned 500'
+high	FW-S08	server/internal/tunnel/manager.go	Root-privileged server resolves ip, ifconfig, and route through PATH
+high	FW-C-011	tunnel/cmd/freewire-tunnel/dns_client.go	The DNS keepalive drains the server's outbound queue and discards the packet it receives
+high	CRYPTO-007	tunnel/cmd/freewire-tunnel/icmp_client.go	Neither tunnel client applies a replay window to the server-to-client direction
+high	FW-C-012	tunnel/cmd/freewire-tunnel/icmp_client.go	The ICMP tunnel payload budget is smaller than a full-size WireGuard packet at the configured MTU
+high	FW-C-005	tunnel/cmd/freewire-tunnel/main.go	The tunnel health probe targets an address that setupRouting may have just pinned outside the tunnel
+high	FW-C-006	tunnel/cmd/freewire-tunnel/main.go	Route verification against 8.8.8.8 produces a false failure when 8.8.8.8 is the pinned resolver
+high	REL-006	tunnel/cmd/freewire-tunnel/main.go	waitForHandshake reads a stale last_handshake_time_sec, so every candidate after the first can falsely report success
+high	FW-H01	tunnel/cmd/freewire-tunnel/main.go	waitForHandshake reads no baseline, so a late handshake from a discarded transport makes the next candidate falsely pass
+high	FW-H04	tunnel/cmd/freewire-tunnel/main.go	The tunnel egress probe targets 1.1.1.1:53, which setupRouting may itself have pinned outside the tunnel
+high	FW-H05	tunnel/cmd/freewire-tunnel/transport.go	The fallback chain's worst case is ~32s, three times its 11s budget and past the client's 30s ready timeout
+medium	FW-S17	deploy/launch-aws.sh	SSH firewall rule is derived from an unvalidated third-party HTTP response
+medium	FW-A21	macos/AppDelegate.swift	Quitting the app leaves the tunnel and its routes in place when passwordless sudo is unavailable
+medium	FW-A10	macos/Freewire/Freewire/PreferencesView.swift	The 'What Freewire sees' sheet claims 'No connection logs' while the server writes a log line for every connection event
+medium	FW-A11	macos/Freewire/Freewire/ServerAPI.swift	Privacy Pass tokens are transmitted over a channel with no server authentication whenever a self-signed certificate is accepted
+medium	FW-A14	macos/Freewire/Freewire/ServerAPI.swift	Certificate-acceptance policy is fixed at ServerAPI construction, so adding or clearing a server pin does not take effect until relaunch
+medium	PP-10	macos/Freewire/Freewire/TokenStore.swift	refresh() returns immediately when another refresh is in flight, so take() hands back nil and the connection fails
+medium	FW-A13	macos/Freewire/Freewire/TunnelManager.swift	With skipRouting enabled the panel reports 'Protected' while the helper explicitly warns that no routing was installed
+medium	REL-18	macos/FreewireHelper/KillSwitchController.swift	release() runs `pfctl -F all`, flushing every pf ruleset on the machine, not just the Freewire anchor
+medium	CRYPTO-011	macos/FreewireHelper/KillSwitchController.swift	Kill switch replaces and flushes the machine's entire pf ruleset instead of scoping to its own anchor
+medium	FW-C-016	macos/KillSwitchRules.swift	portList and sanitize can emit a syntactically invalid pf ruleset, leaving the kill switch permanently unable to engage
+medium	CRYPTO-14	macos/KillSwitchRules.swift	Kill switch pf rules interpolate unauthenticated server-config values; endpoint_host of "any" produces a permissive pass rule
+medium	FW-S18	macos/KillSwitchRules.swift	sanitize strips hostile characters instead of rejecting, and can silently emit a syntactically broken ruleset
+medium	FW-M07	macos/KillSwitchRules.swift	portList can render an empty brace list, producing a pf ruleset that pfctl rejects wholesale
+medium	FW-M08	macos/KillSwitchRules.swift	The kill-switch ruleset permits only the direct server endpoint, blocking the captive-portal fallback paths it exists to protect
+medium	REL-08	macos/NetworkMonitor.swift	hasNetwork() blocks the main actor on a semaphore for up to a second, on every connect attempt
+medium	REL-011	macos/NetworkMonitor.swift	hasNetwork() blocks the main thread on a DispatchSemaphore for up to one second
+medium	FW-A22	macos/PanelView.swift	CONN-2a is implemented as an error panel plus an external browser, contradicting the specified flow
+medium	REL-09	macos/PathUpgradeManager.swift	defaultGateway() forks /sbin/route and waitUntilExit()s on the main actor during every upgrade probe
+medium	FW-A18	macos/PathUpgradeManager.swift	The HTTP CONNECT upgrade probe targets a hardcoded vpn.freewire.com:443, not the configured server
+medium	FW-C-017	macos/PathUpgradeManager.swift	The HTTP CONNECT upgrade probe asks the proxy for a hardcoded hostname instead of the configured server
+medium	REL-012	macos/PathUpgradeManager.swift	defaultGateway() runs /sbin/route and waitUntilExit on the main actor
+medium	FW-M06	macos/PathUpgradeManager.swift	The HTTP CONNECT upgrade probe targets the hardcoded vpn.freewire.com, not the configured server
+medium	REL-10	macos/PinnedHTTPClient.swift	receiveAll accumulates an unbounded response body and recopies it on every chunk
+medium	FW-C-014	macos/PinnedHTTPClient.swift	The HTTP parser cannot handle chunked transfer encoding and accumulates the body without a size limit
+medium	FW-S12	macos/PinnedHTTPClient.swift	Request line and headers are built by string concatenation with no CR/LF validation
+medium	REL-010	macos/PinnedHTTPClient.swift	receiveAll accumulates the response body with no size cap and quadratic copying
+medium	FW-M05	macos/PinnedHTTPClient.swift	The control-plane HTTP parser ignores Content-Length and cannot handle chunked transfer encoding
+medium	PP-10	macos/ServerAPI.swift	Invented user-facing error copy for token rejection: no Privacy Pass error state exists in error-states-spec.md
+medium	FW-A19	macos/ServerAPI.swift	Certificate acceptance is frozen at ServerAPI construction, before the user has pinned anything
+medium	REL-016	macos/ServerAPI.swift	acceptAnyCertificate is captured once at ServerAPI construction, so a pin added later is not honoured until relaunch
+medium	FW-S16	macos/ServerTrust.swift	A user-supplied pin silently overrides all managed-server pins and is accepted for every host
+medium	PP-04	macos/TokenStore.swift	Strict FIFO spend order preserves issuance order within a batch
+medium	CRYPTO-012	macos/TokenStore.swift	Token issuance runs synchronously milliseconds before redemption when the store is empty, making the two events correlatable by timing
+medium	FW-C-015	macos/TokenStore.swift	Token strings are trimmed of spaces but not carriage returns, allowing header injection into the registration request
+medium	FW-S11	macos/TokenStore.swift	Issuance runs synchronously immediately before redemption, correlating the two by timing
+medium	FW-S14	macos/TokenStore.swift	Token file is written with default permissions and only chmod'd afterwards, leaving a readable window
+medium	REL-013	macos/TokenStore.swift	take() returns nil while a refresh is already in flight, and refresh() spawns an unbounded-duration Process
+medium	FW-M09	macos/TokenStore.swift	take() returns nil while a background refresh is in flight, causing a 402 and a spurious connect failure
+medium	FW-A12	macos/TokenStore.swift	Issuer key rotation leaves the user with a batch of permanently invalid tokens and one failed connect attempt per stale token
+medium	SEC-010	macos/TunnelManager.swift	Reconnect and path-upgrade register peers without a Privacy Pass token, so every recovery fails on a managed server
+medium	REL-15	macos/TunnelManager.swift	cancelConnect can pkill before the tunnel process exists, orphaning a fully-routed tunnel
+medium	FW-A16	macos/TunnelManager.swift	The portal wait treats a probe timeout as 'the user finished signing in'
+medium	FW-A17	macos/TunnelManager.swift	'Try again' after the portal wait lapses opens Apple's probe page instead of the captured portal URL
+medium	REL-014	macos/TunnelManager.swift	The tunnel launcher's detached task holds a cooperative-pool thread for the entire tunnel lifetime
+medium	REL-017	macos/TunnelManager.swift	retryFromNetworkBlock and the portal watcher call doConnect() directly, bypassing connectTask so Cancel cannot stop them
+medium	PP-07	server/internal/api/peers_handler.go	Token is spent before the capacity check, so a 503 permanently burns the user's token
+medium	FW-A15	server/internal/api/peers_handler.go	The Privacy Pass token is spent before capacity is checked, so tokens are destroyed on every 503
+medium	PP-07	server/internal/api/peers_handler.go	Token is spent before registration can fail, burning a token on every capacity rejection
+medium	CRYPTO-13	server/internal/api/peers_handler.go	Authorization scheme name contradicts the project spec, and the token is parsed with sloppy quote trimming
+medium	FW-S19	server/internal/api/peers_handler.go	newToken ignores the CSPRNG error, so a failure yields an all-zero peer token
+medium	REL-018	server/internal/api/peers_handler.go	The Privacy Pass token is spent before AddPeer runs, so a capacity failure permanently burns the token
+medium	REL-14	server/internal/api/tokens_handler.go	Token issuance is unauthenticated and unthrottled: 20 RSA private-key operations per anonymous request
+medium	FW-C-018	server/internal/api/tokens_handler.go	Token issuance is unauthenticated and unmetered, and the client fetches a batch immediately before redeeming from it
+medium	FW-S15	server/internal/api/tokens_handler.go	Token issuance endpoint performs up to 20 RSA-2048 private-key operations per unauthenticated request
+medium	CRYPTO-09	server/internal/privacypass/issuer.go	Token wire format omits challenge_digest and token_key_id, so tokens are unbound to any key or origin despite claiming RFC 9578 type 0x0001
+medium	CRYPTO-12	server/internal/privacypass/issuer.go	Issuer KeyID is computed over an ambiguous concatenation with a truncated exponent
+medium	SEC-011	server/internal/privacypass/spent.go	Spent-token records are forgotten after the TTL and lost entirely on restart, making every token infinitely replayable
+medium	FW-C-020	server/internal/privacypass/spent.go	The spent-token store is in-memory only, so a restart makes every outstanding token replayable
+medium	REL-16	server/internal/transport/dns_server.go	DNS tunnel responses omit the EDNS0 OPT RR while carrying payloads far over 512 bytes
+medium	FW-C-021	server/internal/transport/dns_server.go	DNS tunnel sessions are addressed solely by a token that travels in cleartext, so any observer can inject fragments or drain the queue
+medium	FW-C-022	server/internal/transport/dns_server.go	Tunnel responses exceed 512 bytes without an EDNS0 OPT record or the truncation bit
+medium	CRYPTO-11	server/internal/transport/dns_server.go	DNS and ICMP tunnel handshakes are unauthenticated anonymous DH, so the on-path adversary the transport targets can transparently MITM it
+medium	FW-M03	server/internal/transport/dns_server.go	Both eviction loops read sess.localConn without the session lock that guards its write
+medium	FW-M04	server/internal/transport/dns_server.go	The DNS pending-session counter can be double-decremented, silently raising the anti-flood ceiling
+medium	REL-11	server/internal/transport/icmp_server.go	ICMP server has no pending-session cap or short pending TTL, unlike the DNS server
+medium	CRYPTO-009	server/internal/transport/icmp_server.go	ICMP tunnel has no pending-session ceiling, so the 16-bit token space can be exhausted by unauthenticated HELLOs
+medium	FW-M01	server/internal/transport/icmp_server.go	The ICMP tunnel has no pending-session ceiling, unlike the DNS tunnel it mirrors
+medium	SEC-013	server/internal/transport/tls443.go	CONNECT parsing allows unbounded line length and unbounded header count before any authentication
+medium	REL-12	server/internal/transport/tls443.go	TLS/443 accept loop spawns unbounded goroutines and clears all deadlines after the handshake
+medium	CRYPTO-010	server/internal/transport/tls443.go	TLS/443 bridge still allocates and accepts 64 KB frames despite the tlsMaxFrame mitigation
+medium	REL-015	server/internal/transport/tls443.go	TLS/443 connections have no deadline after the handshake, so an idle peer pins a goroutine, a socket and a UDP socket indefinitely
+medium	FW-S13	server/internal/tunnel/manager.go	Peer registration writes a durable session-to-tunnel-address mapping to the log
+medium	FW-M02	server/internal/tunnel/manager.go	Data race on Peer.TunnelIP between AddPeer's deferred write and RemovePeer's unlocked read
+medium	PP-05	tunnel/cmd/freewire-tokens/main.go	issuer_key_id is returned by the server and discarded by the client, so key rotation silently partitions users
+medium	SEC-012	tunnel/cmd/freewire-tokens/main.go	Token helper disables all certificate verification with no pin to fall back on
+medium	FW-C-019	tunnel/cmd/freewire-tokens/main.go	The token helper fetches the issuer public key over a connection it does not authenticate, and applies no pin
+medium	FW-A23	tunnel/cmd/freewire-tunnel/dns_client.go	The DNS client ignores the truncation bit, so a truncated piggyback response is decrypted as garbage and dropped silently
+medium	REL-17	tunnel/cmd/freewire-tunnel/icmp_client.go	ICMP client leaks its local-proxy reader and both send workers when the tunnel socket dies
+medium	CRYPTO-013	tunnel/cmd/freewire-tunnel/icmp_client.go	Sequence counters wrap silently, and no session packet limit or rekey bounds ChaCha20-Poly1305 nonce reuse
+medium	CRYPTO-08	tunnel/cmd/freewire-tunnel/icmp_client.go	Neither tunnel client applies anti-replay to the server-to-client direction
+medium	REL-009	tunnel/cmd/freewire-tunnel/icmp_client.go	ICMP client leaks the local-proxy reader and both send workers when the server connection dies
+medium	FW-A20	tunnel/cmd/freewire-tunnel/main.go	With skipRouting the tunnel prints 'ready' and the app shows 'Protected' while no routes are installed
+medium	REL-13	tunnel/cmd/freewire-tunnel/transport.go	A failed candidate can stall the fallback chain for 10 extra seconds waiting on bridgeDone
+medium	FW-C-013	tunnel/cmd/freewire-tunnel/transport.go	The fallback chain's worst case is roughly three times its stated budget and can outlive the client's ready-file timeout
+medium	REL-008	tunnel/cmd/freewire-tunnel/transport.go	establishTunnel blocks up to 10s on bridgeDone per failed candidate, blowing the fallback chain budget
+low	REL-21	macos/AppDelegate.swift	applicationWillTerminate blocks the main thread for up to ~4 seconds
+low	PP-12	macos/Freewire/Freewire/ServerAPI.swift	client_version is transmitted alongside the token at redemption
+low	FW-A15	macos/Freewire/Freewire/TunnelManager.swift	'Try again' in the timed-out portal panel reopens a browser at captive.apple.com, discarding the portal's real redirect URL
+low	FW-L04	macos/NetworkMonitor.swift	hasNetwork blocks the main actor for up to a second on every connect attempt
+low	FW-A24	macos/PanelView.swift	The CONN-2b headline is truncated in the 240pt panel
+low	REL-19	macos/ServerAPI.swift	acceptAnyCertificate is captured once at ServerAPI init and never re-read
+low	CRYPTO-15	macos/ServerAPI.swift	acceptAnyCertificate is captured once at init, so changing the pin later does not change verification behavior
+low	FW-C-024	macos/TokenStore.swift	Concurrent refresh calls are dropped rather than collapsed, so take() returns nil while a fetch is in flight
+low	REL-22	server/cmd/freewire-server/main.go	log.Fatal on API error skips every deferred cleanup, leaking the TUN device and the expiry goroutine
+low	PP-11	server/internal/api/peers_handler.go	Redemption request carries client_version, and the handler still accepts a device_name field no client sends
+low	SEC-014	server/internal/api/peers_handler.go	crypto/rand errors are discarded when generating the peer token and DNS query IDs
+low	CRYPTO-014	server/internal/api/peers_handler.go	Authorization scheme is PrivateToken, but the project spec and CLAUDE.md specify PrivacyPass
+low	CRYPTO-017	server/internal/api/peers_handler.go	Peer token generation ignores the RNG error, producing an all-zero token on failure
+low	PP-11	server/internal/api/peers_handler.go	device_name is part of the redemption request schema
+low	CRYPTO-16	server/internal/api/peers_handler.go	newToken ignores the error from rand.Read, so a failure yields an all-zero peer token
+low	FW-L01	server/internal/api/peers_handler.go	The Privacy Pass token is spent before the capacity check, so a 503 burns a token permanently
+low	FW-L02	server/internal/api/peers_handler.go	The Authorization scheme is PrivateToken while the spec and CLAUDE.md both specify PrivacyPass
+low	REL-021	server/internal/certs/certs.go	The ACME HTTP-01 responder goroutine has no shutdown path and ignores the process lifecycle
+low	FW-A16	server/internal/privacypass/spent.go	evictOldestLocked is O(n^2) at the 5M-entry ceiling and will hang the server holding the redemption lock
+low	CRYPTO-015	server/internal/transport/dns_server.go	Hand-rolled constant-time comparison used for handshake MAC verification instead of the standard library primitive
+low	CRYPTO-17	server/internal/transport/dns_server.go	Confirm-MAC doc comments describe a raw hash construction while the code correctly uses HMAC
+low	REL-019	server/internal/transport/dns_server.go	The pending DNS session ceiling is a non-atomic check-then-increment and can be overshot arbitrarily
+low	CRYPTO-18	server/internal/transport/replay.go	Replay window has no sequence-space exhaustion handling; wraparound permanently wedges the direction
+low	FW-L03	server/internal/transport/tls443.go	The inbound bridge still allocates a 64 KB buffer per connection, so the tlsMaxFrame hardening is only half applied
+low	FW-C-023	server/internal/tunnel/manager.go	A stale peer entry blocks re-registration and surfaces as an unmapped 500
+low	REL-20	tunnel/cmd/freewire-tunnel/icmp_client.go	ICMP client builds a fresh AEAD per packet despite precomputed aeadTx/aeadRx
+low	CRYPTO-016	tunnel/cmd/freewire-tunnel/icmp_client.go	ICMP client rebuilds the AEAD on every packet while the prebuilt aeadTx/aeadRx fields sit unused
+low	REL-020	tunnel/cmd/freewire-tunnel/icmp_client.go	ICMP client rebuilds the ChaCha20-Poly1305 AEAD on every packet; aeadTx and aeadRx are dead fields
+low	SEC-015	tunnel/cmd/freewire-tunnel/main.go	Pinned-route state file is written world-readable in /var/run

@@ -42,7 +42,24 @@ if [[ -z "$SG_ID" || "$SG_ID" == "None" ]]; then
 
   # SSH is restricted to the address launching this; everything else has to be
   # open, because the whole point is reaching the server from hostile networks.
-  MYIP="$(curl -s -m 5 https://api.ipify.org)/32"
+  # A third party's HTTP response decides who may SSH to this box, so it is
+  # checked rather than trusted. An empty reply (the service is down, the
+  # network is captive) would otherwise expand to "/32" and, depending on how
+  # the AWS CLI parsed it, either fail confusingly or widen the rule. Anything
+  # that is not a dotted quad stops the script.
+  MYIP_RAW="$(curl -sf -m 5 https://api.ipify.org || true)"
+  if [[ ! "$MYIP_RAW" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+    echo "could not determine this machine's public address (got '${MYIP_RAW}')." >&2
+    echo "Set MYIP_OVERRIDE=x.x.x.x and re-run to choose it yourself." >&2
+    [[ -n "${MYIP_OVERRIDE:-}" ]] || exit 1
+    MYIP_RAW="$MYIP_OVERRIDE"
+  fi
+  for octet in ${MYIP_RAW//./ }; do
+    if (( octet > 255 )); then
+      echo "'$MYIP_RAW' is not a valid IPv4 address" >&2; exit 1
+    fi
+  done
+  MYIP="$MYIP_RAW/32"
   aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --region "$REGION" \
     --ip-permissions \
       "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=$MYIP,Description='ssh from deployer'}]" \

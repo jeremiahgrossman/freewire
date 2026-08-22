@@ -103,21 +103,47 @@ final class TokenStore {
             p.standardOutput = pipe
             p.standardError = FileHandle.nullDevice
             guard (try? p.run()) != nil else { return nil }
+
+            // Bound the wait. Issuance sits directly in front of a connect
+            // attempt, so a helper that hangs — a server that accepts and never
+            // answers, a stalled DNS lookup — held connect() open forever with
+            // no timeout anywhere in the chain to break it.
+            let deadline = DispatchTime.now() + Self.issueTimeout
+            let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
+            DispatchQueue.global().asyncAfter(deadline: deadline, execute: killer)
+
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             p.waitUntilExit()
+            killer.cancel()
+
             guard p.terminationStatus == 0 else { return nil }
             return String(data: data, encoding: .utf8)
         }.value
 
         guard let out else { return }
-        let fresh = out.split(separator: "\n")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
+        // Trimmed of newlines as well as spaces. A token is placed verbatim in
+        // an Authorization header, and a stray carriage return there ends the
+        // header and begins whatever follows it.
+        let fresh = out.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && $0.allSatisfy(Self.isTokenCharacter) }
         guard !fresh.isEmpty else { return }
 
-        tokens.append(contentsOf: fresh)
+        // Shuffled before storing. Tokens are handed out in the order they are
+        // held, so a batch spent in issuance order tells the server which
+        // redemptions came from one batch and in what sequence they were
+        // signed — a correlation the blind signature otherwise denies it.
+        tokens.append(contentsOf: fresh.shuffled())
         Self.save(tokens)
     }
+
+    /// Base64url alphabet. Anything else did not come from the issuer.
+    private static func isTokenCharacter(_ c: Character) -> Bool {
+        c.isLetter && c.isASCII || c.isNumber && c.isASCII || c == "-" || c == "_"
+    }
+
+    /// Ceiling on one issuance run, inside the 10-second connect budget.
+    private static let issueTimeout: DispatchTimeInterval = .seconds(8)
 
     // MARK: - Storage
 

@@ -29,7 +29,10 @@ type Server struct {
 	// as many valid tokens as they wanted and the rate limit the tokens exist
 	// to impose would be free to bypass.
 	issueLimit *tokenBucket
-	log        *zap.Logger
+	// pow prices issuance in CPU, which is the only per-caller charge available
+	// when every way of identifying a caller is off limits. See proofofwork.go.
+	pow *proofOfWork
+	log *zap.Logger
 }
 
 // Issuance budget. A client asks for a batch of up to maxTokensPerRequest
@@ -57,10 +60,23 @@ func NewServer(
 	spent *privacypass.SpentStore,
 	log *zap.Logger,
 ) *Server {
-	return &Server{
+	s := &Server{
 		cfg: cfg, wg: wg, tls: tlsCfg, issuer: issuer, spent: spent, log: log,
 		issueLimit: newTokenBucket(issueBurst, issuePerSec),
 	}
+	if issuer != nil {
+		pow, err := newProofOfWork()
+		if err != nil {
+			// Only the RNG can fail here. Continuing without proof of work
+			// would silently drop issuance back to a single shared budget, so
+			// it is reported rather than assumed away.
+			log.Error("proof of work unavailable; issuance falls back to the global budget alone",
+				zap.Error(err))
+		} else {
+			s.pow = pow
+		}
+	}
+	return s
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -69,6 +85,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /v1/peers", s.handleRegisterPeer)
 	mux.HandleFunc("DELETE /v1/peers/{token}", s.handleRemovePeer)
 	mux.HandleFunc("GET /v1/health", s.handleHealth)
+	mux.HandleFunc("GET /v1/tokens/challenge", s.handleTokenChallenge)
 	mux.HandleFunc("POST /v1/tokens/issue", s.handleIssueTokens)
 
 	addr := fmt.Sprintf(":%d", s.cfg.APIPort)

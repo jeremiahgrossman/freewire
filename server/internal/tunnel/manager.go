@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -254,27 +255,41 @@ func configureInterface(ifName, serverIP, tunnelCIDR string) error {
 	}
 
 	// Configure the WireGuard interface. Use `ip` (Linux) if available, fall back to ifconfig (macOS).
-	if _, err := exec.LookPath("ip"); err == nil {
+	//
+	// Absolute paths throughout. This runs as root, and resolving a bare name
+	// through PATH means whatever PATH happens to hold at the time decides which
+	// binary gets root -- a systemd unit file, a sudo invocation or a shell
+	// profile is enough to change it. The client-side tunnel was given absolute
+	// paths for the same reason.
+	if ipBin := firstExisting("/usr/sbin/ip", "/sbin/ip", "/usr/bin/ip", "/bin/ip"); ipBin != "" {
 		// Linux: ip addr add <ip>/24 dev <iface> && ip link set <iface> up
 		cidr := serverIP + "/" + network.String()[strings.LastIndex(network.String(), "/")+1:]
-		if out, err := exec.Command("ip", "addr", "add", cidr, "dev", ifName).CombinedOutput(); err != nil {
+		if out, err := exec.Command(ipBin, "addr", "add", cidr, "dev", ifName).CombinedOutput(); err != nil {
 			// Ignore "already exists" error on restart.
 			if !strings.Contains(string(out), "exists") {
 				return fmt.Errorf("ip addr add: %s: %w", bytes.TrimSpace(out), err)
 			}
 		}
-		if out, err := exec.Command("ip", "link", "set", ifName, "up").CombinedOutput(); err != nil {
+		if out, err := exec.Command(ipBin, "link", "set", ifName, "up").CombinedOutput(); err != nil {
 			return fmt.Errorf("ip link set up: %s: %w", bytes.TrimSpace(out), err)
 		}
 		// Add route for tunnel network.
-		exec.Command("ip", "route", "add", network.String(), "dev", ifName).Run() //nolint:errcheck
-	} else {
-		// macOS: ifconfig <iface> <local> <remote> up
-		out, err := exec.Command("ifconfig", ifName, serverIP, serverIP, "up").CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("ifconfig: %s: %w", bytes.TrimSpace(out), err)
-		}
-		exec.Command("route", "-q", "-n", "add", "-inet", network.String(), "-interface", ifName).Run() //nolint:errcheck
+		exec.Command(ipBin, "route", "add", network.String(), "dev", ifName).Run() //nolint:errcheck
+		return nil
+	}
+
+	// macOS: ifconfig <iface> <local> <remote> up
+	ifconfigBin := firstExisting("/sbin/ifconfig", "/usr/sbin/ifconfig")
+	routeBin := firstExisting("/sbin/route", "/usr/sbin/route")
+	if ifconfigBin == "" {
+		return fmt.Errorf("neither ip nor ifconfig found in any expected location")
+	}
+	out, err := exec.Command(ifconfigBin, ifName, serverIP, serverIP, "up").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("ifconfig: %s: %w", bytes.TrimSpace(out), err)
+	}
+	if routeBin != "" {
+		exec.Command(routeBin, "-q", "-n", "add", "-inet", network.String(), "-interface", ifName).Run() //nolint:errcheck
 	}
 
 	return nil
@@ -287,6 +302,19 @@ func tunnelIPv6(ipStr string) string {
 		return ""
 	}
 	return fmt.Sprintf("fd00::%x", ip[3])
+}
+
+// firstExisting returns the first path that names an executable file.
+//
+// Used instead of exec.LookPath so that what runs as root is decided here
+// rather than by the environment the process happened to inherit.
+func firstExisting(paths ...string) string {
+	for _, p := range paths {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return p
+		}
+	}
+	return ""
 }
 
 // redactToken renders a peer token safe to log.

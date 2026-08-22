@@ -12,10 +12,19 @@ import (
 	"go.uber.org/zap"
 )
 
+// registerPeerRequest carries the public key and nothing else.
+//
+// It used to accept `device_name` and `client_version` alongside the token.
+// Neither was read, and both are exactly what must not travel here: this
+// request is the redemption half of a blind signature, and any attribute of the
+// caller attached to it is a handle the issuance half can be correlated
+// against. A device name is self-evidently identifying; a version string is a
+// narrower fingerprint but still one, and on a small server the population
+// sharing a given build is small enough to matter. Accepting a field is enough
+// to make it appear -- a future client would fill it in because the schema
+// invited it -- so the fields are gone rather than ignored.
 type registerPeerRequest struct {
-	PublicKey     string `json:"public_key"`
-	ClientVersion string `json:"client_version"`
-	DeviceName    string `json:"device_name,omitempty"`
+	PublicKey string `json:"public_key"`
 }
 
 type registerPeerResponse struct {
@@ -44,21 +53,42 @@ func (s *Server) handleRegisterPeer(w http.ResponseWriter, r *http.Request) {
 	// redemption be correlated afterwards, which is precisely what the blind
 	// signature exists to prevent -- and it would still verify, so the loss
 	// would be silent.
+	var spentNonce [32]byte
+	var didSpend bool
 	if s.issuer != nil {
-		if code, msg := s.redeemToken(r); code != 0 {
+		nonce, code, msg := s.redeemToken(r)
+		if code != 0 {
 			writeError(w, code, msg.code, msg.message)
 			return
+		}
+		spentNonce, didSpend = nonce, true
+	}
+	// A registration that fails after the token was spent must give it back.
+	// Marking it spent and then rejecting the request destroyed the user's token
+	// on every 503 -- they paid for a slot the server did not have, and the
+	// obvious retry cost them another one.
+	refund := func() {
+		if didSpend {
+			s.spent.Refund(spentNonce)
 		}
 	}
 
 	// Capacity check is enforced inside AddPeer atomically to avoid TOCTOU.
-	peerToken := newToken()
+	peerToken, err := newToken()
+	if err != nil {
+		refund()
+		s.log.Error("peer token generation failed", zap.Error(err))
+		writeError(w, http.StatusInternalServerError, "SERVER_ERROR", "failed to register peer")
+		return
+	}
 	peer, err := s.wg.AddPeer(peerToken, req.PublicKey, s.cfg.Capacity)
 	if err != nil {
 		if err.Error() == "ip pool exhausted" || err.Error() == "server at capacity" {
+			refund()
 			writeError(w, http.StatusServiceUnavailable, "PEER_LIMIT_REACHED", "server is at capacity")
 			return
 		}
+		refund()
 		s.log.Error("add peer failed", zap.String("session", redactToken(peerToken)), zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "SERVER_ERROR", "failed to register peer")
 		return
@@ -88,10 +118,19 @@ func (s *Server) handleRemovePeer(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func newToken() string {
+// newToken mints the credential that authorises removing a peer.
+//
+// The RNG error is not ignorable here. rand.Read leaves the buffer zeroed when
+// it fails, so discarding the error handed every affected caller the same
+// all-zero token: the second registration would displace the first, and anyone
+// could guess the token and delete the peer. A registration that cannot be
+// given a unique token must fail instead.
+func newToken() (string, error) {
 	b := make([]byte, 16)
-	rand.Read(b) //nolint:errcheck
-	return hex.EncodeToString(b)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // redactToken renders a peer token safe to log.
@@ -114,38 +153,53 @@ type tokenError struct {
 
 // redeemToken verifies and spends the token on a registration request.
 //
-// Returns 0 when the request may proceed, otherwise an HTTP status and the
-// error to report.
-func (s *Server) redeemToken(r *http.Request) (int, tokenError) {
+// Returns a zero status when the request may proceed, along with the nonce hash
+// that was spent so the caller can hand it back if the registration then fails.
+//
+// The scheme name is RFC 9577's `PrivateToken`, which is what the IETF settled
+// on for the HTTP authentication scheme; `PrivacyPass` names the working group,
+// not the header. CLAUDE.md and client-server-api-spec.md said the latter, and
+// have been corrected to match the wire format both ends already speak.
+func (s *Server) redeemToken(r *http.Request) ([32]byte, int, tokenError) {
 	const scheme = "PrivateToken token="
+	var none [32]byte
 
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, scheme) {
-		return http.StatusPaymentRequired,
+		return none, http.StatusPaymentRequired,
 			tokenError{"TOKEN_INVALID", "A token is required to register a peer."}
 	}
 
-	raw, err := base64.RawURLEncoding.DecodeString(strings.Trim(strings.TrimPrefix(auth, scheme), `"`))
+	// Strip at most one pair of surrounding quotes rather than every quote
+	// anywhere in the value: trimming the whole cutset would silently accept a
+	// token whose interior quotes were removed, changing what was verified.
+	value := strings.TrimPrefix(auth, scheme)
+	if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
+		value = value[1 : len(value)-1]
+	}
+
+	raw, err := base64.RawURLEncoding.DecodeString(value)
 	if err != nil {
-		return http.StatusPaymentRequired,
+		return none, http.StatusPaymentRequired,
 			tokenError{"TOKEN_INVALID", "The token could not be decoded."}
 	}
 
 	tok, err := privacypass.ParseToken(raw)
 	if err != nil {
-		return http.StatusPaymentRequired,
+		return none, http.StatusPaymentRequired,
 			tokenError{"TOKEN_INVALID", "The token is malformed."}
 	}
 	if err := s.issuer.Verify(tok); err != nil {
-		return http.StatusPaymentRequired,
+		return none, http.StatusPaymentRequired,
 			tokenError{"TOKEN_INVALID", "The token is not valid."}
 	}
 
 	// Verification and spending are separate questions and both must pass: a
 	// perfectly valid token that has already been used is still refused.
-	if !s.spent.Redeem(tok.NonceHash()) {
-		return http.StatusPaymentRequired,
+	hash := tok.NonceHash()
+	if !s.spent.Redeem(hash) {
+		return none, http.StatusPaymentRequired,
 			tokenError{"TOKEN_SPENT", "This token has already been used."}
 	}
-	return 0, tokenError{}
+	return hash, 0, tokenError{}
 }

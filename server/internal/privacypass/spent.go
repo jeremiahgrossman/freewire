@@ -35,6 +35,11 @@ type SpentStore struct {
 	ttl    time.Duration
 	nowFn  func() time.Time // injectable for tests
 	maxLen int
+
+	// journal persists the two generations, so a restart does not un-spend
+	// every outstanding token. Nil for a purely in-memory store.
+	journal    *spentJournal
+	journalErr error
 }
 
 // DefaultTokenTTL matches the 30-day validity window in the spec.
@@ -81,7 +86,59 @@ func (s *SpentStore) Redeem(hash [32]byte) bool {
 		return false
 	}
 	s.current[hash] = struct{}{}
+	if s.journal != nil {
+		// A write failure is not a reason to refuse the redemption -- the token
+		// is spent in memory either way and refusing would lock the user out
+		// over a disk problem -- but it does mean this spend will not survive a
+		// restart, so it must not pass silently.
+		if err := s.journal.append(genCurrent, hash); err != nil {
+			s.journalErr = err
+		}
+	}
 	return true
+}
+
+// JournalError reports the last failure to persist a redemption, if any.
+//
+// Surfaced rather than swallowed: a store that has silently stopped persisting
+// looks identical to one that is working, right up until a restart makes every
+// token in flight spendable again.
+func (s *SpentStore) JournalError() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.journalErr
+}
+
+// Close flushes the journal.
+func (s *SpentStore) Close() error {
+	s.mu.Lock()
+	j := s.journal
+	s.mu.Unlock()
+	if j == nil {
+		return nil
+	}
+	return j.close()
+}
+
+// Refund un-spends a token whose redemption did not end in a peer.
+//
+// Redemption happens before the registration it pays for can fail, so without
+// this a server that was at capacity destroyed the caller's token and charged
+// them again for the retry. Refunding is safe because the token never left the
+// caller's hands: nothing was issued against the spend, so returning it puts
+// the exchange back exactly where it started.
+//
+// Only the current generation is touched. A hash found in `previous` was spent
+// in an earlier window and is not this request's to give back.
+func (s *SpentStore) Refund(hash [32]byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.current, hash)
+	// The journal keeps its line. Replaying it after a restart re-spends a
+	// token that was refunded, which costs the user one token and costs the
+	// server nothing -- the safe direction. Rewriting the file to remove a
+	// single line would mean a full rewrite on a path that runs whenever the
+	// server is full.
 }
 
 // rotateIfDueLocked ages out the older generation.
@@ -97,6 +154,14 @@ func (s *SpentStore) rotateIfDueLocked(now time.Time) {
 	s.previous = s.current
 	s.current = make(map[[32]byte]struct{})
 	s.rotated = now
+	if s.journal != nil {
+		// Rewrite rather than append: rotation is where the older generation is
+		// dropped, and a file that only ever grew would keep proving spends the
+		// store itself has forgotten.
+		if err := s.journal.rewrite(s.previous, s.current); err != nil {
+			s.journalErr = err
+		}
+	}
 }
 
 // Expire drops entries past the validity window.

@@ -18,6 +18,13 @@ import (
 )
 
 func main() {
+	// Registered first so it runs last: every other deferred cleanup below has
+	// already completed by the time the process exits. Calling os.Exit directly
+	// -- which log.Fatal does -- skips all of them, and one of them is the flush
+	// that keeps spent tokens spent.
+	exitCode := 0
+	defer func() { os.Exit(exitCode) }()
+
 	log, err := zap.NewProduction()
 	if err != nil {
 		panic(err)
@@ -79,9 +86,17 @@ func main() {
 		if err != nil {
 			log.Fatal("privacy pass issuer", zap.Error(err))
 		}
-		spent = privacypass.NewSpentStore(privacypass.DefaultTokenTTL)
+		// Persisted, because a restart that forgets which tokens were spent
+		// makes every outstanding token replayable -- and a restart is the most
+		// ordinary event in the server's life.
+		spent, err = privacypass.NewPersistentSpentStore(
+			privacypass.DefaultTokenTTL, cfg.SpentStorePath())
+		if err != nil {
+			log.Fatal("open spent token store", zap.Error(err))
+		}
+		defer spent.Close() //nolint:errcheck
 		go spent.RunExpiry(time.Hour, expiryStop)
-		log.Info("privacy pass enabled")
+		log.Info("privacy pass enabled", zap.Int("spent_records_restored", spent.Len()))
 	}
 
 	srv := api.NewServer(cfg, wg, tlsCfg, issuer, spent, log)
@@ -92,7 +107,9 @@ func main() {
 	// TLS/443 transport.
 	tls443, err := transport.NewTLS443Server(tlsCfg, cfg.ListenPort, log)
 	if err != nil {
-		log.Fatal("init tls443 server", zap.Error(err))
+		log.Error("init tls443 server", zap.Error(err))
+		exitCode = 1
+		return
 	}
 	go func() {
 		if err := tls443.Run(ctx, cfg.TLSPort); err != nil {
@@ -117,8 +134,14 @@ func main() {
 	}()
 
 	// HTTP API (blocks until shutdown).
+	//
+	// log.Fatal here would call os.Exit and skip every deferred cleanup above
+	// it, including the spent-store flush -- so an API failure would be the one
+	// exit path that loses the redemptions it was keeping.
 	if err := srv.Run(ctx); err != nil {
-		log.Fatal("server error", zap.Error(err))
+		log.Error("server error", zap.Error(err))
+		exitCode = 1
+		return
 	}
 
 	log.Info("stopped")

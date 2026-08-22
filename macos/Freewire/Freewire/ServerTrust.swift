@@ -43,9 +43,35 @@ enum ServerTrust {
         set { UserDefaults.standard.set(newValue, forKey: "pinnedServerKey") }
     }
 
+    /// The host the user's pin belongs to.
+    ///
+    /// A pin with no host was honoured for every server, which had two
+    /// consequences worth separating. It meant a key pinned for one server was
+    /// accepted as proof of identity for a different one. And because
+    /// `trustsSelfSignedCertificate` was derived from the pin's mere existence,
+    /// pinning a self-hosted server also switched off certificate validation
+    /// for the managed server — a self-hosted user silently lost CA validation
+    /// everywhere. Empty means "applies to whichever server is configured",
+    /// which preserves the behaviour for anyone who set a pin before this
+    /// existed.
+    static var userPinnedHost: String? {
+        get {
+            let v = UserDefaults.standard.string(forKey: "pinnedServerHost")
+            return (v?.isEmpty ?? true) ? nil : v
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "pinnedServerHost") }
+    }
+
+    /// Whether the user's pin applies to `host`.
+    private static func userPinApplies(to host: String) -> Bool {
+        guard let pinned = userPinnedKey, !pinned.isEmpty else { return false }
+        guard let pinnedHost = userPinnedHost else { return true }
+        return pinnedHost.caseInsensitiveCompare(host) == .orderedSame
+    }
+
     /// Whether `key` is an acceptable identity for `host`.
     static func accepts(key: String, host: String) -> Bool {
-        if let pinned = userPinnedKey, !pinned.isEmpty {
+        if userPinApplies(to: host), let pinned = userPinnedKey {
             return constantTimeEquals(key, pinned)
         }
         guard !managedServerKeys.isEmpty else { return false }
@@ -55,24 +81,26 @@ enum ServerTrust {
         return false
     }
 
-    /// Whether a self-signed certificate should be accepted.
+    /// Whether a self-signed certificate should be accepted for `host`.
     ///
     /// One predicate for the whole client. The TLS transports used an RFC 1918
     /// address test while the control plane used the pin, so against a pinned
     /// server on a routable address the API connected and every TLS transport
     /// then failed certificate validation.
-    static var trustsSelfSignedCertificate: Bool {
-        userPinnedKey != nil
+    ///
+    /// Scoped to the host, because "the user pinned something, somewhere" is not
+    /// a reason to stop validating certificates for a server they did not pin.
+    static func trustsSelfSignedCertificate(host: String) -> Bool {
+        userPinApplies(to: host)
     }
 
-    /// Whether any pin is configured at all.
+    /// Whether any pin is configured at all for `host`.
     ///
     /// Distinguishes "this build has no managed server and the user has not
     /// supplied a key" from "the key presented does not match", so the client
     /// can explain which of the two happened.
-    static var isPinned: Bool {
-        if let pinned = userPinnedKey, !pinned.isEmpty { return true }
-        return !managedServerKeys.isEmpty
+    static func isPinned(host: String) -> Bool {
+        userPinApplies(to: host) || !managedServerKeys.isEmpty
     }
 
     /// Compares without leaking where two keys diverge.

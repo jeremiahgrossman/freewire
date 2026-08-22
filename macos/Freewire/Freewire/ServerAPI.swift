@@ -85,10 +85,11 @@ final class ServerAPI {
             host: host,
             port: port,
             // A self-signed certificate is acceptable exactly when the user has
-            // pinned a key out of band, because the pin rather than the
-            // certificate is what establishes trust. A real hostname gets the
-            // system's normal chain validation.
-            acceptAnyCertificate: ServerTrust.trustsSelfSignedCertificate
+            // pinned a key for this host out of band, because the pin rather
+            // than the certificate is what establishes trust. A real hostname
+            // gets the system's normal chain validation. Evaluated per
+            // connection so a pin added after launch takes effect immediately.
+            acceptAnyCertificate: { ServerTrust.trustsSelfSignedCertificate(host: host) }
         )
     }
 
@@ -109,7 +110,7 @@ final class ServerAPI {
         // prove the key that host returned is the one this client should use:
         // a single mis-issued certificate would be enough to swap it. The key
         // is therefore checked against a pin carried independently.
-        guard ServerTrust.isPinned else {
+        guard ServerTrust.isPinned(host: serverHost) else {
             throw APIError.noServerPin
         }
         guard ServerTrust.accepts(key: cfg.publicKey, host: serverHost) else {
@@ -125,11 +126,14 @@ final class ServerAPI {
     /// server correlate this registration with the issuance that produced the
     /// token, which is exactly what blind signing prevents — and it would still
     /// work, so the loss would be silent.
+    /// The body carries the public key and nothing else. `client_version` used
+    /// to travel here and has been removed: a version string is a narrow
+    /// fingerprint, but it is still one, and on a server with few users the
+    /// population sharing a build is small enough that it partitions
+    /// redemptions into groups the issuance side can be matched against.
     func registerPeer(publicKeyBase64: String, token: String? = nil) async throws -> RegisteredPeer {
-        let clientVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
         let body = try JSONEncoder().encode([
-            "public_key":     publicKeyBase64,
-            "client_version": clientVersion,
+            "public_key": publicKeyBase64,
         ])
         var headers = ["Content-Type": "application/json"]
         if let token {

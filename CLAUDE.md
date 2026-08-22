@@ -46,11 +46,12 @@ server never saw unblinded, first redemption 201, replay 402.
 report CONN-3 rather than CONN-2b (a documented bootstrap gap, not a
 regression); 6 needs a live DNS session to upgrade from.
 
-**Audits:** three runs, 150 findings, all closed except the privileged helper.
-The third audit ran against the code the first two produced and confirmed eight
-findings before its verification budget ran out; all eight are fixed. Its
-unverified tail (~80 candidate findings, mostly medium and low) was never
-adjudicated — treat it as unreviewed rather than clean.
+**Audits:** three runs. The third audit's verification budget ran out after
+confirming eight findings; its remaining 209 unique candidates were adjudicated
+by hand afterwards. See `AUDIT-3-ADJUDICATION.md` for the disposition of every
+one. Summary: most were already closed by the first two audits' fixes, and the
+security-relevant remainder is fixed. The reliability and UX remainder is
+recorded there as open with a reason, not silently dropped.
 
 The third audit's confirmed set, and what closed each:
 - Privacy Pass issuer key was fetched with no pinning, so an issuer handing each
@@ -74,12 +75,6 @@ The third audit's confirmed set, and what closed each:
 None of these matter for one person on their own server. They become blocking
 the moment anyone else connects.
 
-- **Privacy Pass issuance is limited globally, not per caller.** The spec's
-  per-IP cap collides with the no-client-IP rule and a device handle would
-  defeat blind signing, so issuance is metered by a single shared budget (600
-  burst, 2/sec). One heavy caller can exhaust it for everyone — a denial of
-  service a per-caller limit would not have. Acceptable with one user;
-  revisiting it means finding a rate-limit key that identifies nobody.
 - **Abuse posture.** A free VPN with no accounts attracts spam and infringing
   traffic; complaints reach the host, and hosts terminate VPN operators.
 - **Capacity.** 253 peers per server, one /24. Fine for one device.
@@ -230,7 +225,10 @@ No `ios/` directory and no `FreewireNE/` target — iOS and NetworkExtension are
 ## API Conventions
 
 - **Base URL:** `https://vpn.freewire.com/v1/` (managed server API)
-- **Authentication:** Privacy Pass blind token in `Authorization: PrivacyPass token="..."` header
+- **Authentication:** Privacy Pass blind token in `Authorization: PrivateToken token="..."` header. `PrivateToken` is RFC 9577's scheme name; earlier drafts of this file said `PrivacyPass`, which names the working group rather than the header
+- **Token issuance:** `GET /v1/tokens/challenge` then `POST /v1/tokens/issue` carrying `challenge` and `nonce`. Issuance is priced in proof of work because every per-caller rate-limit key is unavailable here — see `server/internal/api/proofofwork.go`
+- **Issuance refused:** `429` with `PROOF_OF_WORK_REQUIRED` (no or stale proof) or `RATE_LIMITED` (global budget exhausted)
+- **Redemption body:** `public_key` only. `device_name` and `client_version` were removed: any caller attribute alongside a token is a handle the issuance half can be correlated against
 - **Privacy Pass error:** `402 Payment Required` for `TOKEN_INVALID` or `TOKEN_SPENT` — not 401, not 429
 - **Rate limit abuse:** `429 Too Many Requests` only for non-token-based abuse signals
 - **At capacity:** `503` with `PEER_LIMIT_REACHED` on `POST /v1/peers` — surfaces CONN-4 to user

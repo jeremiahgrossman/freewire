@@ -35,8 +35,11 @@ func issueOverHTTP(t *testing.T, s *Server, iss *privacypass.Issuer) *privacypas
 		t.Fatalf("blind: %v", err)
 	}
 
+	challenge, difficulty := s.pow.Challenge()
 	body, _ := json.Marshal(issueRequest{
-		Blinded: []string{base64.RawURLEncoding.EncodeToString(blinded)},
+		Blinded:   []string{base64.RawURLEncoding.EncodeToString(blinded)},
+		Challenge: challenge,
+		Nonce:     solve(t, challenge, difficulty),
 	})
 	rec := httptest.NewRecorder()
 	s.handleIssueTokens(rec, httptest.NewRequest("POST", "/v1/tokens/issue", bytes.NewReader(body)))
@@ -73,10 +76,21 @@ func testServer(t *testing.T) (*Server, *privacypass.Issuer) {
 	if err != nil {
 		t.Fatalf("issuer: %v", err)
 	}
+	// Wired the way NewServer wires it, so the test exercises issuance as it is
+	// actually configured. Difficulty is lowered because the property under
+	// test is that the proof is required and checked, not how long it takes.
+	pow, err := newProofOfWork()
+	if err != nil {
+		t.Fatalf("proof of work: %v", err)
+	}
+	pow.difficulty = 8
+
 	return &Server{
-		issuer: iss,
-		spent:  privacypass.NewSpentStore(privacypass.DefaultTokenTTL),
-		log:    zap.NewNop(),
+		issuer:     iss,
+		spent:      privacypass.NewSpentStore(privacypass.DefaultTokenTTL),
+		issueLimit: newTokenBucket(issueBurst, issuePerSec),
+		pow:        pow,
+		log:        zap.NewNop(),
 	}, iss
 }
 
@@ -86,7 +100,7 @@ func redeem(s *Server, tok *privacypass.Token) (int, string) {
 		r.Header.Set("Authorization",
 			"PrivateToken token="+base64.RawURLEncoding.EncodeToString(tok.Marshal()))
 	}
-	code, e := s.redeemToken(r)
+	_, code, e := s.redeemToken(r)
 	return code, e.code
 }
 
@@ -165,5 +179,47 @@ func TestSelfHostedServerReportsNotImplemented(t *testing.T) {
 	s.handleIssueTokens(rec, httptest.NewRequest("POST", "/v1/tokens/issue", bytes.NewReader(body)))
 	if rec.Code != http.StatusNotImplemented {
 		t.Errorf("returned %d, want 501", rec.Code)
+	}
+}
+
+// Issuance without a proof of work must be refused, or the global budget is
+// again the only thing standing between one caller and everyone else's tokens.
+func TestIssuanceWithoutProofOfWorkIsRefused(t *testing.T) {
+	s, _ := testServer(t)
+	body, _ := json.Marshal(issueRequest{Blinded: []string{"x"}})
+	rec := httptest.NewRecorder()
+	s.handleIssueTokens(rec, httptest.NewRequest("POST", "/v1/tokens/issue", bytes.NewReader(body)))
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Errorf("unpaid issuance returned %d, want 429", rec.Code)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("PROOF_OF_WORK_REQUIRED")) {
+		t.Errorf("body %q does not name the reason", rec.Body.String())
+	}
+}
+
+// A solution is single-use, so a batch cannot be replayed for free tokens.
+func TestIssuanceRefusesAReplayedProof(t *testing.T) {
+	s, _ := testServer(t)
+
+	challenge, difficulty := s.pow.Challenge()
+	nonce := solve(t, challenge, difficulty)
+	send := func() int {
+		body, _ := json.Marshal(issueRequest{
+			Blinded:   []string{"x"},
+			Challenge: challenge,
+			Nonce:     nonce,
+		})
+		rec := httptest.NewRecorder()
+		s.handleIssueTokens(rec, httptest.NewRequest("POST", "/v1/tokens/issue", bytes.NewReader(body)))
+		return rec.Code
+	}
+	// The first call gets past the proof and fails on the unparseable blinded
+	// message, which is enough to show the proof was accepted and spent.
+	if code := send(); code != http.StatusBadRequest {
+		t.Fatalf("first use returned %d, want 400 (proof accepted, payload rejected)", code)
+	}
+	if code := send(); code != http.StatusTooManyRequests {
+		t.Errorf("replayed proof returned %d, want 429", code)
 	}
 }

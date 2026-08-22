@@ -72,7 +72,7 @@ final class TunnelManager: ObservableObject {
         // rather than the certificate is what establishes trust. Gating this on
         // the address instead left the helper doing strict validation against a
         // server the rest of the client had already accepted.
-        allowSelfSigned: ServerTrust.trustsSelfSignedCertificate
+        allowSelfSigned: ServerTrust.trustsSelfSignedCertificate(host: api.serverHost)
     )
 
     init(api: ServerAPI, identity: DeviceIdentity) {
@@ -203,7 +203,7 @@ final class TunnelManager: ObservableObject {
                 tunnelIP:        peer.tunnelIP,
                 serverTunnelIP:  "10.0.0.1",
                 keepalive:       peer.keepaliveInterval,
-                insecureTLS:     ServerTrust.trustsSelfSignedCertificate,
+                insecureTLS:     ServerTrust.trustsSelfSignedCertificate(host: api.serverHost),
                 tlsPort:         server.tlsEndpointPort,
                 dnsTunnelPort:   server.dnsTunnelPort,
                 icmpUDPPort:     server.icmpUDPPort,
@@ -287,7 +287,7 @@ final class TunnelManager: ObservableObject {
                     tunnelIP:        peer.tunnelIP,
                     serverTunnelIP:  "10.0.0.1",
                     keepalive:       peer.keepaliveInterval,
-                    insecureTLS:     ServerTrust.trustsSelfSignedCertificate,
+                    insecureTLS:     ServerTrust.trustsSelfSignedCertificate(host: api.serverHost),
                     tlsPort:         server.tlsEndpointPort,
                     dnsTunnelPort:   server.dnsTunnelPort,
                     icmpUDPPort:     server.icmpUDPPort,
@@ -361,7 +361,7 @@ final class TunnelManager: ObservableObject {
                 tunnelIP:        peer.tunnelIP,
                 serverTunnelIP:  "10.0.0.1",
                 keepalive:       peer.keepaliveInterval,
-                insecureTLS:     ServerTrust.trustsSelfSignedCertificate,
+                insecureTLS:     ServerTrust.trustsSelfSignedCertificate(host: api.serverHost),
                 tlsPort:         server.tlsEndpointPort,
                 dnsTunnelPort:   server.dnsTunnelPort,
                 icmpUDPPort:     server.icmpUDPPort,

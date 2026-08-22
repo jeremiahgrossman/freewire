@@ -52,6 +52,19 @@ type Config struct {
 	ACMEDomain   string `json:"acme_domain"`    // e.g. "vpn.freewire.com"; empty disables ACME
 	ACMEEmail    string `json:"acme_email"`     // contact for expiry notices
 	ACMECacheDir string `json:"acme_cache_dir"` // cert cache; defaults to "./acme-cache"
+
+	// SpentStoreFile records which Privacy Pass tokens have been redeemed, so a
+	// restart does not make every outstanding token spendable again. It holds
+	// nonce hashes and nothing else. Defaults to "./spent-tokens".
+	SpentStoreFile string `json:"spent_store_file"`
+}
+
+// SpentStorePath is where redeemed token hashes are kept between restarts.
+func (c *Config) SpentStorePath() string {
+	if c.SpentStoreFile == "" {
+		return "./spent-tokens"
+	}
+	return c.SpentStoreFile
 }
 
 // ParseRSAPrivateKey decodes a PEM-encoded RSA private key.
