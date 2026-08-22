@@ -104,6 +104,11 @@ type icmpClientSession struct {
 	windowSize int    // current sliding window size
 	conn       *net.UDPConn
 	mu         sync.Mutex
+	// rx guards against replay of server->client data packets, whose sequence
+	// rides in the cleartext header and builds the nonce. The server protects the
+	// inbound direction; this is the mirror for the direction the client receives.
+	rx   replayWindow
+	rxMu sync.Mutex
 
 	// Rate limiter: token bucket, refilled every 50ms (20 pkt/s = 1 per 50ms).
 	rateMu    sync.Mutex
@@ -451,7 +456,20 @@ func (s *icmpClientSession) decryptData(pkt []byte) ([]byte, error) {
 		return nil, fmt.Errorf("aead: %w", err)
 	}
 	nonce := icmpMakeNonce(seq)
-	return aead.Open(nil, nonce, ciphertext, hdr)
+
+	// Serialize check -> open -> commit so the window advances only for a packet
+	// that authenticated; the seq is attacker-visible in the cleartext header.
+	s.rxMu.Lock()
+	defer s.rxMu.Unlock()
+	if !s.rx.check(seq) {
+		return nil, fmt.Errorf("replay: seq %d already seen", seq)
+	}
+	plain, err := aead.Open(nil, nonce, ciphertext, hdr)
+	if err != nil {
+		return nil, err
+	}
+	s.rx.commit(seq)
+	return plain, nil
 }
 
 // sendKeepalive sends a KEEPALIVE packet.

@@ -125,6 +125,11 @@ type dnsClientSession struct {
 	// length -- a longer zone leaves fewer bytes for data (see dnsFragCipherBytes).
 	tunnelDomain string
 	mu           sync.Mutex
+	// rx guards against replay of server->client responses, whose sequence
+	// number rides in the response in cleartext. rxMu serializes the
+	// check/open/commit so the window only advances for an authenticated packet.
+	rx   replayWindow
+	rxMu sync.Mutex
 }
 
 // effectiveDNSTunnelDomain is the zone the client queries: whatever the server
@@ -626,10 +631,21 @@ func (s *dnsClientSession) decodePiggybackTXT(txt string) ([]byte, error) {
 
 	var rxNonce [12]byte
 	dnsNonceInto(rxSeq, &rxNonce)
+
+	// Serialize check -> open -> commit so the window advances only for a packet
+	// that authenticated. The rxSeq is attacker-visible in the response, so a
+	// forged one must not be able to move the window and lock out real packets.
+	s.rxMu.Lock()
+	defer s.rxMu.Unlock()
+	if !s.rx.check(rxSeq) {
+		// Already accepted, or too old to prove fresh: a replayed response. Drop.
+		return nil, nil
+	}
 	plain, err := s.aeadRx.Open(nil, rxNonce[:], rxCipher, nil)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt response: %w", err)
 	}
+	s.rx.commit(rxSeq)
 	return plain, nil
 }
 
