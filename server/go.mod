@@ -9,6 +9,7 @@ require (
 )
 
 require (
+	github.com/cloudflare/circl v1.6.5 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
