@@ -168,6 +168,15 @@ private struct ConnectedBody: View {
             if transport != .wireguard {
                 TransportIndicator(transport: transport)
             }
+            // DNS-1, per error-states-spec.md. Shown below the status rather
+            // than replacing it, because the status is true: the tunnel is
+            // carrying traffic and encrypting it. Only the lookups are exposed.
+            if transport.leaksDNSToNetwork {
+                Text("Your traffic is protected, but this network can see which sites you visit.")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Spacer().frame(height: 4)
             Button("Disconnect") {
                 Task { await tunnelManager.disconnect() }

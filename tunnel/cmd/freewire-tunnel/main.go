@@ -181,8 +181,10 @@ func main() {
 			bypassHost = h
 		}
 	}
-	// The transport is chosen by now, so the probe can be budgeted for it.
-	probeBudget = probeBudgetFor(transportName)
+	// Recorded once the chain has chosen. Both the probe budget and whether DNS
+	// can be taken over depend on which transport is carrying traffic, and both
+	// are consulted from code that does not otherwise know.
+	activeTransport = transportName
 
 	if skipEgressCheck() {
 		// Path selection has already been decided by this point: the transport
@@ -319,7 +321,10 @@ func (h *healthTally) record(ok bool) bool {
 // up, failed its own egress check and tore itself down. Raising it to a flat
 // 12s fixed that and broke the other end: a genuinely dead tunnel then took
 // three 12s attempts to notice, with the user unprotected throughout.
-var probeBudget = 3 * time.Second
+// activeTransport is the transport the chain selected, set once before routing.
+var activeTransport string
+
+func probeBudget() time.Duration { return probeBudgetFor(activeTransport) }
 
 func probeBudgetFor(transport string) time.Duration {
 	switch transport {
@@ -333,7 +338,7 @@ func probeBudgetFor(transport string) time.Duration {
 }
 
 func probeThroughTunnel() error {
-	c, err := net.DialTimeout("tcp", probeAddr(), probeBudget)
+	c, err := net.DialTimeout("tcp", probeAddr(), probeBudget())
 	if err != nil {
 		return err
 	}
@@ -614,6 +619,21 @@ func setupRouting(tunName, bypassHost string) error {
 		return fmt.Errorf("tunnel routes installed but carry no traffic: %w", err)
 	}
 
+	// Encrypted DNS, on the transports that can carry it.
+	//
+	// DoH costs a full HTTPS round trip per uncached lookup, which the DNS and
+	// ICMP transports deliver in 5-10 seconds. The takeover is system-wide, so
+	// every application on the machine pays that, not just a browser -- which is
+	// not a slow VPN but an unusable computer. See DNS-ON-SLOW-TRANSPORTS in
+	// DECISIONS.md for the alternatives and what would reopen the choice.
+	if !transportCanCarryDoH(activeTransport) {
+		fmt.Fprintf(os.Stderr,
+			"freewire-tunnel: %s is too slow for encrypted DNS; leaving the system resolver alone\n"+
+				"freewire-tunnel: traffic is tunnelled, but this network can see which sites you visit (DNS-1)\n",
+			activeTransport)
+		return nil
+	}
+
 	// Start the DoH forwarder before pointing the system at it, so the resolver
 	// it is sent to is already answering.
 	fwd, dohErr := startDoHForwarder()
@@ -652,7 +672,7 @@ func setupRouting(tunName, bypassHost string) error {
 func verifyTunnelCarriesTraffic() error {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		c, err := net.DialTimeout("tcp", probeAddr(), probeBudget)
+		c, err := net.DialTimeout("tcp", probeAddr(), probeBudget())
 		if err == nil {
 			c.Close()
 			return nil
@@ -736,6 +756,21 @@ func interfaceForDest(dest string) (string, error) {
 // restore: removing the two halves hands traffic back to it automatically.
 // dohActive is the running forwarder, stopped on teardown.
 var dohActive *dohForwarder
+
+// transportCanCarryDoH reports whether a transport can serve system-wide DNS
+// over HTTPS without stalling the machine.
+//
+// Named for what it decides rather than listing "slow" transports, because the
+// question is not how fast the tunnel feels: it is whether one HTTPS round trip
+// per uncached lookup fits inside what an application will wait for.
+func transportCanCarryDoH(transport string) bool {
+	switch transport {
+	case "dns", "icmp_udp":
+		return false
+	default:
+		return true
+	}
+}
 
 func cleanupRouting(tunName, bypassHost string) {
 	// DNS first. The resolvers it points at are only reachable through the

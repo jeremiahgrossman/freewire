@@ -293,6 +293,17 @@ enum TunnelTransport: String, CaseIterable {
         self == .dns || self == .icmpUDP
     }
 
+    /// True when encrypted DNS is not in use on this transport.
+    ///
+    /// DoH costs a full HTTPS round trip per uncached lookup, which these two
+    /// deliver in 5-10 seconds. Since the takeover is system-wide, every
+    /// application pays it, so the tunnel leaves the resolver alone here and the
+    /// network can see which sites are visited. DNS-1 in error-states-spec.md;
+    /// the reasoning is in DECISIONS.md under DNS-ON-SLOW-TRANSPORTS.
+    var leaksDNSToNetwork: Bool {
+        self == .dns || self == .icmpUDP
+    }
+
     var displayName: String {
         switch self {
         case .wireguard:   return "WireGuard"

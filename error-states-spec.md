@@ -24,6 +24,31 @@ The kill switch preference must also default to **off** while unenforced, so no 
 
 When `FreewireHelper` ships: restore the copy specified in SESSION-1, SESSION-2, and `ux-workflows.md`, restore the default to on, and delete this section.
 
+### Encrypted DNS unavailable on a fallback transport (DNS-1)
+
+Freewire normally takes over the system resolver and relays lookups over HTTPS,
+so neither the network nor Freewire's own server can read them. That costs a
+full HTTPS round trip per uncached lookup, which the DNS and ICMP transports
+cannot deliver in usable time: measured at 5-10 seconds each, which stops every
+application on the machine, not just the browser.
+
+On those transports the takeover is skipped. Traffic is still tunnelled and
+still protected; lookups go to the network's own resolver in cleartext, so the
+network operator can see which sites are visited but not what is sent to them.
+
+| ID | Condition | User-visible message | Type |
+|---|---|---|---|
+| DNS-1 | Connected on the DNS or ICMP transport | "Your traffic is protected, but this network can see which sites you visit." | Soft warning, shown below the connected status |
+
+Shown alongside the protected status rather than replacing it, because the
+statement is true: the tunnel is carrying traffic and encrypting it. Only the
+lookups are exposed. This is the opposite call from DEBUG-1 and UPGRADE-1, where
+nothing was protected and the headline had to go.
+
+The reasoning is recorded in `DECISIONS.md` under DNS-ON-SLOW-TRANSPORTS, with
+the alternatives, because it trades a stated privacy guarantee for a usable
+machine and should be revisited if either side changes.
+
 ### Path upgrade window (UPGRADE-1)
 
 When a faster transport becomes available the client tears the tunnel down and
