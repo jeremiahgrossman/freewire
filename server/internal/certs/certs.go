@@ -73,23 +73,49 @@ func Build(certFile, keyFile string, acme ACMEOptions, log *zap.Logger) (*tls.Co
 	}, nil
 }
 
-// loadOrGenerateCert loads a TLS certificate from certFile/keyFile.
-// If either path is empty or the files don't exist, it generates an in-memory
-// self-signed P-256 certificate.
+// selfSignedPaths are where a generated certificate is kept when the operator
+// has not supplied one.
+const (
+	defaultSelfSignedCert = "./self-signed-cert.pem"
+	defaultSelfSignedKey  = "./self-signed-key.pem"
+)
+
+// loadOrGenerateCert loads a TLS certificate from certFile/keyFile, generating
+// a self-signed P-256 one if there is none.
 //
-// The generated key is never written to disk. A fresh one is cheap to make on
-// each start, and writing it to a shared directory would leave key material
-// readable by anything else running as root.
+// The generated pair is persisted. It used to be made fresh in memory on every
+// start, on the reasoning that a new one is cheap and writing key material to a
+// shared directory is a risk. Both halves of that were wrong. The risk argument
+// does not hold: the WireGuard private key already sits in the config file in
+// the same directory at the same permissions, and it is the more sensitive of
+// the two. And "cheap to regenerate" missed what a certificate is for -- an
+// identity that changes on every restart cannot be pinned, so a client that
+// pins it is locked out by the next deploy, and a client that does not pin it
+// has no way to tell the server from anyone standing in front of it.
+//
+// A server with a real hostname uses ACME and never reaches this path.
 func loadOrGenerateCert(certFile, keyFile string, log *zap.Logger) (tls.Certificate, error) {
-	if certFile != "" && keyFile != "" {
-		if _, err := os.Stat(certFile); err == nil {
-			if _, err := os.Stat(keyFile); err == nil {
-				return tls.LoadX509KeyPair(certFile, keyFile)
+	if certFile == "" {
+		certFile = defaultSelfSignedCert
+	}
+	if keyFile == "" {
+		keyFile = defaultSelfSignedKey
+	}
+	if _, err := os.Stat(certFile); err == nil {
+		if _, err := os.Stat(keyFile); err == nil {
+			cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+			if err == nil {
+				log.Info("tls443: loaded existing certificate", zap.String("cert", certFile))
+				return cert, nil
 			}
+			// A corrupt pair is replaced rather than fatal: refusing to start
+			// leaves no way back in on a headless box.
+			log.Warn("tls443: existing certificate unusable; generating a new one",
+				zap.Error(err))
 		}
 	}
 
-	log.Info("tls443: generating in-memory self-signed certificate")
+	log.Info("tls443: generating self-signed certificate", zap.String("cert", certFile))
 
 	// Generate P-256 private key.
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -129,5 +155,18 @@ func loadOrGenerateCert(certFile, keyFile string, log *zap.Logger) (tls.Certific
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
+	// Persist so the identity survives a restart. A write failure is not fatal
+	// -- the process can serve from what it holds in memory -- but it does mean
+	// the next start presents a different identity, so it is reported.
+	if err := os.WriteFile(certFile, certPEM, 0o644); err != nil {
+		log.Warn("tls443: could not persist certificate; it will change on restart",
+			zap.Error(err))
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
+		log.Warn("tls443: could not persist certificate key; it will change on restart",
+			zap.Error(err))
+	}
+
 	return tls.X509KeyPair(certPEM, keyPEM)
 }
