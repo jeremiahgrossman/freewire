@@ -161,8 +161,11 @@ the moment anyone else connects.
   carries no SNI at all, confirmed by capture. It cannot touch the SNI the
   server sees from user traffic: that handshake is end to end between the
   browser and the site. See WHAT-THE-SERVER-CAN-SEE in `DECISIONS.md`.
-- DoH is hardcoded to Cloudflare 1.1.1.1: a single point of failure and of trust
-  for a privacy-sensitive signal.
+- DoH resolvers are now configurable (`Config.DoHEndpoints`, https-only,
+  failover in order), so the hardcoding is gone. The *default* is still a
+  Cloudflare failover pair — one operator, a deliberate non-choice on cross-
+  operator diversity, since spreading queries across operators is a privacy call
+  for the operator to make, not a baked-in default.
 - `captive-portal-testing-guide.md`'s `proxy.py` listing is broken — its relay
   threads never iterate. `testing/proxy.py` is a working replacement.
 
