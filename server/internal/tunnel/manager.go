@@ -100,6 +100,48 @@ func NewManager(cfg *config.Config, log *zap.Logger) (*Manager, error) {
 	}, nil
 }
 
+// reserveSlot claims the peer-token slot for publicKeyBase64 under one lock.
+//
+// Checking capacity and inserting separately let concurrent registrations both
+// observe room and push the peer count past the configured limit, so both
+// happen here. The returned Peer starts empty and is filled in once the
+// WireGuard IPC succeeds.
+//
+// A key already registered under another token displaces that registration
+// rather than being refused. Refusing it protected an existing peer from having
+// its allowed_ip rewritten out from under it -- registration is unauthenticated
+// and a public key is not a secret -- but it also meant a client that died
+// without sending DELETE was locked out of its own server until the slot
+// expired, which on a one-slot server is forever. The caller proved possession
+// of the key by presenting it, which is the same evidence the original
+// registration rested on.
+//
+// The displaced token and its tunnel address are returned so the caller can
+// release the address once it is no longer holding the lock.
+func (m *Manager) reserveSlot(peerToken, publicKeyBase64 string, capacity int) (peer *Peer, staleToken, staleIP string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for existingToken, p := range m.peers {
+		if p.PublicKey == publicKeyBase64 {
+			staleToken, staleIP = existingToken, p.TunnelIP
+			break
+		}
+	}
+	// Capacity binds only when the registration adds a peer. A replacement is
+	// net-neutral on the count, and rejecting it would reintroduce the lockout
+	// this displacement exists to prevent.
+	if staleToken == "" && len(m.peers) >= capacity {
+		return nil, "", "", fmt.Errorf("server at capacity")
+	}
+	if staleToken != "" {
+		delete(m.peers, staleToken)
+	}
+	peer = &Peer{PublicKey: publicKeyBase64}
+	m.peers[peerToken] = peer
+	return peer, staleToken, staleIP, nil
+}
+
 func (m *Manager) AddPeer(peerToken, publicKeyBase64 string, capacity int) (*Peer, error) {
 	publicKeyBytes, err := base64.StdEncoding.DecodeString(publicKeyBase64)
 	if err != nil {
@@ -115,36 +157,19 @@ func (m *Manager) AddPeer(peerToken, publicKeyBase64 string, capacity int) (*Pee
 		return nil, fmt.Errorf("public key is all zero")
 	}
 
-	// Claim the slot and publish the entry under one lock. Checking capacity and
-	// inserting separately let concurrent registrations both observe room and
-	// push the peer count past the configured limit. The entry starts empty and
-	// is filled in once the WireGuard IPC succeeds.
-	peer := &Peer{PublicKey: publicKeyBase64}
-
-	m.mu.Lock()
-	if len(m.peers) >= capacity {
-		m.mu.Unlock()
-		return nil, fmt.Errorf("server at capacity")
+	peer, staleToken, staleIP, err := m.reserveSlot(peerToken, publicKeyBase64, capacity)
+	if err != nil {
+		return nil, err
 	}
-	// Refuse a key that is already registered. Registration is unauthenticated
-	// and replace_allowed_ips makes the peer line authoritative, so re-
-	// registering someone else's key rewrote their allowed_ip to a fresh
-	// address: their traffic stopped being routed to them, and the caller could
-	// then remove them outright. A public key is not a secret -- it crosses the
-	// API in the clear and is derivable from any captured handshake -- so it
-	// cannot be treated as proof of anything, but it can at least be bound to
-	// the first token that claimed it.
-	for existingToken, p := range m.peers {
-		if p.PublicKey == publicKeyBase64 {
-			m.mu.Unlock()
-			if existingToken == peerToken {
-				return nil, fmt.Errorf("peer already registered")
-			}
-			return nil, fmt.Errorf("public key already registered to another peer")
+	// The displaced address is returned to the pool outside the lock, because
+	// the pool takes its own.
+	if staleToken != "" {
+		if staleIP != "" {
+			m.pool.Release(staleIP)
 		}
+		m.log.Info("replacing a stale registration for the same key",
+			zap.String("session", redactToken(staleToken)))
 	}
-	m.peers[peerToken] = peer
-	m.mu.Unlock()
 
 	// From here on, any failure must surrender the reserved slot.
 	release := func() {

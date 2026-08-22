@@ -156,3 +156,56 @@ func TestNoPreferenceKeepsSpecOrder(t *testing.T) {
 		}
 	}
 }
+
+// The health probe and the route check both used a fixed address. That address
+// is also a plausible DNS resolver, and the resolver gets pinned outside the
+// tunnel so the DNS transport keeps working — so both checks could end up
+// measuring the bypass route instead of the tunnel, and would pass on a tunnel
+// carrying nothing at all.
+func TestProbeAvoidsPinnedAddresses(t *testing.T) {
+	defer func() { bypassRoutes = nil }()
+
+	bypassRoutes = nil
+	if got := probeAddr(); got != probeCandidates[0] {
+		t.Errorf("with nothing pinned, probe = %q, want the first candidate", got)
+	}
+
+	// Pin the first candidate, as would happen if it were the resolver.
+	bypassRoutes = []string{"1.1.1.1"}
+	got := probeAddr()
+	if got == probeCandidates[0] {
+		t.Error("probe chose a pinned address, so it measures the bypass route")
+	}
+	if got != probeCandidates[1] {
+		t.Errorf("probe = %q, want the next unpinned candidate", got)
+	}
+}
+
+func TestProbeSkipsSeveralPinnedAddresses(t *testing.T) {
+	defer func() { bypassRoutes = nil }()
+	bypassRoutes = []string{"1.1.1.1", "8.8.8.8"}
+	if got := probeAddr(); got != probeCandidates[2] {
+		t.Errorf("probe = %q, want the third candidate", got)
+	}
+}
+
+// Every candidate pinned should still yield something to probe: skipping the
+// check entirely is worse than probing an imperfect address.
+func TestProbeStillReturnsWhenAllPinned(t *testing.T) {
+	defer func() { bypassRoutes = nil }()
+	bypassRoutes = []string{"1.1.1.1", "8.8.8.8", "9.9.9.9"}
+	if probeAddr() == "" {
+		t.Error("probe returned nothing, so the health check would be skipped")
+	}
+}
+
+func TestIsPinnedMatchesExactly(t *testing.T) {
+	defer func() { bypassRoutes = nil }()
+	bypassRoutes = []string{"1.1.1.1"}
+	if !isPinned("1.1.1.1") {
+		t.Error("a pinned address was not recognised")
+	}
+	if isPinned("1.1.1.10") {
+		t.Error("a prefix match was treated as pinned")
+	}
+}

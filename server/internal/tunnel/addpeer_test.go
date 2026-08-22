@@ -29,35 +29,75 @@ func rejectionManager(t *testing.T, existing map[string]string) *Manager {
 		t.Fatalf("parse cidr: %v", err)
 	}
 	peers := map[string]*Peer{}
+	pool := newIPPool(network, "10.0.0.1")
 	for token, key := range existing {
-		peers[token] = &Peer{PublicKey: key}
+		ip, err := pool.Allocate()
+		if err != nil {
+			t.Fatalf("allocate: %v", err)
+		}
+		peers[token] = &Peer{PublicKey: key, TunnelIP: ip}
 	}
 	return &Manager{
-		pool:  newIPPool(network, "10.0.0.1"),
+		pool:  pool,
 		peers: peers,
 	}
 }
 
-// Registration is unauthenticated and replace_allowed_ips makes the peer line
-// authoritative, so re-registering a key already in use rewrote the original
-// peer's allowed_ip to a new address -- silently cutting off their traffic and
-// letting the caller then remove them. A public key is not secret: it crosses
-// the API in the clear and is derivable from any captured handshake.
-func TestAddPeerRejectsDuplicatePublicKey(t *testing.T) {
+// A client that dies without sending DELETE holds its slot until it expires. On
+// a server with one slot that is forever, so re-presenting the key displaces
+// the stale registration instead of being refused. The caller proved possession
+// of the key by presenting it, which is what the original registration rested
+// on too.
+func TestAddPeerReplacesStaleRegistration(t *testing.T) {
 	key := randKeyB64(t)
-	m := rejectionManager(t, map[string]string{"victim-token": key})
+	m := rejectionManager(t, map[string]string{"stale-token": key})
+	staleIP := m.peers["stale-token"].TunnelIP
 
-	if _, err := m.AddPeer("attacker-token", key, 10); err == nil {
-		t.Error("a second token was allowed to claim an already-registered key")
+	peer, staleToken, releasedIP, err := m.reserveSlot("fresh-token", key, 10)
+	if err != nil {
+		t.Fatalf("re-registering an owned key was refused: %v", err)
+	}
+	if staleToken != "stale-token" {
+		t.Errorf("displaced token = %q, want stale-token", staleToken)
+	}
+	if releasedIP != staleIP {
+		t.Errorf("released ip = %q, want %q", releasedIP, staleIP)
+	}
+	if _, still := m.peers["stale-token"]; still {
+		t.Error("the stale registration survived its replacement")
+	}
+	if m.peers["fresh-token"] != peer {
+		t.Error("the new token was not registered")
+	}
+	if got := m.PeerCount(); got != 1 {
+		t.Errorf("peer count = %d after a replacement, want 1", got)
 	}
 }
 
-func TestAddPeerRejectsReregistrationBySameToken(t *testing.T) {
+// Capacity binds only on registrations that add a peer. A replacement is
+// net-neutral, and refusing it on a full server is exactly the lockout that
+// displacement exists to prevent.
+func TestReplacementIsAllowedAtCapacity(t *testing.T) {
+	key := randKeyB64(t)
+	m := rejectionManager(t, map[string]string{"stale-token": key})
+
+	if _, _, _, err := m.reserveSlot("fresh-token", key, 1); err != nil {
+		t.Fatalf("a full server refused to replace its own stale peer: %v", err)
+	}
+}
+
+// The same token re-presenting its own key is the ordinary reconnect case.
+func TestAddPeerReregistrationBySameToken(t *testing.T) {
 	key := randKeyB64(t)
 	m := rejectionManager(t, map[string]string{"tok": key})
 
-	if _, err := m.AddPeer("tok", key, 10); err == nil {
-		t.Error("re-registering the same key under the same token was allowed")
+	if _, staleToken, _, err := m.reserveSlot("tok", key, 10); err != nil {
+		t.Fatalf("re-registering the same key under the same token failed: %v", err)
+	} else if staleToken != "tok" {
+		t.Errorf("displaced token = %q, want tok", staleToken)
+	}
+	if got := m.PeerCount(); got != 1 {
+		t.Errorf("peer count = %d after a self-replacement, want 1", got)
 	}
 }
 
@@ -79,16 +119,15 @@ func TestAddPeerRejectsMalformedKeys(t *testing.T) {
 
 // A rejection must not consume a capacity slot or a pool address.
 func TestRejectedRegistrationLeavesNoResidue(t *testing.T) {
-	key := randKeyB64(t)
-	m := rejectionManager(t, map[string]string{"victim-token": key})
+	m := rejectionManager(t, map[string]string{"victim-token": randKeyB64(t)})
 
 	beforePeers := m.PeerCount()
 	beforePool := m.pool.Size()
 
 	for i := 0; i < 5; i++ {
-		m.AddPeer("attacker", key, 10)         //nolint:errcheck
-		m.AddPeer("attacker", "!!!bad!!!", 10) //nolint:errcheck
-		m.AddPeer("attacker", "", 10)          //nolint:errcheck
+		m.AddPeer("attacker", "!!!bad!!!", 10)  //nolint:errcheck
+		m.AddPeer("attacker", "", 10)           //nolint:errcheck
+		m.AddPeer("attacker", randKeyB64(t), 1) //nolint:errcheck  at capacity
 	}
 
 	if got := m.PeerCount(); got != beforePeers {

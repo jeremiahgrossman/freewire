@@ -262,7 +262,7 @@ func (h *healthTally) record(ok bool) bool {
 
 // probeThroughTunnel performs one round trip over the current routes.
 func probeThroughTunnel() error {
-	c, err := net.DialTimeout("tcp", tunnelProbeAddr, 2*time.Second)
+	c, err := net.DialTimeout("tcp", probeAddr(), 2*time.Second)
 	if err != nil {
 		return err
 	}
@@ -302,15 +302,46 @@ func skipEgressCheck() bool {
 // This process runs as root. Invoking "route" or "ifconfig" by bare name
 // resolves through PATH, so anything earlier in PATH runs with root privileges.
 const (
-	routeBin    = "/sbin/route"
-	ifconfigBin = "/sbin/ifconfig"
+	routeBin        = "/sbin/route"
+	ifconfigBin     = "/sbin/ifconfig"
+	networksetupBin = "/usr/sbin/networksetup"
 )
 
-// tunnelProbeAddr is dialed to decide whether traffic survives the tunnel
-// routes. A TCP handshake against a well-known anycast resolver: DNS
-// resolution is deliberately not used, since resolution itself may be what a
-// broken tunnel has taken down.
-const tunnelProbeAddr = "1.1.1.1:53"
+// probeCandidates are well-known anycast resolvers used to decide whether
+// traffic survives the tunnel routes. A TCP handshake, not a DNS lookup:
+// resolution itself may be what a broken tunnel has taken down.
+//
+// More than one, because the resolver in use gets pinned outside the tunnel so
+// the DNS transport keeps working. Probing a pinned address proves only that
+// the bypass route works, which is true whether or not the tunnel carries
+// anything — the check would pass on a completely dead tunnel.
+var probeCandidates = []string{"1.1.1.1:53", "8.8.8.8:53", "9.9.9.9:53"}
+
+// probeAddr returns the first candidate that is not pinned outside the tunnel.
+func probeAddr() string {
+	for _, cand := range probeCandidates {
+		host, _, err := net.SplitHostPort(cand)
+		if err != nil {
+			continue
+		}
+		if !isPinned(host) {
+			return cand
+		}
+	}
+	// Every candidate is pinned, which should not happen; the caller is better
+	// off probing something than skipping the check.
+	return probeCandidates[0]
+}
+
+// isPinned reports whether ip was routed outside the tunnel.
+func isPinned(ip string) bool {
+	for _, p := range bypassRoutes {
+		if p == ip {
+			return true
+		}
+	}
+	return false
+}
 
 // bypassRoutes records the host routes pinned outside the tunnel so cleanup can
 // remove exactly what was added.
@@ -401,6 +432,23 @@ func setupRouting(tunName, bypassHost string) error {
 		}
 	}
 
+	// IPv6 must not survive the tunnel coming up.
+	//
+	// The routes below cover IPv4 only, and configureInterface assigns the utun
+	// no v6 address, so the system's IPv6 default route stayed on the physical
+	// interface: every v6-reachable destination was contacted in the clear
+	// while the client reported "Protected". The WireGuard peer config sets
+	// allowed_ip=::/0, which makes it look handled at the WireGuard layer even
+	// though the kernel never sent a v6 packet to the interface, and the
+	// existing route check only ever looked at a v4 destination.
+	//
+	// Carrying v6 inside the tunnel is the better answer and is not in scope
+	// here. Until it is, v6 is switched off for the tunnel's lifetime and
+	// restored on cleanup, so traffic that cannot be protected cannot leave.
+	if err := setIPv6(false); err != nil {
+		return fmt.Errorf("disable ipv6: %w", err)
+	}
+
 	// Cover everything with two halves rather than replacing the default route.
 	for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
 		// -ifscope keeps the entry tied to the tunnel; delete first so a stale
@@ -415,11 +463,14 @@ func setupRouting(tunName, bypassHost string) error {
 
 	// Verify rather than assume. A silent routing failure means the client
 	// reports "Protected" while every packet leaves in the clear.
-	if iface, err := interfaceForDest("8.8.8.8"); err != nil {
+	// Verify against an address that is not pinned, or the check passes on the
+	// bypass route rather than on the tunnel.
+	verifyHost, _, _ := net.SplitHostPort(probeAddr())
+	if iface, err := interfaceForDest(verifyHost); err != nil {
 		return fmt.Errorf("verify tunnel route: %w", err)
 	} else if iface != tunName {
-		return fmt.Errorf("tunnel routes did not take effect: traffic to 8.8.8.8 still uses %s, not %s",
-			iface, tunName)
+		return fmt.Errorf("tunnel routes did not take effect: traffic to %s still uses %s, not %s",
+			verifyHost, iface, tunName)
 	}
 
 	// Installing the routes is not the same as traffic surviving them. If the
@@ -449,7 +500,7 @@ func setupRouting(tunName, bypassHost string) error {
 func verifyTunnelCarriesTraffic() error {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		c, err := net.DialTimeout("tcp", tunnelProbeAddr, 2*time.Second)
+		c, err := net.DialTimeout("tcp", probeAddr(), 2*time.Second)
 		if err == nil {
 			c.Close()
 			return nil
@@ -457,7 +508,7 @@ func verifyTunnelCarriesTraffic() error {
 		lastErr = err
 		time.Sleep(300 * time.Millisecond)
 	}
-	return fmt.Errorf("no response from %s after 3 attempts: %w", tunnelProbeAddr, lastErr)
+	return fmt.Errorf("no response from %s after 3 attempts: %w", probeAddr(), lastErr)
 }
 
 // pinOutsideTunnel adds a host route for ip along the path it currently uses,
@@ -536,6 +587,12 @@ func cleanupRouting(tunName, bypassHost string) {
 		exec.Command(routeBin, "-q", "-n", "delete", "-inet", half).Run() //nolint:errcheck
 	}
 
+	// Give IPv6 back. Left off, a crashed tunnel would silently cost the user
+	// v6 connectivity with nothing on screen to explain it.
+	if err := setIPv6(true); err != nil {
+		fmt.Fprintf(os.Stderr, "freewire-tunnel: restore ipv6: %v\n", err)
+	}
+
 	// Remove the tunnel subnet route added by configureInterface.
 	exec.Command(routeBin, "-q", "-n", "delete", "-inet", "10.0.0.0/24").Run() //nolint:errcheck
 
@@ -546,6 +603,46 @@ func cleanupRouting(tunName, bypassHost string) {
 	}
 	bypassRoutes = nil
 	recordPins()
+}
+
+// ipv6Services lists the network services whose IPv6 configuration was changed,
+// so cleanup restores exactly what was touched.
+var ipv6Services []string
+
+// setIPv6 turns IPv6 on or off for every active network service.
+//
+// Disabling is a blunt instrument, and deliberate: the alternative is v6
+// traffic leaving in the clear while the UI claims protection. Restoring uses
+// "automatic", which is the macOS default.
+func setIPv6(on bool) error {
+	if !on {
+		out, err := exec.Command(networksetupBin, "-listallnetworkservices").Output()
+		if err != nil {
+			return fmt.Errorf("list network services: %w", err)
+		}
+		ipv6Services = nil
+		for _, line := range strings.Split(string(out), "\n") {
+			name := strings.TrimSpace(line)
+			// The first line is a header, and a leading asterisk marks a
+			// disabled service.
+			if name == "" || strings.HasPrefix(name, "An asterisk") || strings.HasPrefix(name, "*") {
+				continue
+			}
+			if err := exec.Command(networksetupBin, "-setv6off", name).Run(); err == nil {
+				ipv6Services = append(ipv6Services, name)
+			}
+		}
+		if len(ipv6Services) == 0 {
+			return fmt.Errorf("no network service accepted -setv6off")
+		}
+		return nil
+	}
+
+	for _, name := range ipv6Services {
+		exec.Command(networksetupBin, "-setv6automatic", name).Run() //nolint:errcheck
+	}
+	ipv6Services = nil
+	return nil
 }
 
 // configureInterface sets the point-to-point tunnel address and MTU.

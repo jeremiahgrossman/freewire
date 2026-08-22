@@ -24,8 +24,22 @@ type Server struct {
 	// limiting has nothing to add.
 	issuer *privacypass.Issuer
 	spent  *privacypass.SpentStore
-	log    *zap.Logger
+	// issueLimit bounds token issuance. Without it Privacy Pass enforces
+	// nothing: the endpoint is unauthenticated by design, so anyone could mint
+	// as many valid tokens as they wanted and the rate limit the tokens exist
+	// to impose would be free to bypass.
+	issueLimit *tokenBucket
+	log        *zap.Logger
 }
+
+// Issuance budget. A client asks for a batch of up to maxTokensPerRequest
+// occasionally, so 2 signatures per second sustained with a 600-signature burst
+// leaves any legitimate user untouched while capping a flood at a rate that
+// cannot outrun the 30-day spent store.
+const (
+	issueBurst  = 600
+	issuePerSec = 2
+)
 
 // NewServer creates the API server.
 //
@@ -43,7 +57,10 @@ func NewServer(
 	spent *privacypass.SpentStore,
 	log *zap.Logger,
 ) *Server {
-	return &Server{cfg: cfg, wg: wg, tls: tlsCfg, issuer: issuer, spent: spent, log: log}
+	return &Server{
+		cfg: cfg, wg: wg, tls: tlsCfg, issuer: issuer, spent: spent, log: log,
+		issueLimit: newTokenBucket(issueBurst, issuePerSec),
+	}
 }
 
 func (s *Server) Run(ctx context.Context) error {

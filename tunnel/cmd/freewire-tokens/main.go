@@ -21,15 +21,20 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"math/big"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/cloudflare/circl/blindsign/blindrsa"
@@ -39,7 +44,7 @@ const tokenType uint16 = 0x0001
 
 func main() {
 	if len(os.Args) < 2 || os.Args[1] != "issue" {
-		fmt.Fprintln(os.Stderr, "usage: freewire-tokens issue --server <url> [--count n] [--insecure]")
+		fmt.Fprintln(os.Stderr, "usage: freewire-tokens issue --server <url> [--count n] [--insecure] [--issuer-pin path]")
 		os.Exit(2)
 	}
 
@@ -47,6 +52,7 @@ func main() {
 	server := fs.String("server", "", "base URL, e.g. https://host:8080")
 	count := fs.Int("count", 10, "tokens to request")
 	insecure := fs.Bool("insecure", false, "accept a self-signed certificate (pinned deployments)")
+	pinFile := fs.String("issuer-pin", "", "file recording the issuer key fingerprint; a change is refused")
 	fs.Parse(os.Args[2:]) //nolint:errcheck
 
 	if *server == "" {
@@ -66,8 +72,12 @@ func main() {
 		},
 	}
 
-	pub, err := fetchIssuerKey(client, *server)
+	pub, keyID, err := fetchIssuerKey(client, *server)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "freewire-tokens: %v\n", err)
+		os.Exit(1)
+	}
+	if err := checkPin(*pinFile, keyID); err != nil {
 		fmt.Fprintf(os.Stderr, "freewire-tokens: %v\n", err)
 		os.Exit(1)
 	}
@@ -82,30 +92,96 @@ func main() {
 	}
 }
 
-func fetchIssuerKey(c *http.Client, base string) (*rsa.PublicKey, error) {
+func fetchIssuerKey(c *http.Client, base string) (*rsa.PublicKey, [32]byte, error) {
+	var keyID [32]byte
+
 	r, err := c.Get(base + "/v1/server/config")
 	if err != nil {
-		return nil, fmt.Errorf("fetch server config: %w", err)
+		return nil, keyID, fmt.Errorf("fetch server config: %w", err)
 	}
 	defer r.Body.Close()
 
 	var cfg struct {
-		N string `json:"privacy_pass_key_n"`
-		E int    `json:"privacy_pass_key_e"`
+		N     string `json:"privacy_pass_key_n"`
+		E     int    `json:"privacy_pass_key_e"`
+		KeyID string `json:"privacy_pass_key_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("decode server config: %w", err)
+		return nil, keyID, fmt.Errorf("decode server config: %w", err)
 	}
 	if cfg.N == "" {
 		// A self-hosted server does not issue tokens, and says so here rather
 		// than by failing at /tokens/issue.
-		return nil, fmt.Errorf("this server does not issue tokens")
+		return nil, keyID, fmt.Errorf("this server does not issue tokens")
 	}
 	nBytes, err := base64.RawURLEncoding.DecodeString(cfg.N)
 	if err != nil {
-		return nil, fmt.Errorf("decode issuer modulus: %w", err)
+		return nil, keyID, fmt.Errorf("decode issuer modulus: %w", err)
 	}
-	return &rsa.PublicKey{N: new(big.Int).SetBytes(nBytes), E: cfg.E}, nil
+	pub := &rsa.PublicKey{N: new(big.Int).SetBytes(nBytes), E: cfg.E}
+	keyID = issuerKeyID(pub)
+
+	// The server also advertises the fingerprint of the key it is serving. It
+	// costs nothing to check, and a mismatch means the two halves of the
+	// response disagree -- which is not something a healthy server produces.
+	if cfg.KeyID != "" {
+		if want := base64.RawURLEncoding.EncodeToString(keyID[:]); cfg.KeyID != want {
+			return nil, keyID, fmt.Errorf(
+				"server's advertised issuer key id does not match the key it served")
+		}
+	}
+	return pub, keyID, nil
+}
+
+// issuerKeyID mirrors the server's Issuer.KeyID: SHA-256 over the modulus
+// followed by the three low bytes of the exponent. The two derivations must
+// agree, or a pin recorded here would never match again.
+func issuerKeyID(pk *rsa.PublicKey) [32]byte {
+	buf := pk.N.Bytes()
+	buf = append(buf, byte(pk.E>>16), byte(pk.E>>8), byte(pk.E))
+	return sha256.Sum256(buf)
+}
+
+// checkPin enforces trust-on-first-use over the issuer key.
+//
+// This is the defence against a tagging attack, and it is the whole reason the
+// fingerprint is worth carrying. Blind signing hides the token from the issuer,
+// but it does not hide which key signed it: an issuer that hands every client
+// its own distinct keypair learns, at redemption, exactly which client a token
+// came from. Every signature still verifies and no error is ever raised, so
+// nothing but a key-consistency check catches it.
+//
+// First use records the fingerprint. Any later change is refused rather than
+// followed, because following it is precisely the attack. A legitimate rotation
+// therefore requires the user to delete this file, which is the intended cost:
+// a rotation is rare and an unexplained key change is not something to accept
+// silently.
+func checkPin(path string, keyID [32]byte) error {
+	if path == "" {
+		return nil
+	}
+	want := base64.RawURLEncoding.EncodeToString(keyID[:])
+
+	seen, err := os.ReadFile(path)
+	switch {
+	case err == nil:
+		if got := strings.TrimSpace(string(seen)); got != want {
+			return fmt.Errorf(
+				"issuer key changed since first use; refusing to sign against it.\n"+
+					"If the server legitimately rotated its key, delete %s and retry", path)
+		}
+		return nil
+	case errors.Is(err, fs.ErrNotExist):
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return fmt.Errorf("create pin directory: %w", err)
+		}
+		if err := os.WriteFile(path, []byte(want+"\n"), 0o600); err != nil {
+			return fmt.Errorf("record issuer key pin: %w", err)
+		}
+		return nil
+	default:
+		return fmt.Errorf("read issuer key pin: %w", err)
+	}
 }
 
 func issue(c *http.Client, base string, pub *rsa.PublicKey, count int) ([]string, error) {

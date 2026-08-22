@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -62,6 +63,13 @@ type dnsSession struct {
 	// portal operator both see every query. See replayWindow.
 	rx replayWindow
 	// Handshake state: pending until ClientConfirm received.
+	//
+	// evicted is set under mu before the session is removed, so activation and
+	// eviction cannot both proceed: without it, evictLoop could retire a
+	// session in the moment between the confirm passing its MAC check and
+	// setting activated, decrementing pending twice and tearing down a tunnel
+	// the client believed was live.
+	evicted    bool
 	serverPriv [32]byte
 	serverPub  []byte
 	confirmMAC []byte // expected MAC from client
@@ -76,11 +84,68 @@ type dnsSession struct {
 }
 
 // dnsFragAssembly collects the fragments of one packet.
+//
+// Each index holds candidates rather than a single chunk. A fragment cannot be
+// authenticated on arrival -- the AEAD tag covers the whole packet -- and the
+// session token and sequence ride in the query name in cleartext, so any
+// resolver or portal operator on the path can read them and inject a fragment
+// of their own. First-writer-wins gave that injection a guaranteed kill: one
+// forged fragment displaced the real one, the reassembled packet failed its tag
+// check, and every multi-fragment packet on the tunnel could be destroyed by an
+// attacker holding no key. Keeping the alternatives and letting the tag pick
+// the real one costs a bounded number of extra AEAD opens.
 type dnsFragAssembly struct {
-	chunks   [][]byte
-	received int
-	total    int
-	started  time.Time
+	chunks    [][][]byte // index → candidate chunks
+	received  int        // indices with at least one candidate
+	total     int
+	started   time.Time
+	conflicts int // extra candidates beyond the first at any index
+}
+
+func chunkKnown(alts [][]byte, chunk []byte) bool {
+	for _, a := range alts {
+		if bytes.Equal(a, chunk) {
+			return true
+		}
+	}
+	return false
+}
+
+// Bounds on candidate retention. Two candidates per index and eight total
+// combinations mean an attacker can force at most eight AEAD opens per packet,
+// while a client whose fragments all arrive intact still costs exactly one.
+const (
+	maxFragCandidates  = 2
+	maxFragConflicts   = 3
+	maxReassemblyTries = 8
+)
+
+// candidates returns up to maxReassemblyTries reassembled ciphertexts, most
+// likely first: index 0 is every fragment as first seen, which is the only
+// combination tried when nothing conflicted.
+func (a *dnsFragAssembly) candidates() [][]byte {
+	out := [][]byte{nil}
+	for _, alts := range a.chunks {
+		if len(alts) == 0 {
+			return nil
+		}
+		next := make([][]byte, 0, len(out)*len(alts))
+		// Prefixes outer, alternatives inner, so the combination built entirely
+		// from first-seen chunks stays at index 0.
+		for _, prefix := range out {
+			for _, alt := range alts {
+				joined := make([]byte, 0, len(prefix)+len(alt))
+				joined = append(joined, prefix...)
+				joined = append(joined, alt...)
+				next = append(next, joined)
+			}
+		}
+		if len(next) > maxReassemblyTries {
+			next = next[:maxReassemblyTries]
+		}
+		out = next
+	}
+	return out
 }
 
 // maxDNSAssemblies caps how many partially received packets a session may hold.
@@ -190,16 +255,21 @@ func (s *DNSServer) evictLoop(ctx context.Context) {
 			now := time.Now()
 			s.sessions.Range(func(k, v any) bool {
 				sess := v.(*dnsSession)
+				// The decision and the mark are taken together, so a confirm
+				// racing this cannot activate a session already being retired.
 				sess.mu.Lock()
-				ls := sess.lastSeen
-				active := sess.activated
-				sess.mu.Unlock()
-
 				ttl := 90 * time.Second
-				if !active {
+				if !sess.activated {
 					ttl = pendingDNSSessionTTL
 				}
-				if now.Sub(ls) > ttl {
+				expired := !sess.evicted && now.Sub(sess.lastSeen) > ttl
+				active := sess.activated
+				if expired {
+					sess.evicted = true
+				}
+				sess.mu.Unlock()
+
+				if expired {
 					s.sessions.Delete(k)
 					if !active {
 						s.pending.Add(-1)
@@ -391,6 +461,12 @@ func (s *DNSServer) handleClientConfirm(conn *net.UDPConn, srcAddr *net.UDPAddr,
 	// nothing left holding a reference to close them. The ACK is re-sent
 	// because dropping the retransmit silently leaves the client waiting out
 	// its handshake timeout.
+	if sess.evicted {
+		// Retired while this confirm was in flight. Activating now would
+		// resurrect a session nothing holds a reference to.
+		s.sendNXDomain(conn, srcAddr, req)
+		return
+	}
 	if sess.activated {
 		sess.lastSeen = time.Now()
 		conn.WriteToUDP(buildDNSTXTResponse(req, "OK"), srcAddr) //nolint:errcheck
@@ -538,7 +614,7 @@ func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, req []by
 			delete(sess.frags, oldestSeq)
 		}
 		asm = &dnsFragAssembly{
-			chunks:  make([][]byte, fragTotal),
+			chunks:  make([][][]byte, fragTotal),
 			total:   fragTotal,
 			started: time.Now(),
 		}
@@ -549,9 +625,21 @@ func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, req []by
 		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
-	if asm.chunks[fragIndex] == nil {
-		asm.chunks[fragIndex] = chunk
+	switch alts := asm.chunks[fragIndex]; {
+	case len(alts) == 0:
+		asm.chunks[fragIndex] = [][]byte{chunk}
 		asm.received++
+	case chunkKnown(alts, chunk):
+		// A retransmission. Ordinary on this transport, and not a conflict.
+	case len(alts) < maxFragCandidates && asm.conflicts < maxFragConflicts:
+		// Two different chunks claim the same index, so one of them is forged.
+		// Which one cannot be known here; the tag decides at the end.
+		asm.chunks[fragIndex] = append(alts, chunk)
+		asm.conflicts++
+	default:
+		// Past the retention bound this is a flood rather than one injection.
+		// Refusing the extra candidate keeps the real fragments in place.
+		s.log.Warn("dns: fragment candidates exhausted for a packet")
 	}
 
 	// Expire assemblies whose remaining fragments never arrived.
@@ -568,11 +656,7 @@ func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, req []by
 		return
 	}
 	delete(sess.frags, seq)
-
-	var ciphertext []byte
-	for _, c := range asm.chunks {
-		ciphertext = append(ciphertext, c...)
-	}
+	ciphertexts := asm.candidates()
 
 	// Check only, and only once the packet is whole. The window must not move
 	// for anything unauthenticated: on this transport the sequence rides in the
@@ -588,11 +672,25 @@ func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, req []by
 		return
 	}
 
+	// Try each reassembly the fragments allow. With no conflicting fragment
+	// there is exactly one, so the ordinary path costs a single open; the tag is
+	// what separates the client's chunks from an injected one.
 	var nonce [12]byte
 	srvDNSNonceInto(seq, &nonce)
-	plain, err := rxAEAD.Open(nil, nonce[:], ciphertext, nil)
-	if err != nil {
-		s.log.Error("dns: decrypt data", zap.String("cause", netErrCause(err)))
+	var plain []byte
+	var opened bool
+	for _, ciphertext := range ciphertexts {
+		// An empty plaintext is indistinguishable from a nil one, so success is
+		// tracked separately rather than inferred from the slice.
+		p, err := rxAEAD.Open(nil, nonce[:], ciphertext, nil)
+		if err == nil {
+			plain, opened = p, true
+			break
+		}
+	}
+	if !opened {
+		s.log.Error("dns: no reassembly of this packet authenticated",
+			zap.Int("candidates", len(ciphertexts)))
 		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}

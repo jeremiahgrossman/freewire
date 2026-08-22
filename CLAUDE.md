@@ -46,18 +46,40 @@ server never saw unblinded, first redemption 201, replay 402.
 report CONN-3 rather than CONN-2b (a documented bootstrap gap, not a
 regression); 6 needs a live DNS session to upgrade from.
 
-**Audits:** two runs, 142 findings, all closed except the privileged helper.
+**Audits:** three runs, 150 findings, all closed except the privileged helper.
+The third audit ran against the code the first two produced and confirmed eight
+findings before its verification budget ran out; all eight are fixed. Its
+unverified tail (~80 candidate findings, mostly medium and low) was never
+adjudicated — treat it as unreviewed rather than clean.
+
+The third audit's confirmed set, and what closed each:
+- Privacy Pass issuer key was fetched with no pinning, so an issuer handing each
+  client its own key could identify that client at redemption with every
+  signature still verifying. Now pinned trust-on-first-use (`--issuer-pin`), and
+  the advertised key id is checked against the key served.
+- Token issuance was unmetered, which made Privacy Pass ceremonial. Now capped
+  by a global bucket (see above).
+- The ICMP handshake had no half-open ceiling; the DNS server's bound was never
+  carried across. Now 256 pending with a 10-second TTL.
+- DNS fragment reassembly was first-writer-wins, so one fragment forged from the
+  cleartext query name destroyed any multi-fragment packet. Conflicting
+  fragments are now retained and the AEAD tag picks the real one.
+- Tokens were stored in plaintext under a file-protection option that does
+  nothing on macOS. Now encrypted under a Keychain-held file key.
+- Token-rejection copy was invented; `error-states-spec.md` now specifies it as
+  TRUST-3 and TRUST-4.
 
 ### Deferred until there are other users
 
 None of these matter for one person on their own server. They become blocking
 the moment anyone else connects.
 
-- **Privacy Pass issuance limits.** The mechanism is built and working, but
-  nothing caps how many tokens a requester may mint, so it does not yet
-  rate-limit anything. With one user there is nothing to limit. Resolving it
-  needs a decision, because the spec's per-IP cap collides with the
-  no-client-IP rule.
+- **Privacy Pass issuance is limited globally, not per caller.** The spec's
+  per-IP cap collides with the no-client-IP rule and a device handle would
+  defeat blind signing, so issuance is metered by a single shared budget (600
+  burst, 2/sec). One heavy caller can exhaust it for everyone — a denial of
+  service a per-caller limit would not have. Acceptable with one user;
+  revisiting it means finding a rate-limit key that identifies nobody.
 - **Abuse posture.** A free VPN with no accounts attracts spam and infringing
   traffic; complaints reach the host, and hosts terminate VPN operators.
 - **Capacity.** 253 peers per server, one /24. Fine for one device.
@@ -73,11 +95,6 @@ the moment anyone else connects.
   done and tested (16 assertions); the packaging is not. The UI does not claim
   the kill switch — see `error-states-spec.md` §"Interim". **Resolved:**
   `SMAppService`, and **fail closed**.
-- **ATS blocks self-signed servers.** App Transport Security rejects the
-  certificate before the pinning delegate is consulted, so the build carries
-  `NSAllowsArbitraryLoads` as a stopgap. The fix is `Network.framework` with a
-  verify block instead of URLSession. Managed servers with an ACME certificate
-  are unaffected.
 - `PathUpgradeManager` returns false for the DNS and ICMP paths; probing either
   needs a full handshake.
 - ECH is not implemented. uTLS hides the handshake fingerprint, but SNI still
@@ -145,7 +162,7 @@ X-Device-ID: "abc123"  // NEVER — breaks anonymity guarantee
 ```
 
 **4. Error state user-facing copy is specified — do not invent it**  
-All 24 error states in `error-states-spec.md` include exact user-visible message strings. Implement them verbatim. Do not paraphrase, consolidate, or add new error messages without updating the spec. Engineers reading crash reports need to match logs to spec entries by exact message text.
+All 34 error states in `error-states-spec.md` include exact user-visible message strings. Implement them verbatim. Do not paraphrase, consolidate, or add new error messages without updating the spec. Engineers reading crash reports need to match logs to spec entries by exact message text.
 
 **5. Session keys are ephemeral — never persist them**  
 DNS tunnel and ICMP tunnel session keys are established via DH exchange per session. They are never written to disk, Keychain, or any persistent store. If the app restarts, a new handshake runs. There is no session resumption.

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -33,6 +34,14 @@ type ICMPServer struct {
 	wgPort   int
 	sessions sync.Map // uint16 → *icmpSrvSession
 	log      *zap.Logger
+
+	// pending counts sessions that have answered a HELLO but not yet completed
+	// a CONFIRM. A HELLO costs the server a curve25519 operation, an HKDF
+	// stream and a session entry, and costs the sender one forged datagram, so
+	// without a ceiling the token space fills from a single unauthenticated
+	// flood. The DNS server has had this bound since its own audit; the ICMP
+	// path was left without one.
+	pending atomic.Int64
 }
 
 // icmpSrvSession holds the server-side state for one ICMP/UDP tunnel session.
@@ -63,6 +72,11 @@ type icmpSrvSession struct {
 	// Pending handshake state (before ClientConfirm).
 	serverPriv [32]byte
 	activated  bool
+	// evicted marks a session the evict loop has already taken down. It is set
+	// under mu at the same moment the eviction decision is made, so activation
+	// cannot race in behind it and leave a live tunnel the server has forgotten
+	// -- and so the pending counter is decremented exactly once.
+	evicted bool
 	// Inbound WG packets to forward to client.
 	wgInbound chan []byte
 }
@@ -75,6 +89,16 @@ const icmpSrvMaxPayload = 1416
 const (
 	icmpWorkers    = 16
 	icmpQueueDepth = 256
+)
+
+// Ceiling and lifetime for half-open handshakes. Both mirror the DNS server's
+// values: a real client sends CONFIRM within one round trip, so ten seconds is
+// generous, and 256 concurrent half-open sessions is far above any legitimate
+// load for a single-server deployment.
+const (
+	maxPendingICMPSessions = 256
+	pendingICMPSessionTTL  = 10 * time.Second
+	icmpSessionIdleTTL     = 90 * time.Second
 )
 
 // NewICMPServer creates an ICMPServer bridging to WireGuard on wgPort.
@@ -149,16 +173,37 @@ func (s *ICMPServer) evictLoop(ctx context.Context) {
 			now := time.Now()
 			s.sessions.Range(func(k, v any) bool {
 				sess := v.(*icmpSrvSession)
+
+				// Take the eviction decision and mark it under one lock. A
+				// half-open session expires an order of magnitude sooner than an
+				// established one, which is what keeps the pending ceiling from
+				// being a denial of service in its own right.
 				sess.mu.Lock()
-				ls := sess.lastSeen
-				sess.mu.Unlock()
-				if now.Sub(ls) > 90*time.Second {
-					s.sessions.Delete(k)
-					if sess.localConn != nil {
-						sess.localConn.Close() // causes wgInbound reader to exit and close the channel
-					}
-					s.log.Info("icmp server: session evicted")
+				if sess.evicted {
+					sess.mu.Unlock()
+					return true
 				}
+				ttl := icmpSessionIdleTTL
+				if !sess.activated {
+					ttl = pendingICMPSessionTTL
+				}
+				if now.Sub(sess.lastSeen) <= ttl {
+					sess.mu.Unlock()
+					return true
+				}
+				sess.evicted = true
+				wasPending := !sess.activated
+				conn := sess.localConn
+				sess.mu.Unlock()
+
+				s.sessions.Delete(k)
+				if wasPending {
+					s.pending.Add(-1)
+				}
+				if conn != nil {
+					conn.Close() // causes wgInbound reader to exit and close the channel
+				}
+				s.log.Info("icmp server: session evicted", zap.Bool("half_open", wasPending))
 				return true
 			})
 		}
@@ -218,6 +263,14 @@ func (s *ICMPServer) handleHello(pkt []byte, srcAddr *net.UDPAddr, conn *net.UDP
 		return
 	}
 	clientPub := pkt[8 : 8+32]
+
+	// Refuse to allocate past the pending ceiling. This is checked before any
+	// key material is generated, so a flood costs the server a comparison
+	// rather than a curve25519 operation per datagram.
+	if s.pending.Load() >= maxPendingICMPSessions {
+		s.log.Warn("icmp server: pending session limit reached; rejecting hello")
+		return
+	}
 
 	// Generate server ephemeral keypair.
 	var serverPriv [32]byte
@@ -294,6 +347,7 @@ func (s *ICMPServer) handleHello(pkt []byte, srcAddr *net.UDPAddr, conn *net.UDP
 		s.log.Error("icmp server: could not allocate a free session token")
 		return
 	}
+	s.pending.Add(1)
 	// Send HANDSHAKE_ACK: header(8) + serverPub(32) + token(2) = 42 bytes.
 	ack := make([]byte, 8+32+2)
 	ack[0] = 0x01
@@ -319,6 +373,12 @@ func (s *ICMPServer) handleConfirm(pkt []byte, srcAddr *net.UDPAddr, conn *net.U
 	// second bridge socket and start a second pair of goroutines, orphaning the
 	// first pair against a socket nothing will close.
 	if sess.activated {
+		return
+	}
+	// A session the evict loop has already taken down must not come back to
+	// life: its entry is gone from the map and nothing would ever close the
+	// bridge socket this would open.
+	if sess.evicted {
 		return
 	}
 
@@ -353,6 +413,7 @@ func (s *ICMPServer) handleConfirm(pkt []byte, srcAddr *net.UDPAddr, conn *net.U
 	sess.localConn = uc
 	sess.activated = true
 	sess.lastSeen = time.Now()
+	s.pending.Add(-1) // promoted from pending to established
 
 	// Read WG inbound packets for delivery to client.
 	// Closing wgInbound on exit unblocks the push goroutine below.

@@ -191,7 +191,11 @@ func TestConcurrentRedeemAcceptsExactlyOne(t *testing.T) {
 	}
 }
 
-func TestExpiredTokenSlotIsReusable(t *testing.T) {
+// A token must never become reusable inside its validity window. It may be
+// reclaimed later than that: the store keeps two generations and rotates whole
+// maps, so an entry survives between one and two TTLs. Holding longer is safe;
+// releasing early is not.
+func TestTokenIsNeverReusableInsideTheValidityWindow(t *testing.T) {
 	s := NewSpentStore(time.Hour)
 	now := time.Now()
 	s.nowFn = func() time.Time { return now }
@@ -202,14 +206,36 @@ func TestExpiredTokenSlotIsReusable(t *testing.T) {
 		t.Fatal("first redemption rejected")
 	}
 
-	// Past the validity window the token could not be used anyway.
-	now = now.Add(2 * time.Hour)
-	if !s.Redeem(h) {
-		t.Error("a slot past its validity window was not reusable")
+	// Anywhere inside the window it must still be refused.
+	for _, elapsed := range []time.Duration{0, time.Minute, 30 * time.Minute, 59 * time.Minute} {
+		now = now.Add(elapsed)
+		if s.Redeem(h) {
+			t.Errorf("token became reusable %v into a 1h window", elapsed)
+		}
 	}
 }
 
-func TestExpireDropsOldEntries(t *testing.T) {
+func TestSlotIsEventuallyReclaimed(t *testing.T) {
+	s := NewSpentStore(time.Hour)
+	now := time.Now()
+	s.nowFn = func() time.Time { return now }
+
+	var h [32]byte
+	h[0] = 9
+	s.Redeem(h)
+
+	// Two rotations retire the generation holding it.
+	now = now.Add(3 * time.Hour)
+	s.Expire()
+	now = now.Add(3 * time.Hour)
+	s.Expire()
+
+	if !s.Redeem(h) {
+		t.Error("the slot was never reclaimed after two full rotations")
+	}
+}
+
+func TestExpireReclaimsMemory(t *testing.T) {
 	s := NewSpentStore(time.Hour)
 	now := time.Now()
 	s.nowFn = func() time.Time { return now }
@@ -223,16 +249,40 @@ func TestExpireDropsOldEntries(t *testing.T) {
 		t.Fatalf("recorded %d redemptions, want 50", s.Len())
 	}
 
-	now = now.Add(2 * time.Hour)
-	if removed := s.Expire(); removed != 50 {
-		t.Errorf("expired %d entries, want 50", removed)
-	}
+	// Two rotations discard both generations.
+	now = now.Add(3 * time.Hour)
+	s.Expire()
+	now = now.Add(3 * time.Hour)
+	s.Expire()
+
 	if s.Len() != 0 {
-		t.Errorf("%d entries remain after expiry", s.Len())
+		t.Errorf("%d entries still held after two rotations", s.Len())
 	}
 }
 
-func TestExpireKeepsLiveEntries(t *testing.T) {
+// Rotation must be O(1) in work done under the lock. The original eviction was
+// a selection sort over the whole store, which at the ceiling is on the order
+// of 10^12 comparisons with every redemption blocked behind it.
+func TestRotationDoesNotScaleWithStoreSize(t *testing.T) {
+	s := NewSpentStore(time.Hour)
+	now := time.Now()
+	s.nowFn = func() time.Time { return now }
+
+	for i := 0; i < 200_000; i++ {
+		var h [32]byte
+		h[0], h[1], h[2] = byte(i), byte(i>>8), byte(i>>16)
+		s.Redeem(h)
+	}
+
+	now = now.Add(2 * time.Hour)
+	start := time.Now()
+	s.Expire()
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Errorf("rotating 200k entries took %v; eviction is not O(1)", elapsed)
+	}
+}
+
+func TestExpireKeepsRecentEntries(t *testing.T) {
 	s := NewSpentStore(time.Hour)
 	now := time.Now()
 	s.nowFn = func() time.Time { return now }
@@ -242,14 +292,14 @@ func TestExpireKeepsLiveEntries(t *testing.T) {
 	s.Redeem(old)
 
 	now = now.Add(90 * time.Minute)
-	s.Redeem(fresh)
+	s.Redeem(fresh) // rotates: old moves to the previous generation
 
 	s.Expire()
-	if s.Len() != 1 {
-		t.Errorf("%d entries remain, want only the fresh one", s.Len())
-	}
 	if s.Redeem(fresh) {
-		t.Error("the fresh entry was expired")
+		t.Error("a token redeemed moments ago became reusable")
+	}
+	if s.Redeem(old) {
+		t.Error("a token still within reach of the previous generation became reusable")
 	}
 }
 

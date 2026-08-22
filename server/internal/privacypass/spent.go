@@ -18,8 +18,20 @@ import (
 // without bound and a redemption becomes unprovable once its token could no
 // longer have been used anyway.
 type SpentStore struct {
-	mu     sync.Mutex
-	seen   map[[32]byte]time.Time
+	mu sync.Mutex
+	// Two generations. Redemptions land in `current`; `previous` holds the
+	// preceding window and is still consulted, so a token stays unusable for at
+	// least one full TTL. Rotation drops a whole map, which is why nothing here
+	// ever has to sort or scan to make room.
+	//
+	// The first version evicted by selection sort over the whole store while
+	// holding this mutex -- at the ceiling that is on the order of 10^12
+	// comparisons, with every redemption blocked behind it, and reachable by
+	// anyone who can mint tokens.
+	current  map[[32]byte]struct{}
+	previous map[[32]byte]struct{}
+	rotated  time.Time
+
 	ttl    time.Duration
 	nowFn  func() time.Time // injectable for tests
 	maxLen int
@@ -28,21 +40,24 @@ type SpentStore struct {
 // DefaultTokenTTL matches the 30-day validity window in the spec.
 const DefaultTokenTTL = 30 * 24 * time.Hour
 
-// maxSpentEntries bounds memory. Reaching it means something is very wrong --
-// legitimate use spends a token per connection -- so the oldest entries are
-// dropped rather than refusing new redemptions and locking everyone out.
-const maxSpentEntries = 5_000_000
+// maxSpentEntries bounds a single generation. Reaching it rotates early rather
+// than refusing redemptions, which would lock everyone out. Two generations of
+// this size is roughly 64 MB of hashes.
+const maxSpentEntries = 1_000_000
 
 // NewSpentStore creates an empty store.
 func NewSpentStore(ttl time.Duration) *SpentStore {
 	if ttl <= 0 {
 		ttl = DefaultTokenTTL
 	}
+	now := time.Now()
 	return &SpentStore{
-		seen:   make(map[[32]byte]time.Time),
-		ttl:    ttl,
-		nowFn:  time.Now,
-		maxLen: maxSpentEntries,
+		current:  make(map[[32]byte]struct{}),
+		previous: make(map[[32]byte]struct{}),
+		rotated:  now,
+		ttl:      ttl,
+		nowFn:    time.Now,
+		maxLen:   maxSpentEntries,
 	}
 }
 
@@ -57,19 +72,31 @@ func (s *SpentStore) Redeem(hash [32]byte) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if spentAt, ok := s.seen[hash]; ok {
-		if now.Sub(spentAt) < s.ttl {
-			return false // already spent, still within the window
-		}
-		// Expired: the token could no longer be used anyway, so the slot is
-		// free to reuse.
-	}
+	s.rotateIfDueLocked(now)
 
-	if len(s.seen) >= s.maxLen {
-		s.evictOldestLocked()
+	if _, ok := s.current[hash]; ok {
+		return false
 	}
-	s.seen[hash] = now
+	if _, ok := s.previous[hash]; ok {
+		return false
+	}
+	s.current[hash] = struct{}{}
 	return true
+}
+
+// rotateIfDueLocked ages out the older generation.
+//
+// Rotation is a map drop, so it is O(1) in the work done under the lock however
+// many entries it discards. A token therefore stays unusable for between one
+// and two TTLs -- never less than the validity window, which is the property
+// that matters.
+func (s *SpentStore) rotateIfDueLocked(now time.Time) {
+	if now.Sub(s.rotated) < s.ttl && len(s.current) < s.maxLen {
+		return
+	}
+	s.previous = s.current
+	s.current = make(map[[32]byte]struct{})
+	s.rotated = now
 }
 
 // Expire drops entries past the validity window.
@@ -79,52 +106,19 @@ func (s *SpentStore) Expire() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	removed := 0
-	for h, t := range s.seen {
-		if now.Sub(t) >= s.ttl {
-			delete(s.seen, h)
-			removed++
-		}
+	before := len(s.previous)
+	s.rotateIfDueLocked(now)
+	if len(s.previous) == 0 {
+		return before
 	}
-	return removed
+	return 0
 }
 
 // Len reports how many redemptions are currently recorded.
 func (s *SpentStore) Len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return len(s.seen)
-}
-
-// evictOldestLocked drops the oldest tenth of the store.
-//
-// Called only at the ceiling. Dropping a batch rather than one entry avoids
-// doing this scan on every subsequent redemption.
-func (s *SpentStore) evictOldestLocked() {
-	type entry struct {
-		h [32]byte
-		t time.Time
-	}
-	oldest := make([]entry, 0, len(s.seen))
-	for h, t := range s.seen {
-		oldest = append(oldest, entry{h, t})
-	}
-	// Partial selection is enough: an exact ordering is not required to drop a
-	// tenth of the entries by age.
-	target := len(oldest) / 10
-	if target == 0 {
-		target = 1
-	}
-	for i := 0; i < target; i++ {
-		minIdx := i
-		for j := i + 1; j < len(oldest); j++ {
-			if oldest[j].t.Before(oldest[minIdx].t) {
-				minIdx = j
-			}
-		}
-		oldest[i], oldest[minIdx] = oldest[minIdx], oldest[i]
-		delete(s.seen, oldest[i].h)
-	}
+	return len(s.current) + len(s.previous)
 }
 
 // RunExpiry expires entries periodically until stop is closed.

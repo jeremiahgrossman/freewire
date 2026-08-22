@@ -72,7 +72,7 @@ final class TunnelManager: ObservableObject {
         // rather than the certificate is what establishes trust. Gating this on
         // the address instead left the helper doing strict validation against a
         // server the rest of the client had already accepted.
-        allowSelfSigned: ServerTrust.userPinnedKey != nil
+        allowSelfSigned: ServerTrust.trustsSelfSignedCertificate
     )
 
     init(api: ServerAPI, identity: DeviceIdentity) {
@@ -80,38 +80,6 @@ final class TunnelManager: ObservableObject {
         self.identity = identity
     }
 
-    /// Certificate verification is skipped only for servers at a loopback or
-    /// RFC 1918 literal address, where a self-signed development certificate is
-    /// expected. Any routable host must present a valid CA-signed certificate.
-    ///
-    /// The address is parsed, never prefix-matched. An earlier version tested
-    /// `hasPrefix("10.")` and friends against the raw host string, so routable
-    /// names like `10.attacker.com` or `192.168.evil.net` disabled certificate
-    /// verification for a public host.
-    private var allowsSelfSignedCert: Bool {
-        let h = api.serverHost
-        if h == "::1" { return true }
-
-        let parts = h.split(separator: ".", omittingEmptySubsequences: false)
-        guard parts.count == 4 else { return false }
-        var octets: [Int] = []
-        for p in parts {
-            // Reject anything that is not a bare decimal octet, so a hostname
-            // whose labels happen to be numeric cannot slip through.
-            guard !p.isEmpty, p.allSatisfy(\.isNumber), let v = Int(p), (0...255).contains(v) else {
-                return false
-            }
-            octets.append(v)
-        }
-
-        switch (octets[0], octets[1]) {
-        case (127, _):            return true   // 127.0.0.0/8
-        case (10, _):             return true   // 10.0.0.0/8
-        case (192, 168):          return true   // 192.168.0.0/16
-        case (172, 16...31):      return true   // 172.16.0.0/12
-        default:                  return false
-        }
-    }
 
     // MARK: - Public API
 
@@ -235,7 +203,7 @@ final class TunnelManager: ObservableObject {
                 tunnelIP:        peer.tunnelIP,
                 serverTunnelIP:  "10.0.0.1",
                 keepalive:       peer.keepaliveInterval,
-                insecureTLS:     allowsSelfSignedCert,
+                insecureTLS:     ServerTrust.trustsSelfSignedCertificate,
                 tlsPort:         server.tlsEndpointPort,
                 dnsTunnelPort:   server.dnsTunnelPort,
                 icmpUDPPort:     server.icmpUDPPort,
@@ -319,7 +287,7 @@ final class TunnelManager: ObservableObject {
                     tunnelIP:        peer.tunnelIP,
                     serverTunnelIP:  "10.0.0.1",
                     keepalive:       peer.keepaliveInterval,
-                    insecureTLS:     allowsSelfSignedCert,
+                    insecureTLS:     ServerTrust.trustsSelfSignedCertificate,
                     tlsPort:         server.tlsEndpointPort,
                     dnsTunnelPort:   server.dnsTunnelPort,
                     icmpUDPPort:     server.icmpUDPPort,
@@ -393,7 +361,7 @@ final class TunnelManager: ObservableObject {
                 tunnelIP:        peer.tunnelIP,
                 serverTunnelIP:  "10.0.0.1",
                 keepalive:       peer.keepaliveInterval,
-                insecureTLS:     allowsSelfSignedCert,
+                insecureTLS:     ServerTrust.trustsSelfSignedCertificate,
                 tlsPort:         server.tlsEndpointPort,
                 dnsTunnelPort:   server.dnsTunnelPort,
                 icmpUDPPort:     server.icmpUDPPort,
@@ -475,7 +443,11 @@ final class TunnelManager: ObservableObject {
                 self.reconnectTask?.cancel()
                 self.reconnectTask = Task { await self.doReconnect(startingAt: 0) }
             case .noNetwork:
-                // CONN-1 resumes on its own once connectivity returns.
+                // CONN-1 resumes on its own once connectivity returns. The
+                // state is cleared first: connect() only proceeds from
+                // .disconnected or .failed, so calling it from .noNetwork
+                // returned immediately and the recovery never happened.
+                self.state = .disconnected
                 Task { await self.connect() }
             default:
                 break

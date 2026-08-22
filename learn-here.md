@@ -84,7 +84,7 @@ Knowledge base, terminology, and document index for the Freewire VPN project.
 | `product-review-checklist.md` | 60-item quality gate across 11 sections with fast-track gate and cadence guide | Quality review process |
 | `ux-workflows.md` | All user-facing flows for iOS client, macOS client (menu bar), and AWS server setup | UX flows, states, and information hierarchy |
 | `data-model.md` | Data model with Signal-level privacy architecture; what is stored, what is not, and why | Data storage decisions and privacy guarantees |
-| `error-states-spec.md` | 24 error states across 7 categories (connection, session, permissions, self-host, privacy, system, updates) | Error handling behavior and user-facing messages |
+| `error-states-spec.md` | 34 error states across 7 categories (connection, session, permissions, self-host, privacy, system, updates) | Error handling behavior and user-facing messages |
 | `engineering-handoff.md` | Engineering orientation: build order, decisions, open questions, pre-launch checklist | Engineering starting point |
 | `client-server-api-spec.md` | HTTP API between Freewire client and managed server | API contract between client and server teams |
 | `dns-tunnel-protocol-spec.md` | Wire protocol for the DNS tunnel: subdomain encoding, handshake, sliding window, encryption | DNS tunnel implementation |

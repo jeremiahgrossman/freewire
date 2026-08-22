@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"go.uber.org/zap"
 
@@ -55,6 +56,22 @@ func (s *Server) handleIssueTokens(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "BATCH_TOO_LARGE",
 			"Too many tokens requested in one batch.")
 		return
+	}
+
+	// Charge the batch against the global issuance budget before signing any of
+	// it. Unmetered issuance would make Privacy Pass ceremonial: the endpoint is
+	// unauthenticated by design, so anyone could mint tokens without limit and
+	// the rate limit those tokens exist to impose would cost nothing to bypass.
+	//
+	// 429 rather than 402: the API conventions reserve 402 for a token that was
+	// presented and rejected, and the client maps the two to different retries.
+	if s.issueLimit != nil {
+		if ok, wait := s.issueLimit.allow(len(req.Blinded)); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())))
+			writeError(w, http.StatusTooManyRequests, "RATE_LIMITED",
+				"Too many tokens requested. Try again shortly.")
+			return
+		}
 	}
 
 	sigs := make([]string, 0, len(req.Blinded))

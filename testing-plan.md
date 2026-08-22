@@ -91,7 +91,7 @@ Coverage targets: **80% line coverage minimum** for all modules except UI.
 | `ICMPTunnelProtocol` | Packet construction, handshake steps, HMAC verification, payload encoding |
 | `PrivacyPassClient` | Token blinding, unblinding, verification, storage, batch management, refresh trigger at <3 tokens |
 | `PathUpgradeManager` | State transitions, probe timeout, migration logic, re-probe schedule |
-| `ErrorStateHandler` | Each of the 24 error states: correct message string, correct retry behavior, correct error type (silent/soft/hard) |
+| `ErrorStateHandler` | Each of the 34 error states: correct message string, correct retry behavior, correct error type (silent/soft/hard) |
 
 Run with:
 ```bash

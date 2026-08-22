@@ -91,6 +91,8 @@ that delivered it.
 |---|---|---|---|
 | TRUST-1 | No pinned key is configured for this server | "Freewire does not have a trusted key for this server. Add the server's key before connecting." | Hard block |
 | TRUST-2 | The server returned a key that does not match the pin | "This server's identity does not match the one Freewire trusts. Connection refused." | Hard block |
+| TRUST-3 | The server rejected the connection token (HTTP 402) | "Freewire could not verify this connection. Try again in a moment." | Retry once, then surface |
+| TRUST-4 | The Privacy Pass issuer key changed since first use | "This server's identity does not match the one Freewire trusts. Connection refused." | Hard block |
 
 TRUST-2 is never retried automatically and never offers "connect anyway". A
 mismatch is either a server that rotated its key without publishing the
@@ -99,6 +101,19 @@ bypass would hand the user the one decision they have no way to make correctly.
 
 Rotation is handled by accepting more than one key: the successor is published
 and shipped before the server switches, so no client is ever stranded.
+
+TRUST-3 covers a token the server declined — spent, malformed, or signed under a
+key it no longer holds. The copy says nothing about tokens because the user has
+no token to act on: they never see one, cannot inspect one, and the fix in every
+case is a fresh batch, which the client requests on its own. One silent retry
+covers the ordinary case of a stale batch.
+
+TRUST-4 shares TRUST-2's copy deliberately. Both are the same event to the user
+— the server is not the one this client trusts — and the distinction between a
+WireGuard key and a token-issuer key is not one the message should ask them to
+hold. It is a hard block for the reason blind signing exists: an issuer that
+gives each client its own key can identify that client at redemption, every
+signature still verifies, and nothing else in the system notices.
 
 ---
 

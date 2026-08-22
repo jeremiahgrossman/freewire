@@ -35,7 +35,7 @@ Read these before writing code:
 |---|---|---|
 | `PRD.md` | Full product requirements — the authoritative spec | Required |
 | `ux-workflows.md` | Every user flow, screen by screen | Required |
-| `error-states-spec.md` | 24 error states with exact user messages and retry logic | Required |
+| `error-states-spec.md` | 34 error states with exact user messages and retry logic | Required |
 | `data-model.md` | Identity model, what is/isn't stored, Privacy Pass design | Required |
 | `technical-architecture.md` | DNS tunnel protocol internals, fallback chain design | Required for server/tunnel work |
 | `learn-here.md` | Definitions and concepts for unfamiliar terms | Reference |
@@ -232,7 +232,7 @@ All 11 questions are resolved below. Resolutions are also propagated to the rele
 
 ## Error handling
 
-All 24 error states are specified in `error-states-spec.md`. Each entry has: trigger condition, immediate behavior, retry logic, exact user-visible message, error type (silent / soft warning / hard block), and recovery path.
+All 34 error states are specified in `error-states-spec.md`. Each entry has: trigger condition, immediate behavior, retry logic, exact user-visible message, error type (silent / soft warning / hard block), and recovery path.
 
 Implement these exactly. Do not invent user-facing copy — use the strings in the spec. Do not make architectural assumptions about retry counts or timeout values that differ from the spec without updating it.
 
@@ -285,4 +285,4 @@ The full checklist is in `product-review-checklist.md`. Items to not miss:
 - Privacy Pass token refresh tested (batch < 3, silent re-issuance)
 - DoH enforcement verified — no DNS leaks through the tunnel
 - QR code 24-hour expiry tested
-- All 24 error states implemented and tested against the strings in `error-states-spec.md`
+- All 34 error states implemented and tested against the strings in `error-states-spec.md`

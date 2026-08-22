@@ -55,6 +55,16 @@ enum ServerTrust {
         return false
     }
 
+    /// Whether a self-signed certificate should be accepted.
+    ///
+    /// One predicate for the whole client. The TLS transports used an RFC 1918
+    /// address test while the control plane used the pin, so against a pinned
+    /// server on a routable address the API connected and every TLS transport
+    /// then failed certificate validation.
+    static var trustsSelfSignedCertificate: Bool {
+        userPinnedKey != nil
+    }
+
     /// Whether any pin is configured at all.
     ///
     /// Distinguishes "this build has no managed server and the user has not

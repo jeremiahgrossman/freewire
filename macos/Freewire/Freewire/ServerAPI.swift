@@ -56,7 +56,8 @@ enum APIError: Error, LocalizedError {
         case .capacityFull,
              .serverAtCapacity:    return "Freewire's servers are at capacity. Try again in a few minutes."
         case .decodeFailed:        return "Unexpected server response."
-        // Copy per error-states-spec.md, "Server identity (TRUST)".
+        // Copy per error-states-spec.md, "Server identity (TRUST)":
+        // TRUST-1, TRUST-2 and TRUST-3 respectively.
         case .noServerPin:
             return "Freewire does not have a trusted key for this server. Add the server's key before connecting."
         case .serverKeyMismatch:
@@ -87,7 +88,7 @@ final class ServerAPI {
             // pinned a key out of band, because the pin rather than the
             // certificate is what establishes trust. A real hostname gets the
             // system's normal chain validation.
-            acceptAnyCertificate: ServerTrust.userPinnedKey != nil
+            acceptAnyCertificate: ServerTrust.trustsSelfSignedCertificate
         )
     }
 
