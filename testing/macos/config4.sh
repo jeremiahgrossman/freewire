@@ -28,11 +28,15 @@ apply_rules <<EOF
 # Note the transport is icmp_udp: it rides UDP 4500, not the ICMP protocol.
 # An earlier version of this config passed "inet proto icmp" and blocked
 # UDP 4500, so it blocked the very path it was meant to force.
+# pf requires rules grouped in order: options, normalization, queueing,
+# translation, filtering. The rdr below is translation and must precede every
+# filter rule, or pfctl rejects the whole ruleset and nothing is applied.
+rdr pass on $UPLINK_IF proto udp to port 53 -> 127.0.0.1 port 5353
+
 block out on $UPLINK_IF all
 # Bootstrap API. In production this shares 443; see config.env.
 pass out on $UPLINK_IF proto tcp to $SERVER_IP port $API_PORT
 pass out on $UPLINK_IF proto udp to $SERVER_IP port $ICMP_UDP_PORT
-rdr pass on $UPLINK_IF proto udp to port 53 -> 127.0.0.1 port 5353
 EOF
 
 echo
