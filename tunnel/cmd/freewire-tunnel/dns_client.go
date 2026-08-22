@@ -645,7 +645,21 @@ func (p *udpConnPool) get(server string) (net.Conn, error) {
 		return c, nil
 	}
 	p.mu.Unlock()
-	return net.DialTimeout("udp", server+":53", 2*time.Second)
+	return net.DialTimeout("udp", resolverAddr(server), 2*time.Second)
+}
+
+// resolverAddr accepts either a bare host or host:port.
+//
+// It used to append ":53" unconditionally, so a resolver given as "1.2.3.4:53"
+// became "1.2.3.4:53:53" and the transport failed to open -- silently, because
+// a candidate that could not open was skipped without a word, which made it
+// look as though the preferred transport was being ignored. Accepting a port is
+// also what lets the harness point at a resolver on :5353.
+func resolverAddr(server string) string {
+	if _, _, err := net.SplitHostPort(server); err == nil {
+		return server
+	}
+	return net.JoinHostPort(server, "53")
 }
 
 func (p *udpConnPool) put(server string, c net.Conn) {

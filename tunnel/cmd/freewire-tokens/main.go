@@ -293,11 +293,26 @@ func solveChallenge(c *http.Client, base string) (challenge, nonce string, err e
 		return "", "", fmt.Errorf("server asked for an unreasonable difficulty (%d)", ch.Difficulty)
 	}
 
-	// Search is a plain counter rather than random: the challenge already
-	// differs per window, and a counter makes the work reproducible when
-	// something goes wrong.
+	// Start the search at a random offset.
+	//
+	// It began at zero, on the reasoning that the challenge already differs per
+	// window so a counter would do. That was wrong in the case that matters:
+	// the challenge is constant *within* a window, so the search returned the
+	// identical nonce every time, and the server -- which spends each solution
+	// once -- refused the second issuance with 429. Any client reconnecting
+	// twice inside five minutes could not obtain a token, and against a
+	// token-issuing server that means it could not register at all.
+	//
+	// Still a counter from there, so the work stays bounded and predictable;
+	// only the starting point varies.
+	var seedBytes [8]byte
+	if _, err := rand.Read(seedBytes[:]); err != nil {
+		return "", "", fmt.Errorf("proof of work seed: %w", err)
+	}
+	seed := binary.BigEndian.Uint64(seedBytes[:])
+
 	for i := uint64(0); i < 1<<32; i++ {
-		candidate := strconv.FormatUint(i, 16)
+		candidate := strconv.FormatUint(seed+i, 16)
 		sum := sha256.Sum256([]byte(ch.Challenge + ":" + candidate))
 		if leadingZeroBits(sum[:]) >= ch.Difficulty {
 			return ch.Challenge, candidate, nil

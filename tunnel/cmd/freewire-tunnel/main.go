@@ -892,26 +892,46 @@ func configureInterface(tunName, tunnelIP, peerIP string) error {
 
 // waitForHandshake polls the WireGuard IPC interface until a handshake is confirmed
 // (last_handshake_time_sec > 0) or the deadline passes.
-func waitForHandshake(dev *device.Device, timeout time.Duration) bool {
+func waitForHandshake(dev *device.Device, timeout time.Duration, baseline uint64) bool {
 	deadline := time.Now().Add(timeout)
-	// One buffer for the whole poll, reset per iteration.
-	var buf bytes.Buffer
 	for time.Now().Before(deadline) {
-		buf.Reset()
-		if err := dev.IpcGetOperation(&buf); err == nil {
-			for _, line := range strings.Split(buf.String(), "\n") {
-				line = strings.TrimSpace(line)
-				if strings.HasPrefix(line, "last_handshake_time_sec=") {
-					val := strings.TrimPrefix(line, "last_handshake_time_sec=")
-					if val != "0" && val != "" {
-						return true
-					}
-				}
-			}
+		if hs := handshakeTime(dev); hs > baseline {
+			return true
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
 	return false
+}
+
+// handshakeTime reports the peer's last handshake as a unix timestamp, 0 if none.
+//
+// Read as a baseline before each candidate, because the check used to be
+// "is it non-zero". Once any candidate had handshaked, every candidate tried
+// afterwards saw a non-zero value and reported success immediately -- so the
+// transport the client believed it was using was whichever one happened to be
+// in flight when some earlier candidate's handshake landed. Three runs with
+// identical configuration selected three different transports.
+//
+// The consequence is worse than a wrong label. The chain stops at the first
+// candidate that "succeeds", so it could settle on a transport carrying nothing
+// while a working one further down was never tried.
+func handshakeTime(dev *device.Device) uint64 {
+	var buf bytes.Buffer
+	if err := dev.IpcGetOperation(&buf); err != nil {
+		return 0
+	}
+	var newest uint64
+	for _, line := range strings.Split(buf.String(), "\n") {
+		line = strings.TrimSpace(line)
+		val, ok := strings.CutPrefix(line, "last_handshake_time_sec=")
+		if !ok {
+			continue
+		}
+		if n, err := strconv.ParseUint(val, 10, 64); err == nil && n > newest {
+			newest = n
+		}
+	}
+	return newest
 }
 
 func b64ToHex(b64 string) (string, error) {

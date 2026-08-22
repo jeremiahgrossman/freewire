@@ -25,7 +25,7 @@ import (
 // Data:       DATA(0x10)
 // Keepalive:  KEEPALIVE(0x20)
 // Encryption: ChaCha20-Poly1305, AAD = Freewire header (8 bytes)
-// Max payload: 1416 bytes
+// Max payload: 1500 bytes (a full-size WireGuard packet at the 1420 tunnel MTU)
 // Rate limit: 20 packets/second hard cap
 // Keepalive:  every 15s when idle
 
@@ -46,8 +46,19 @@ const (
 	icmpTypeData    = 0x10
 	icmpTypeKA      = 0x20
 
-	icmpHeaderLen  = 8
-	icmpMaxPayload = 1416
+	icmpHeaderLen = 8
+	// Large enough for a full-size WireGuard packet at the tunnel MTU.
+	//
+	// It was 1416, which is smaller than what the tunnel actually produces: the
+	// utun MTU is 1420 and WireGuard adds 32 bytes of its own, so a full-size
+	// packet is 1452. Every one of those was refused here and dropped by the
+	// server, while small packets passed -- so the handshake completed, the
+	// tunnel reported ready, and then TCP died on its first full segment. The
+	// transport looked up and carried nothing.
+	//
+	// 1500 leaves margin without approaching the path MTU once the 8-byte
+	// header and 16-byte AEAD tag are added (1524 on the wire).
+	icmpMaxPayload = 1500
 	// Read buffers are sized past the largest datagram the tunnel can produce.
 	// net.PacketConn.ReadFrom discards whatever does not fit, so a buffer at
 	// exactly icmpMaxPayload silently truncated full-size packets, which were

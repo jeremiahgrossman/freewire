@@ -15,7 +15,15 @@
 #   testing/disconnect.sh       # tear down and verify restoration
 set -euo pipefail
 
+#   testing/connect.sh dns     # force a transport instead of running the chain
+#
+# Forcing a transport is how the DNS and ICMP paths get tested for egress
+# without a firewall. The harness configs prove path *selection* under portal
+# rules; they were run with routing skipped, so they never showed that those
+# transports actually carry traffic. This does, at the cost of not exercising
+# the fallback chain -- the two are complementary, not substitutes.
 SERVER="${FREEWIRE_SERVER:-52.203.246.145}"
+TRANSPORT="${1:-}"
 API="https://$SERVER:8080"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TUNNEL_BIN="$ROOT/tunnel/freewire-tunnel"
@@ -76,6 +84,24 @@ PEER_TOKEN="$(jq -r .peer_token <<<"$PEER")"
 echo "    tunnel ip $TUNNEL_IP"
 printf '%s' "$PEER_TOKEN" > "$STATE/peer-token"
 
+PREFERRED=""
+if [[ -n "$TRANSPORT" ]]; then
+  case "$TRANSPORT" in
+    wireguard|tls443|http_connect|dns|icmp_udp) ;;
+    *) echo "unknown transport: $TRANSPORT" >&2; exit 1 ;;
+  esac
+  PREFERRED=",
+  \"preferred_transport\": \"$TRANSPORT\""
+  # The DNS transport queries the authoritative server directly. In production
+  # the tunnel zone is delegated and the system resolver forwards; nowhere else
+  # is, so without this the DNS path cannot be exercised at all.
+  if [[ "$TRANSPORT" == "dns" ]]; then
+    PREFERRED="$PREFERRED,
+  \"dns_resolver\": \"$SERVER:$DNS_PORT\""
+  fi
+  echo "==> forcing transport: $TRANSPORT"
+fi
+
 cat > "$STATE/config.json" <<JSON
 {
   "private_key": "$PRIV",
@@ -88,7 +114,7 @@ cat > "$STATE/config.json" <<JSON
   "insecure_tls": true,
   "tls_port": $TLS_PORT,
   "dns_tunnel_port": $DNS_PORT,
-  "icmp_udp_port": $ICMP_PORT
+  "icmp_udp_port": $ICMP_PORT$PREFERRED
 }
 JSON
 

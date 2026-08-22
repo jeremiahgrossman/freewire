@@ -93,7 +93,12 @@ type icmpSrvSession struct {
 
 // icmpSrvMaxPayload mirrors the client's per-packet budget. Frames larger than
 // this cannot be received, so they are dropped at the source.
-const icmpSrvMaxPayload = 1416
+//
+// Must stay in step with icmpMaxPayload in the tunnel client. When it was 1416
+// -- below the 1452 bytes a full-size WireGuard packet occupies at the 1420
+// tunnel MTU -- every full packet was dropped here while small ones passed, so
+// the tunnel established and then carried no TCP at all.
+const icmpSrvMaxPayload = 1500
 
 // Worker pool sizing for the UDP read loop.
 const (

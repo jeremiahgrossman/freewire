@@ -148,3 +148,37 @@ func TestUsedSetIsDroppedOnWindowTurnover(t *testing.T) {
 		t.Errorf("used set holds %d entries after a window turned over, want 1", len(p.used))
 	}
 }
+
+// A client that reconnects inside one window must still get a token.
+//
+// The challenge is constant within a window and each solution is spent once, so
+// a client whose search is deterministic produces the same nonce every time and
+// is refused from its second attempt onward. That made reconnecting within five
+// minutes impossible against a token-issuing server. The property the server
+// must uphold is that *distinct* solutions to the same challenge are all
+// accepted; the client's job is to produce them.
+func TestDistinctSolutionsToOneChallengeAreAllAccepted(t *testing.T) {
+	p := testPOW(t)
+	challenge, difficulty := p.Challenge()
+
+	accepted := 0
+	found := 0
+	for i := 0; i < 1<<22 && found < 3; i++ {
+		nonce := strconv.Itoa(i)
+		sum := sha256.Sum256([]byte(challenge + ":" + nonce))
+		if leadingZeroBits(sum[:]) < int(difficulty) {
+			continue
+		}
+		found++
+		if err := p.Verify(challenge, nonce); err == nil {
+			accepted++
+		}
+	}
+	if found < 3 {
+		t.Fatalf("only found %d solutions to search with", found)
+	}
+	if accepted != 3 {
+		t.Errorf("%d of 3 distinct solutions accepted; a client reconnecting "+
+			"within one window would be refused", accepted)
+	}
+}

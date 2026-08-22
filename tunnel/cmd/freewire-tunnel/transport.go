@@ -404,6 +404,12 @@ func establishTunnel(
 	for _, candidate := range orderCandidates(defaultCandidates(), cfg.PreferredTransport) {
 		lp, tc, openErr := candidate.open(cfg)
 		if openErr != nil {
+			// Say why. A candidate that failed to open was skipped in silence,
+			// so a transport that never worked was indistinguishable from one
+			// that was never reached -- which made diagnosing "why did it pick
+			// TLS when I asked for DNS" a matter of guessing.
+			fmt.Fprintf(os.Stderr, "freewire-tunnel: %s unavailable: %v\n",
+				candidate.name, openErr)
 			continue
 		}
 
@@ -438,6 +444,8 @@ func establishTunnel(
 			upped = true
 		}
 
+		baseline := handshakeTime(wgDev)
+
 		// Bridge, for the transports that need one.
 		var bridgeDone chan struct{}
 		if lp != nil && tc != nil {
@@ -448,7 +456,10 @@ func establishTunnel(
 			}()
 		}
 
-		if waitForHandshake(wgDev, handshakeBudgetFor(candidate.name)) {
+		// Baseline taken per candidate: success means a handshake that happened
+		// after this transport was configured, not one left over from a
+		// previous rung of the chain.
+		if waitForHandshake(wgDev, handshakeBudgetFor(candidate.name), baseline) {
 			return candidate.name, lp, tc, nil
 		}
 
