@@ -279,15 +279,26 @@ rather than implementation detail:
 There is also a detection cost: running DNS tunnelling, ICMP and TLS at once is
 far more anomalous to a portal that is watching than any one of them.
 
-**Warm standby: worth doing.** The version of the idea that pays is redundancy
-rather than aggregation. Keep a second permitted transport handshaked but idle,
-so that losing the active path fails over in one round trip instead of
-re-walking the chain from the top — which currently costs up to the full
-fallback budget, during which the user is unprotected. This needs no packet
-scheduler and no change to the replay window: only one path carries traffic at
-a time.
+**Warm standby: mostly not worth doing, and the cheap part is done.**
 
-Open questions if it is picked up: what holds the standby session alive without
-the keepalives themselves becoming a signal; whether the server should count a
-standby peer against capacity; and whether the standby should be re-probed on
-network change or only on failure.
+Designing it changed the conclusion. The point was to avoid re-walking the chain
+after a drop. But the chain picks the *best* available path, so a standby is by
+construction a *worse* one — on a portal where only the DNS tunnel works, the
+standby is ICMP. Holding it open costs continuous polling or keepalives on the
+transports least able to afford either, and doubles the anomalous traffic a
+portal could notice, to save one handshake.
+
+Almost all of the benefit came from something far cheaper. Reconnect was passing
+no preferred transport, so it restarted from WireGuard and re-tested every path
+the network had already refused. Naming the last working transport gets recovery
+down to one handshake on a path known to work, with the rest of the chain still
+following if it has stopped working. That is now implemented; `orderCandidates`
+already supported it and only the reconnect path was not using it.
+
+What a true warm standby would still add is avoiding that one handshake, and
+WireGuard's roaming would make the switch itself nearly free: re-pointing the
+device at a second local proxy is one IPC call, and the session survives because
+the peer updates its endpoint on the first authenticated packet. If it is ever
+picked up, the open questions are what holds the standby alive without the
+keepalives becoming a signal, and whether the server counts a standby peer
+against capacity.

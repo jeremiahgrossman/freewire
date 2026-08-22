@@ -99,6 +99,18 @@ final class TunnelManager: ObservableObject {
     private var upgradeTask: Task<Void, Never>?
     /// Where the captive portal last redirected us, for a later retry.
     private var lastPortalURL: URL?
+    /// The transport that last carried traffic on this network.
+    ///
+    /// Reconnect used to restart the chain from the top, re-testing WireGuard,
+    /// HTTP CONNECT and TLS/443 on a network that had already refused all three
+    /// — spending most of the 11s fallback budget to arrive back where it
+    /// started. On a portal that permits only the DNS tunnel, every recovery
+    /// paid that in full, and the user is unprotected throughout.
+    ///
+    /// The chain still falls through to everything else if the remembered path
+    /// no longer works, so a network change costs one wasted handshake budget
+    /// rather than a failure.
+    private var lastGoodTransport: TunnelTransport?
     private lazy var tokens = TokenStore(
         serverBase: "https://\(api.serverHost):8080",
         // Same rule the URLSession delegate applies: a self-signed certificate
@@ -260,6 +272,7 @@ final class TunnelManager: ObservableObject {
                 await deregisterPeer()
                 return
             }
+            lastGoodTransport = transport
             state = .connected(
                 tunnelIP: peer.tunnelIP,
                 interfaceName: ifName,
@@ -339,11 +352,13 @@ final class TunnelManager: ObservableObject {
                     tlsPort:         server.tlsEndpointPort,
                     dnsTunnelPort:   server.dnsTunnelPort,
                     icmpUDPPort:     server.icmpUDPPort,
-                    preferredTransport: nil,
+                    // Try what was working before walking the whole chain again.
+                    preferredTransport: lastGoodTransport?.rawValue,
                     dnsResolver: Preferences.shared.dnsResolverOverride
                 )
 
                 let (ifName, transport) = try await launchTunnel(config: cfg)
+                lastGoodTransport = transport
                 state = .connected(
                     tunnelIP: peer.tunnelIP,
                     interfaceName: ifName,
@@ -445,6 +460,7 @@ final class TunnelManager: ObservableObject {
             // Reporting the old one left the panel showing an address the tunnel
             // no longer used. connectedAt is deliberately preserved: an upgrade
             // should not reset the session clock.
+            lastGoodTransport = newTransport
             state = .connected(
                 tunnelIP: peer.tunnelIP,
                 interfaceName: ifName,
