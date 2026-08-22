@@ -102,3 +102,64 @@ func TestReplayFloodAcceptsOnce(t *testing.T) {
 		t.Errorf("replayed packet accepted %d times, want exactly 1", accepted)
 	}
 }
+
+// The window used to be advanced by packets that had not been authenticated.
+// The sequence number is attacker-visible on both transports -- on the DNS path
+// it rides in the query name in cleartext -- so a single forged packet carrying
+// a maximal sequence pushed `highest` to the ceiling and every real packet
+// afterwards fell outside the window. The session stayed dead until eviction,
+// and the attacker needed no key material at all.
+func TestForgedSequenceCannotWedgeASession(t *testing.T) {
+	var w replayWindow
+
+	// A live session partway through its stream.
+	for seq := uint32(1); seq <= 100; seq++ {
+		if !w.accept(seq) {
+			t.Fatalf("legitimate sequence %d rejected", seq)
+		}
+	}
+
+	// A forged packet arrives claiming the largest possible sequence. It is
+	// checked, fails authentication, and must therefore never be committed.
+	const forged = ^uint32(0)
+	if !w.check(forged) {
+		t.Fatal("test assumption wrong: the forged sequence would not have been accepted")
+	}
+	// ...no commit, because the AEAD tag did not verify.
+
+	// The real stream must continue undisturbed.
+	for seq := uint32(101); seq <= 200; seq++ {
+		if !w.accept(seq) {
+			t.Fatalf("sequence %d rejected after a forged packet was rejected", seq)
+		}
+	}
+}
+
+// check must not mutate: calling it repeatedly cannot consume a sequence.
+func TestCheckDoesNotConsume(t *testing.T) {
+	var w replayWindow
+	w.accept(10)
+
+	for i := 0; i < 100; i++ {
+		if !w.check(11) {
+			t.Fatalf("check(11) returned false on call %d; it mutated state", i)
+		}
+	}
+	if !w.accept(11) {
+		t.Error("11 was consumed by check and could no longer be accepted")
+	}
+	if w.accept(11) {
+		t.Error("11 was accepted twice after commit")
+	}
+}
+
+func TestCommitAfterCheckIsIdempotentlySafe(t *testing.T) {
+	var w replayWindow
+	if !w.check(5) {
+		t.Fatal("check(5) rejected on an empty window")
+	}
+	w.commit(5)
+	if w.check(5) {
+		t.Error("5 still passes check after being committed")
+	}
+}

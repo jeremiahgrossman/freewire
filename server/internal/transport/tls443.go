@@ -75,7 +75,7 @@ func (s *TLS443Server) Run(ctx context.Context, port int) error {
 			if ctx.Err() != nil {
 				return nil
 			}
-			s.log.Error("tls443: accept", zap.Error(err))
+			s.log.Error("tls443: accept", zap.String("cause", netErrCause(err)))
 			continue
 		}
 		go s.handleConn(conn)
@@ -107,7 +107,7 @@ func (s *TLS443Server) handleConn(rawConn net.Conn) {
 		// the first bytes of the client's TLS handshake.
 		br, err := s.handleHTTPConnect(pc)
 		if err != nil {
-			s.log.Error("tls443: http connect", zap.Error(err))
+			s.log.Error("tls443: http connect", zap.String("cause", netErrCause(err)))
 			rawConn.Close()
 			return
 		}
@@ -122,7 +122,7 @@ func (s *TLS443Server) handleConn(rawConn net.Conn) {
 	tlsConn := tls.Server(pc, s.tlsConfig)
 	tlsConn.SetDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
 	if err := tlsConn.Handshake(); err != nil {
-		s.log.Error("tls443: tls handshake", zap.Error(err))
+		s.log.Error("tls443: tls handshake", zap.String("cause", netErrCause(err)))
 		tlsConn.Close()
 		return
 	}
@@ -169,13 +169,13 @@ func (s *TLS443Server) handleHTTPConnect(conn net.Conn) (*bufio.Reader, error) {
 func (s *TLS443Server) bridgeToWireGuard(transport net.Conn) {
 	wgAddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("127.0.0.1:%d", s.wgPort))
 	if err != nil {
-		s.log.Error("tls443: resolve wg addr", zap.Error(err))
+		s.log.Error("tls443: resolve wg addr", zap.String("cause", netErrCause(err)))
 		transport.Close()
 		return
 	}
 	udpConn, err := net.DialUDP("udp4", nil, wgAddr)
 	if err != nil {
-		s.log.Error("tls443: dial wg udp", zap.Error(err))
+		s.log.Error("tls443: dial wg udp", zap.String("cause", netErrCause(err)))
 		transport.Close()
 		return
 	}
@@ -199,7 +199,7 @@ func (s *TLS443Server) bridgeToWireGuard(transport net.Conn) {
 		for {
 			if _, err := io.ReadFull(transport, lb); err != nil {
 				if !isClosedErr(err) {
-					s.log.Error("tls443: bridge: read length from transport", zap.Error(err))
+					s.log.Error("tls443: bridge: read length from transport", zap.String("cause", netErrCause(err)))
 				}
 				return
 			}
@@ -210,12 +210,12 @@ func (s *TLS443Server) bridgeToWireGuard(transport net.Conn) {
 			}
 			if _, err := io.ReadFull(transport, buf[:pktLen]); err != nil {
 				if !isClosedErr(err) {
-					s.log.Error("tls443: bridge: read packet from transport", zap.Error(err))
+					s.log.Error("tls443: bridge: read packet from transport", zap.String("cause", netErrCause(err)))
 				}
 				return
 			}
 			if _, err := udpConn.Write(buf[:pktLen]); err != nil {
-				s.log.Error("tls443: bridge: write to wg udp", zap.Error(err))
+				s.log.Error("tls443: bridge: write to wg udp", zap.String("cause", netErrCause(err)))
 				return
 			}
 		}
@@ -230,14 +230,14 @@ func (s *TLS443Server) bridgeToWireGuard(transport net.Conn) {
 		n, err := udpConn.Read(frame[2:])
 		if err != nil {
 			if !isClosedErr(err) {
-				s.log.Error("tls443: bridge: read from wg udp", zap.Error(err))
+				s.log.Error("tls443: bridge: read from wg udp", zap.String("cause", netErrCause(err)))
 			}
 			return
 		}
 		binary.BigEndian.PutUint16(frame[:2], uint16(n))
 		if _, err := transport.Write(frame[:2+n]); err != nil {
 			if !isClosedErr(err) {
-				s.log.Error("tls443: bridge: write packet to transport", zap.Error(err))
+				s.log.Error("tls443: bridge: write packet to transport", zap.String("cause", netErrCause(err)))
 			}
 			return
 		}

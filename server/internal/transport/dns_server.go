@@ -164,7 +164,7 @@ func (s *DNSServer) Run(ctx context.Context, port int) error {
 			if ctx.Err() != nil {
 				return nil
 			}
-			s.log.Error("dns server: read", zap.Error(err))
+			s.log.Error("dns server: read", zap.String("cause", netErrCause(err)))
 			continue
 		}
 		pkt := make([]byte, n)
@@ -287,7 +287,7 @@ func (s *DNSServer) handleHandshake(conn *net.UDPConn, srcAddr *net.UDPAddr, req
 func (s *DNSServer) handleClientHello(conn *net.UDPConn, srcAddr *net.UDPAddr, req []byte, clientPubB32 string) {
 	clientPub, err := srvB32enc.DecodeString(clientPubB32)
 	if err != nil {
-		s.log.Error("dns: decode client pub", zap.Error(err))
+		s.log.Error("dns: decode client pub", zap.String("cause", netErrCause(err)))
 		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
@@ -424,7 +424,7 @@ func (s *DNSServer) handleClientConfirm(conn *net.UDPConn, srcAddr *net.UDPAddr,
 	}
 	uc, err := net.DialUDP("udp4", nil, wgAddr)
 	if err != nil {
-		s.log.Error("dns: dial wg udp", zap.Error(err))
+		s.log.Error("dns: dial wg udp", zap.String("cause", netErrCause(err)))
 		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
@@ -574,10 +574,13 @@ func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, req []by
 		ciphertext = append(ciphertext, c...)
 	}
 
-	// Checked once the packet is whole, since the sequence covers the packet
-	// rather than any single fragment. Before decryption, so a replay flood
-	// costs no AEAD work.
-	fresh := sess.rx.accept(seq)
+	// Check only, and only once the packet is whole. The window must not move
+	// for anything unauthenticated: on this transport the sequence rides in the
+	// query name in cleartext, so any resolver or portal operator on the path
+	// can read it and forge a packet with a maximal sequence. Committing here
+	// would let them push the window past every real packet and kill a live
+	// tunnel without holding any key.
+	fresh := sess.rx.check(seq)
 	sess.mu.Unlock()
 
 	if !fresh {
@@ -589,7 +592,20 @@ func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, req []by
 	srvDNSNonceInto(seq, &nonce)
 	plain, err := rxAEAD.Open(nil, nonce[:], ciphertext, nil)
 	if err != nil {
-		s.log.Error("dns: decrypt data", zap.Error(err))
+		s.log.Error("dns: decrypt data", zap.String("cause", netErrCause(err)))
+		s.sendNXDomain(conn, srcAddr, req)
+		return
+	}
+
+	// Authenticated: the window may move now. Re-checked under the lock so two
+	// copies that both passed the earlier check cannot both be forwarded.
+	sess.mu.Lock()
+	stillFresh := sess.rx.check(seq)
+	if stillFresh {
+		sess.rx.commit(seq)
+	}
+	sess.mu.Unlock()
+	if !stillFresh {
 		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}

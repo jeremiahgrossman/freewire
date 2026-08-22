@@ -123,7 +123,7 @@ func (s *ICMPServer) Run(ctx context.Context, port int) error {
 			if ctx.Err() != nil {
 				return nil
 			}
-			s.log.Error("icmp server: read", zap.Error(err))
+			s.log.Error("icmp server: read", zap.String("cause", netErrCause(err)))
 			continue
 		}
 		pkt := make([]byte, n)
@@ -345,7 +345,7 @@ func (s *ICMPServer) handleConfirm(pkt []byte, srcAddr *net.UDPAddr, conn *net.U
 	}
 	uc, err := net.DialUDP("udp4", nil, wgAddr)
 	if err != nil {
-		s.log.Error("icmp server: dial wg udp", zap.Error(err))
+		s.log.Error("icmp server: dial wg udp", zap.String("cause", netErrCause(err)))
 		return
 	}
 	sess.aeadRx = aeadRx
@@ -423,12 +423,14 @@ func (s *ICMPServer) handleData(pkt []byte, srcAddr *net.UDPAddr, conn *net.UDPC
 	sess.lastSeen = time.Now()
 	aead := sess.aeadRx
 	seq := binary.BigEndian.Uint32(pkt[4:8])
-	fresh := sess.rx.accept(seq)
+	// Check only. The window must not move for a packet nobody has
+	// authenticated yet: the sequence number is attacker-visible, so
+	// committing on receipt would let one forged packet carrying a maximal
+	// sequence push the window past every real packet and kill the session.
+	fresh := sess.rx.check(seq)
 	sess.mu.Unlock()
 
 	if !fresh {
-		// Replayed or too old to verify. Dropping before decryption also keeps
-		// a replay flood from costing any AEAD work.
 		return
 	}
 
@@ -439,7 +441,20 @@ func (s *ICMPServer) handleData(pkt []byte, srcAddr *net.UDPAddr, conn *net.UDPC
 	icmpSrvNonceInto(seq, &nonce)
 	plain, err := aead.Open(nil, nonce[:], ciphertext, hdr)
 	if err != nil {
-		s.log.Error("icmp server: decrypt data", zap.Error(err))
+		s.log.Error("icmp server: decrypt data", zap.String("cause", netErrCause(err)))
+		return
+	}
+
+	// Authenticated: only now may the window move. Re-checking under the lock
+	// closes the race where two copies of the same packet both passed the
+	// check above.
+	sess.mu.Lock()
+	stillFresh := sess.rx.check(seq)
+	if stillFresh {
+		sess.rx.commit(seq)
+	}
+	sess.mu.Unlock()
+	if !stillFresh {
 		return
 	}
 

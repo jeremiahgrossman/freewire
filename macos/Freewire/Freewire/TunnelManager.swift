@@ -224,11 +224,7 @@ final class TunnelManager: ObservableObject {
             // self-hosted server or a failed issuance; registering without one
             // lets the server decide rather than refusing to connect over a
             // rate-limiting mechanism.
-            let tok = await tokens.take()
-            let peer = try await api.registerPeer(
-                publicKeyBase64: identity.publicKeyBase64,
-                token: tok
-            )
+            let peer = try await registerPeer()
             peerToken = peer.peerToken
 
             let cfg = TunnelConfig(
@@ -283,6 +279,20 @@ final class TunnelManager: ObservableObject {
         }
     }
 
+    /// Registers a peer, spending a token when the server issues them.
+    ///
+    /// Every registration goes through here. Reconnect and path upgrade used to
+    /// call the API directly and passed no token, so against a token-issuing
+    /// server they returned 402 on every attempt: the client could connect once
+    /// and then never recover from a network change, a watchdog trip, or an
+    /// upgrade. One funnel means a future path cannot forget again.
+    private func registerPeer() async throws -> RegisteredPeer {
+        try await api.registerPeer(
+            publicKeyBase64: identity.publicKeyBase64,
+            token: await tokens.take()
+        )
+    }
+
     // MARK: - Reconnect
 
     private func doReconnect(startingAt attempt: Int) async {
@@ -298,8 +308,8 @@ final class TunnelManager: ObservableObject {
 
             do {
                 let server = try await api.fetchConfig()
-                let peer   = try await api.registerPeer(publicKeyBase64: identity.publicKeyBase64)
-                peerToken  = peer.peerToken
+                let peer  = try await registerPeer()
+                peerToken = peer.peerToken
 
                 let cfg = TunnelConfig(
                     privateKey:      identity.privateKeyBase64,
@@ -372,8 +382,8 @@ final class TunnelManager: ObservableObject {
 
         do {
             let server = try await api.fetchConfig()
-            let peer   = try await api.registerPeer(publicKeyBase64: identity.publicKeyBase64)
-            peerToken  = peer.peerToken
+            let peer  = try await registerPeer()
+            peerToken = peer.peerToken
 
             let cfg = TunnelConfig(
                 privateKey:      identity.privateKeyBase64,

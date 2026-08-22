@@ -23,10 +23,41 @@ type replayWindow struct {
 const replayWindowSize = 64
 
 // accept reports whether seq is fresh, recording it when it is.
+//
+// Prefer check/commit on any path where the packet has not yet been
+// authenticated. accept is only safe once the sender is known to hold the key.
 func (w *replayWindow) accept(seq uint32) bool {
+	if !w.check(seq) {
+		return false
+	}
+	w.commit(seq)
+	return true
+}
+
+// check reports whether seq would be accepted, without changing anything.
+//
+// Separate from commit because the window must not move for a packet that has
+// not been authenticated. Advancing on receipt looked like a cheap way to make
+// a replay flood cost no AEAD work, but the sequence number is attacker-visible
+// on both transports -- it rides in the DNS query name in cleartext -- so one
+// forged packet carrying seq 0xFFFFFFFF would push `highest` to the maximum and
+// every real packet afterwards would fall outside the window. The session stays
+// dead until eviction, from an attacker who holds no key material at all.
+func (w *replayWindow) check(seq uint32) bool {
 	switch {
 	case seq > w.highest:
-		// Advance, shifting the bitmap by the gap.
+		return true
+	case w.highest-seq >= replayWindowSize:
+		return false
+	default:
+		return w.bitmap&(uint64(1)<<(w.highest-seq)) == 0
+	}
+}
+
+// commit records seq as seen. Call only after the packet has been authenticated.
+func (w *replayWindow) commit(seq uint32) {
+	switch {
+	case seq > w.highest:
 		if shift := seq - w.highest; shift >= replayWindowSize {
 			w.bitmap = 0
 		} else {
@@ -34,18 +65,9 @@ func (w *replayWindow) accept(seq uint32) bool {
 		}
 		w.bitmap |= 1
 		w.highest = seq
-		return true
-
 	case w.highest-seq >= replayWindowSize:
-		// Too old to prove it is not a replay.
-		return false
-
+		// Outside the window; nothing to record.
 	default:
-		bit := uint64(1) << (w.highest - seq)
-		if w.bitmap&bit != 0 {
-			return false // already seen
-		}
-		w.bitmap |= bit
-		return true
+		w.bitmap |= uint64(1) << (w.highest - seq)
 	}
 }
