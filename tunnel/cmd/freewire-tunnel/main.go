@@ -410,6 +410,7 @@ func recordPins() {
 func setupRouting(tunName, bypassHost string) error {
 	// Repair anything a previous run left behind before adding more.
 	releaseStalePins()
+	restoreStaleDNS()
 
 	// Resolve bypass host to an IP if needed.
 	bypassIP := bypassHost
@@ -494,6 +495,18 @@ func setupRouting(tunName, bypassHost string) error {
 	// build has no path to it unless someone sets it in the launching shell.
 	if err := verifyTunnelCarriesTraffic(); err != nil {
 		return fmt.Errorf("tunnel routes installed but carry no traffic: %w", err)
+	}
+
+	// Move DNS last, once traffic is known to survive the tunnel. Pointing the
+	// system at a resolver that is only reachable through the tunnel before
+	// knowing the tunnel works would take name resolution down with it.
+	if err := setupDNS(); err != nil {
+		// Not fatal. A tunnel that carries traffic while DNS leaks is a real
+		// privacy loss and has to be said out loud, but refusing to connect
+		// over it leaves the user with neither protection nor a tunnel.
+		fmt.Fprintf(os.Stderr,
+			"freewire-tunnel: WARNING: could not take over DNS: %v\n"+
+				"freewire-tunnel: lookups may still go to the local network in cleartext\n", err)
 	}
 
 	return nil
@@ -590,6 +603,11 @@ func interfaceForDest(dest string) (string, error) {
 // The system default route is never touched now, so there is nothing to
 // restore: removing the two halves hands traffic back to it automatically.
 func cleanupRouting(tunName, bypassHost string) {
+	// DNS first. The resolvers it points at are only reachable through the
+	// tunnel, so restoring them after tearing the routes down would leave a
+	// window with no working name resolution.
+	cleanupDNS()
+
 	for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
 		exec.Command(routeBin, "-q", "-n", "delete", "-inet", half).Run() //nolint:errcheck
 	}
@@ -616,6 +634,146 @@ func cleanupRouting(tunName, bypassHost string) {
 // so cleanup restores exactly what was touched.
 var ipv6Services []string
 
+// Tunnel DNS.
+//
+// Routing all traffic through the tunnel does not move DNS with it. The system
+// resolver is usually the local router, which sits on the link's own subnet, and
+// that subnet route is more specific than 0.0.0.0/1 -- so every lookup keeps
+// going to the local network in cleartext while the traffic it resolves is
+// tunneled. Measured on a real connection: web traffic egressed from the VPN
+// server while queries were answered by the ISP's resolver.
+//
+// That is the leak a VPN is most expected to close. On the captive-portal
+// networks this product exists for, the operator would otherwise see every
+// domain visited, which is most of the browsing history in practice.
+//
+// Cloudflare's resolvers are used because the tech stack already fixes on them,
+// and they are reached through the tunnel like any other address.
+var tunnelResolvers = []string{"1.1.1.1", "1.0.0.1"}
+
+// savedDNSFile records each service's original resolvers.
+//
+// Same reasoning as pinnedRoutesFile, though the failure is gentler than the
+// pinned-route one. A killed run leaves the system pointed at 1.1.1.1, and the
+// split-default routes vanish with the utun interface, so 1.1.1.1 stays
+// reachable by the ordinary path: name resolution keeps working, it is just not
+// the resolver the user chose. This file is what lets the next run give their
+// own choice back.
+const savedDNSFile = "/var/run/freewire-saved-dns"
+
+// dnsSaved maps a network service to the resolver list it had before.
+// "Empty" is recorded literally, because that is what networksetup expects to
+// restore a service to DHCP-provided resolvers.
+var dnsSaved = map[string]string{}
+
+// restoreStaleDNS puts back resolvers left redirected by a previous run.
+func restoreStaleDNS() {
+	data, err := os.ReadFile(savedDNSFile)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		service, servers, ok := strings.Cut(strings.TrimSpace(line), "\t")
+		if !ok || service == "" {
+			continue
+		}
+		args := append([]string{"-setdnsservers", service}, strings.Fields(servers)...)
+		if len(args) == 2 {
+			args = append(args, "Empty")
+		}
+		exec.Command(networksetupBin, args...).Run() //nolint:errcheck
+		fmt.Fprintf(os.Stderr, "freewire-tunnel: restored stale DNS for %q\n", service)
+	}
+	os.Remove(savedDNSFile) //nolint:errcheck
+}
+
+func recordSavedDNS() {
+	if len(dnsSaved) == 0 {
+		os.Remove(savedDNSFile) //nolint:errcheck
+		return
+	}
+	var b strings.Builder
+	for service, servers := range dnsSaved {
+		b.WriteString(service + "\t" + servers + "\n")
+	}
+	os.WriteFile(savedDNSFile, []byte(b.String()), 0o644) //nolint:errcheck
+}
+
+// setupDNS points every active network service at the tunnel's resolvers.
+//
+// Failure is reported but not fatal. A tunnel that carries traffic while DNS
+// leaks is a real privacy loss and the user must be told, but it is still
+// better than no tunnel -- whereas refusing to connect over it would leave them
+// with neither.
+func setupDNS() error {
+	names, err := activeNetworkServices()
+	if err != nil {
+		return err
+	}
+	var failed []string
+	for _, name := range names {
+		out, err := exec.Command(networksetupBin, "-getdnsservers", name).Output()
+		if err != nil {
+			failed = append(failed, name)
+			continue
+		}
+		// networksetup answers with a sentence when nothing is configured.
+		current := strings.TrimSpace(string(out))
+		if strings.Contains(current, "There aren't any") {
+			current = ""
+		} else {
+			current = strings.Join(strings.Fields(current), " ")
+		}
+
+		args := append([]string{"-setdnsservers", name}, tunnelResolvers...)
+		if err := exec.Command(networksetupBin, args...).Run(); err != nil {
+			failed = append(failed, name)
+			continue
+		}
+		dnsSaved[name] = current
+	}
+	recordSavedDNS()
+
+	if len(dnsSaved) == 0 {
+		return fmt.Errorf("no network service accepted -setdnsservers")
+	}
+	if len(failed) > 0 {
+		return fmt.Errorf("DNS still leaks on: %s", strings.Join(failed, ", "))
+	}
+	return nil
+}
+
+// cleanupDNS restores exactly the services setupDNS changed.
+func cleanupDNS() {
+	for name, servers := range dnsSaved {
+		args := append([]string{"-setdnsservers", name}, strings.Fields(servers)...)
+		if len(args) == 2 {
+			args = append(args, "Empty")
+		}
+		exec.Command(networksetupBin, args...).Run() //nolint:errcheck
+	}
+	dnsSaved = map[string]string{}
+	recordSavedDNS()
+}
+
+// activeNetworkServices lists services that networksetup will accept commands
+// for, skipping the header line and services marked disabled.
+func activeNetworkServices() ([]string, error) {
+	out, err := exec.Command(networksetupBin, "-listallnetworkservices").Output()
+	if err != nil {
+		return nil, fmt.Errorf("list network services: %w", err)
+	}
+	var names []string
+	for _, line := range strings.Split(string(out), "\n") {
+		name := strings.TrimSpace(line)
+		if name == "" || strings.HasPrefix(name, "An asterisk") || strings.HasPrefix(name, "*") {
+			continue
+		}
+		names = append(names, name)
+	}
+	return names, nil
+}
+
 // setIPv6 turns IPv6 on or off for every active network service.
 //
 // Disabling is a blunt instrument, and deliberate: the alternative is v6
@@ -623,18 +781,12 @@ var ipv6Services []string
 // "automatic", which is the macOS default.
 func setIPv6(on bool) error {
 	if !on {
-		out, err := exec.Command(networksetupBin, "-listallnetworkservices").Output()
+		names, err := activeNetworkServices()
 		if err != nil {
-			return fmt.Errorf("list network services: %w", err)
+			return err
 		}
 		ipv6Services = nil
-		for _, line := range strings.Split(string(out), "\n") {
-			name := strings.TrimSpace(line)
-			// The first line is a header, and a leading asterisk marks a
-			// disabled service.
-			if name == "" || strings.HasPrefix(name, "An asterisk") || strings.HasPrefix(name, "*") {
-				continue
-			}
+		for _, name := range names {
 			if err := exec.Command(networksetupBin, "-setv6off", name).Run(); err == nil {
 				ipv6Services = append(ipv6Services, name)
 			}
