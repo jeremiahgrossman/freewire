@@ -142,9 +142,9 @@ Once any path establishes a tunnel, the client renegotiates: if a faster path is
 **Requirements:**
 - One server region is available at launch; additional regions may be added post-launch
 - No account or login is required. A device's WireGuard public key — generated locally at first launch — is its sole identity on managed servers.
-- The client presents available server regions and allows the user to select one
+- The client presents available server regions and allows the user to select one. **Not built.** One region exists and the client connects to a configured server address, so there is nothing to choose between. This becomes real when a second region does.
 - Connection to a managed server must succeed within 10 seconds under normal network conditions
-- Server availability is displayed in the client (connected, degraded, unavailable)
+- Server availability is displayed in the client (connected, degraded, unavailable). **Partially built.** The client surfaces connected, reconnecting, blocked, portal and no-network states, and the server reports capacity, but there is no degraded indicator distinct from a failed connection.
 - Freewire's managed servers are free to use with no in-app payment or donation mechanism
 - Freewire's managed servers support the captive portal bypass protocol (6.1)
 
@@ -316,23 +316,32 @@ iOS is not in scope at launch. When iOS work resumes, the requirements below app
 ## 7. Integrations
 
 - **Cloud provider APIs** (for self-hosted setup flow): DigitalOcean, AWS, or equivalent — to be determined
-- **Apple NetworkExtension framework**: NEPacketTunnelProvider (iOS and macOS) — required before TestFlight distribution; required before App Store submission; NEHotspotHelper (iOS) — separate entitlement, enables automatic captive portal authentication, degrades gracefully without it. Both require explicit Apple approval. See `apple-entitlement-application.md`.
+- **Apple NetworkExtension framework**: NEPacketTunnelProvider (iOS only) — **not used on macOS.** The macOS client drives a `utun` device directly with wireguard-go, because the transports need raw socket and routing control that NEPacketTunnelProvider does not expose, and because that choice permanently rules out the Mac App Store. Required before TestFlight distribution; required before App Store submission; NEHotspotHelper (iOS) — separate entitlement, enables automatic captive portal authentication, degrades gracefully without it. Both require explicit Apple approval. See `apple-entitlement-application.md`.
 - **Apple Developer ID + Notarization**: Required for the macOS direct download path
 - **TestFlight**: Beta distribution for iOS pre-release builds
 - **Sparkle**: Auto-update for macOS direct download path (decided; see §6.8)
-- **Protocol libraries**: WireGuard (fast path on open networks), custom DNS tunnel implementation (captive portal bypass), platform TLS stack (TLS/443 path)
+- **Protocol libraries**: wireguard-go over `utun` (fast path on open networks), custom DNS and ICMP tunnel implementations in Go (captive portal bypass), uTLS for the TLS/443 and HTTP CONNECT paths — **not the platform TLS stack**, because the fingerprint has to be rotated among real browser profiles so a portal's DPI cannot identify the handshake. The control plane uses `Network.framework` with its own verification, since App Transport Security rejects a self-signed certificate before any pinning code is consulted.
 - **Authoritative DNS infrastructure**: Single authoritative DNS server for `tunnel.freewire.com` at launch (US-East, unicast). Anycast (BGP, multi-region) is a post-launch optimization — see `anycast-dns-infrastructure.md`
 
 ---
 
 ## 8. Non-Functional Requirements
 
+> **Measured against the build, 2026-08-22.** Throughput on TLS/443 (166 Mbps
+> against a 50 Mbps floor) and time to connected (2.6s against a 10s ceiling)
+> are met with margin. Two remain untested rather than failed: latency overhead
+> was never isolated — 108 ms was measured through the tunnel to us-east-1, but
+> overhead is that minus the direct RTT to the same host, which was not
+> recorded — and DNS tunnel throughput has never been measured at all, only its
+> ability to carry traffic. Uptime does not apply to a single development
+> server.
+
 - **Latency overhead:** VPN tunnel must add no more than 20ms average latency on TLS/443 and open-network paths; DNS tunnel path is exempt (inherent protocol latency)
 - **Throughput (TLS/443 and open-network paths):** Must support at least 50 Mbps sustained throughput on managed servers
 - **Throughput (DNS tunnel path):** Must sustain at least 500 Kbps; target 1–2 Mbps with optimized implementation
 - **Uptime:** Managed server availability must be ≥99.5% per region per calendar month
 - **Client startup time:** App must reach the connected state within 10 seconds on a normal network after a user taps Connect
-- **Cross-platform parity:** Feature set must be equivalent across all four platforms at launch; no platform may ship a materially reduced feature set labeled as MVP
+- **Cross-platform parity:** Feature set must be equivalent across all platforms *that ship*; no platform may ship a materially reduced feature set labeled as MVP. **Corrected:** this said "all four platforms at launch", which contradicts Decision 2 — only macOS ships at launch, with iOS, Android and Windows post-launch. The parity requirement binds whenever a second platform appears, not at launch.
 - **Data isolation:** For managed servers, no user's traffic is accessible to another user
 - **No logging of user traffic content:** Traffic content must not be logged on managed servers under any circumstances
 
@@ -424,7 +433,7 @@ iOS is not in scope at launch. When iOS work resumes, the requirements below app
 
 26. **Multipath transports** — resolved: not pursued for throughput; the redundancy half was implemented instead. Running permitted transports in parallel does not pay, because the paths differ by roughly 300× (166 Mbps measured on TLS/443 against 0.5–2 Mbps for the DNS tunnel), and WireGuard's 8128-packet anti-replay window would reject traffic arriving late on the slow path while TCP inside the tunnel thrashed its retransmit timer across the mismatched latencies. What did pay: reconnect now names the transport that was working instead of restarting the chain from the top, which on a portal permitting only the DNS tunnel had been spending most of the fallback budget to arrive back where it started, with the user unprotected throughout. See `technical-architecture.md` §10.
 
-27. **DNS and ICMP handshake authentication** — deferred until Freewire serves people other than its operator. Both handshakes use unauthenticated ephemeral DH, so the on-path adversary those transports exist to defeat can sit in the middle of them. An active attacker gains transport framing and the ability to disrupt; they do not gain traffic, because the WireGuard session inside is authenticated by the pinned server key. The fix when picked up is to mix the server's known public key into the handshake, needing no new key material — it is deferred because it is a protocol change to both ends of both transports, and because today the on-path adversary is a portal the sole operator chose to connect to.
+27. **DNS and ICMP handshake authentication** — deferred until Freewire serves people other than its operator. See `DECISIONS.md` §DNS-ICMP-HANDSHAKE-AUTH. Both handshakes use unauthenticated ephemeral DH, so the on-path adversary those transports exist to defeat can sit in the middle of them. An active attacker gains transport framing and the ability to disrupt; they do not gain traffic, because the WireGuard session inside is authenticated by the pinned server key. The fix when picked up is to mix the server's known public key into the handshake, needing no new key material — it is deferred because it is a protocol change to both ends of both transports, and because today the on-path adversary is a portal the sole operator chose to connect to.
 
 ---
 
