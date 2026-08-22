@@ -20,7 +20,16 @@ type ipPool struct {
 	reserved  int // addresses excluded from the pool (network, server, broadcast)
 }
 
+// newIPPool builds a pool over network.
+//
+// Returns nil for anything that is not a usable IPv4 CIDR. To4() yields nil for
+// an IPv6 or malformed network, and indexing that nil panicked the server on
+// startup: a typo in the config file crashed the process with a runtime error
+// rather than a message naming the field.
 func newIPPool(network *net.IPNet, serverIP string) *ipPool {
+	if network == nil || network.IP.To4() == nil || len(network.Mask) != net.IPv4len {
+		return nil
+	}
 	base := ipToUint32(network.IP.To4())
 	mask := binary.BigEndian.Uint32(net.IP(network.Mask).To4())
 	broadcast := base | ^mask

@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base32"
@@ -229,8 +230,7 @@ func dnsHandshake(cfg Config, dnsServer string) (*dnsClientSession, error) {
 
 // dnsConfirmMAC computes SHA256(sessionKey || "confirm" || token)[:16].
 func dnsConfirmMAC(key [32]byte, token []byte) []byte {
-	h := sha256.New()
-	h.Write(key[:])
+	h := hmac.New(sha256.New, key[:])
 	h.Write([]byte("confirm"))
 	h.Write(token)
 	return h.Sum(nil)[:16]
@@ -596,14 +596,26 @@ func dnsQuery(server, name string, deadline time.Time) ([]byte, error) {
 	if _, err := c.Write(query); err != nil {
 		return nil, fmt.Errorf("dns query: write: %w", err)
 	}
+	wantID := binary.BigEndian.Uint16(query[:2])
 
+	// Read until the transaction ID matches. Sockets are pooled and UDP is
+	// unordered, so a late reply to an earlier query on this socket would
+	// otherwise be accepted as the answer to this one -- decrypted under the
+	// wrong sequence, and silently wrong rather than merely late.
 	buf := make([]byte, 4096)
-	n, err := c.Read(buf)
-	if err != nil {
-		return nil, fmt.Errorf("dns query: read: %w", err)
+	for {
+		n, err := c.Read(buf)
+		if err != nil {
+			return nil, fmt.Errorf("dns query: read: %w", err)
+		}
+		if n >= 2 && binary.BigEndian.Uint16(buf[:2]) == wantID {
+			reusable = true
+			out := make([]byte, n)
+			copy(out, buf[:n])
+			return out, nil
+		}
+		// Wrong ID: a stale reply. Keep reading until the deadline expires.
 	}
-	reusable = true
-	return buf[:n], nil
 }
 
 // dnsConnPool reuses connected UDP sockets to the local resolver. Dialing per

@@ -203,3 +203,36 @@ func TestUint32IPRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// newIPPool indexed the result of To4() without checking it, so an IPv6 or
+// malformed tunnel_cidr crashed the server on startup with a runtime error
+// instead of a message naming the field.
+func TestNewIPPoolRejectsNonIPv4(t *testing.T) {
+	for _, cidr := range []string{"fd00::/64", "2001:db8::/32", "::1/128"} {
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			t.Fatalf("parse %s: %v", cidr, err)
+		}
+		if p := newIPPool(network, "10.0.0.1"); p != nil {
+			t.Errorf("%s: returned a pool for a non-IPv4 network", cidr)
+		}
+	}
+}
+
+func TestNewIPPoolRejectsNilNetwork(t *testing.T) {
+	if p := newIPPool(nil, "10.0.0.1"); p != nil {
+		t.Error("returned a pool for a nil network")
+	}
+}
+
+func TestNewIPPoolAcceptsIPv4(t *testing.T) {
+	for _, cidr := range []string{"10.0.0.0/24", "192.168.5.0/24", "172.16.0.0/16"} {
+		_, network, err := net.ParseCIDR(cidr)
+		if err != nil {
+			t.Fatalf("parse %s: %v", cidr, err)
+		}
+		if p := newIPPool(network, "10.0.0.1"); p == nil {
+			t.Errorf("%s: rejected a usable IPv4 network", cidr)
+		}
+	}
+}

@@ -288,6 +288,15 @@ func skipEgressCheck() bool {
 	return false
 }
 
+// Absolute paths for every external binary.
+//
+// This process runs as root. Invoking "route" or "ifconfig" by bare name
+// resolves through PATH, so anything earlier in PATH runs with root privileges.
+const (
+	routeBin    = "/sbin/route"
+	ifconfigBin = "/sbin/ifconfig"
+)
+
 // tunnelProbeAddr is dialed to decide whether traffic survives the tunnel
 // routes. A TCP handshake against a well-known anycast resolver: DNS
 // resolution is deliberately not used, since resolution itself may be what a
@@ -321,7 +330,7 @@ func releaseStalePins() {
 		if ip == "" || net.ParseIP(ip) == nil {
 			continue
 		}
-		exec.Command("route", "-q", "-n", "delete", "-host", ip).Run() //nolint:errcheck
+		exec.Command(routeBin, "-q", "-n", "delete", "-host", ip).Run() //nolint:errcheck
 		fmt.Fprintf(os.Stderr, "freewire-tunnel: released a stale pinned route for %s\n", ip)
 	}
 	os.Remove(pinnedRoutesFile) //nolint:errcheck
@@ -387,8 +396,8 @@ func setupRouting(tunName, bypassHost string) error {
 	for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
 		// -ifscope keeps the entry tied to the tunnel; delete first so a stale
 		// entry from an unclean exit cannot make the add fail.
-		exec.Command("route", "-q", "-n", "delete", "-inet", half).Run() //nolint:errcheck
-		if out, err := exec.Command("route", "-q", "-n", "add", "-inet", half,
+		exec.Command(routeBin, "-q", "-n", "delete", "-inet", half).Run() //nolint:errcheck
+		if out, err := exec.Command(routeBin, "-q", "-n", "add", "-inet", half,
 			"-interface", tunName).CombinedOutput(); err != nil {
 			return fmt.Errorf("add %s via %s: %w — %s", half, tunName, err,
 				strings.TrimSpace(string(out)))
@@ -451,7 +460,7 @@ func pinOutsideTunnel(ip string) error {
 	}
 
 	// A stale entry from an unclean exit would make the add fail.
-	exec.Command("route", "-q", "-n", "delete", "-host", ip).Run() //nolint:errcheck
+	exec.Command(routeBin, "-q", "-n", "delete", "-host", ip).Run() //nolint:errcheck
 
 	// Prefer the gateway when there is one; otherwise the destination is on a
 	// directly attached link and must be pinned to that interface.
@@ -465,7 +474,7 @@ func pinOutsideTunnel(ip string) error {
 		return fmt.Errorf("no gateway or interface for %s", ip)
 	}
 
-	if out, err := exec.Command("route", args...).CombinedOutput(); err != nil {
+	if out, err := exec.Command(routeBin, args...).CombinedOutput(); err != nil {
 		return fmt.Errorf("%w — %s", err, strings.TrimSpace(string(out)))
 	}
 	bypassRoutes = append(bypassRoutes, ip)
@@ -476,7 +485,7 @@ func pinOutsideTunnel(ip string) error {
 // routeTo reports the gateway and interface the system currently uses for dest.
 // The gateway is empty when dest sits on a directly attached link.
 func routeTo(dest string) (gateway, iface string, err error) {
-	out, err := exec.Command("route", "-n", "get", dest).CombinedOutput()
+	out, err := exec.Command(routeBin, "-n", "get", dest).CombinedOutput()
 	if err != nil {
 		return "", "", fmt.Errorf("route get %s: %w", dest, err)
 	}
@@ -515,16 +524,16 @@ func interfaceForDest(dest string) (string, error) {
 // restore: removing the two halves hands traffic back to it automatically.
 func cleanupRouting(tunName, bypassHost string) {
 	for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
-		exec.Command("route", "-q", "-n", "delete", "-inet", half).Run() //nolint:errcheck
+		exec.Command(routeBin, "-q", "-n", "delete", "-inet", half).Run() //nolint:errcheck
 	}
 
 	// Remove the tunnel subnet route added by configureInterface.
-	exec.Command("route", "-q", "-n", "delete", "-inet", "10.0.0.0/24").Run() //nolint:errcheck
+	exec.Command(routeBin, "-q", "-n", "delete", "-inet", "10.0.0.0/24").Run() //nolint:errcheck
 
 	// Remove every host route pinned outside the tunnel, tracked so a resolver
 	// route is not left behind when it differs from the server address.
 	for _, ip := range bypassRoutes {
-		exec.Command("route", "-q", "-n", "delete", "-host", ip).Run() //nolint:errcheck
+		exec.Command(routeBin, "-q", "-n", "delete", "-host", ip).Run() //nolint:errcheck
 	}
 	bypassRoutes = nil
 	recordPins()
@@ -535,14 +544,14 @@ func configureInterface(tunName, tunnelIP, peerIP string) error {
 	if net.ParseIP(tunnelIP) == nil {
 		return fmt.Errorf("bad tunnel IP: %s", tunnelIP)
 	}
-	if out, err := exec.Command("ifconfig", tunName, tunnelIP, peerIP, "up").CombinedOutput(); err != nil {
+	if out, err := exec.Command(ifconfigBin, tunName, tunnelIP, peerIP, "up").CombinedOutput(); err != nil {
 		return fmt.Errorf("ifconfig addr: %w — %s", err, strings.TrimSpace(string(out)))
 	}
-	if out, err := exec.Command("ifconfig", tunName, "mtu", "1420").CombinedOutput(); err != nil {
+	if out, err := exec.Command(ifconfigBin, tunName, "mtu", "1420").CombinedOutput(); err != nil {
 		return fmt.Errorf("ifconfig mtu: %w — %s", err, strings.TrimSpace(string(out)))
 	}
 	// Add tunnel subnet route (non-fatal if already exists).
-	exec.Command("route", "-q", "-n", "add", "-inet", "10.0.0.0/24", "-interface", tunName).Run() //nolint:errcheck
+	exec.Command(routeBin, "-q", "-n", "add", "-inet", "10.0.0.0/24", "-interface", tunName).Run() //nolint:errcheck
 	return nil
 }
 

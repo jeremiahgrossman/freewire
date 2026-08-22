@@ -84,10 +84,18 @@ func NewManager(cfg *config.Config, log *zap.Logger) (*Manager, error) {
 		return nil, fmt.Errorf("parse tunnel cidr: %w", err)
 	}
 
+	pool := newIPPool(network, cfg.ServerTunnelIP)
+	if pool == nil {
+		dev.Close()
+		return nil, fmt.Errorf(
+			"tunnel_cidr %q is not a usable IPv4 network; the tunnel pool is IPv4 only",
+			cfg.TunnelCIDR)
+	}
+
 	return &Manager{
 		dev:   dev,
 		log:   log,
-		pool:  newIPPool(network, cfg.ServerTunnelIP),
+		pool:  pool,
 		peers: make(map[string]*Peer),
 	}, nil
 }
@@ -164,7 +172,7 @@ func (m *Manager) AddPeer(peerToken, publicKeyBase64 string, capacity int) (*Pee
 	peer.TunnelIPv6 = tunnelIPv6(tunnelIP)
 	m.mu.Unlock()
 
-	m.log.Info("peer added", zap.String("session", peerToken), zap.String("tunnel_ip", tunnelIP))
+	m.log.Info("peer added", zap.String("session", redactToken(peerToken)), zap.String("tunnel_ip", tunnelIP))
 	return peer, nil
 }
 
@@ -193,7 +201,7 @@ func (m *Manager) RemovePeer(peerToken string) error {
 		return fmt.Errorf("remove peer from wireguard: %w", err)
 	}
 
-	m.log.Info("peer removed", zap.String("session", peerToken))
+	m.log.Info("peer removed", zap.String("session", redactToken(peerToken)))
 	return nil
 }
 
@@ -249,4 +257,17 @@ func tunnelIPv6(ipStr string) string {
 		return ""
 	}
 	return fmt.Sprintf("fd00::%x", ip[3])
+}
+
+// redactToken renders a peer token safe to log.
+//
+// The token is the only credential authorising a peer's removal, so a log line
+// containing one is a credential sitting in a file that outlives the session
+// and is read by more people than the peer. The prefix correlates entries
+// without being enough to use.
+func redactToken(token string) string {
+	if len(token) <= 6 {
+		return "redacted"
+	}
+	return token[:6] + "\u2026"
 }

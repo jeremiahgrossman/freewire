@@ -216,7 +216,7 @@ func tryHTTPConnect(cfg Config) (net.Conn, error) {
 
 // getDefaultGateway parses `route get default` output to find the gateway IP.
 func getDefaultGateway() (string, error) {
-	out, err := exec.Command("route", "get", "default").CombinedOutput()
+	out, err := exec.Command(routeBin, "get", "default").CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("route get default: %w", err)
 	}

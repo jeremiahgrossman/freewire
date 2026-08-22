@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -447,8 +448,7 @@ func (s *ICMPServer) handleData(pkt []byte, srcAddr *net.UDPAddr, conn *net.UDPC
 
 // icmpSrvConfirmMAC = SHA256(sessionKey || "confirm" || sessionToken)[:16].
 func icmpSrvConfirmMAC(key [32]byte, token [2]byte) []byte {
-	h := sha256.New()
-	h.Write(key[:])
+	h := hmac.New(sha256.New, key[:])
 	h.Write([]byte("confirm"))
 	h.Write(token[:])
 	return h.Sum(nil)[:16]

@@ -44,7 +44,7 @@ func (s *Server) handleRegisterPeer(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "PEER_LIMIT_REACHED", "server is at capacity")
 			return
 		}
-		s.log.Error("add peer failed", zap.String("session", peerToken), zap.Error(err))
+		s.log.Error("add peer failed", zap.String("session", redactToken(peerToken)), zap.Error(err))
 		writeError(w, http.StatusInternalServerError, "SERVER_ERROR", "failed to register peer")
 		return
 	}
@@ -60,7 +60,7 @@ func (s *Server) handleRegisterPeer(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRemovePeer(w http.ResponseWriter, r *http.Request) {
 	token := r.PathValue("token")
 	if err := s.wg.RemovePeer(token); err != nil {
-		s.log.Error("remove peer failed", zap.String("session", token), zap.Error(err))
+		s.log.Error("remove peer failed", zap.String("session", redactToken(token)), zap.Error(err))
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -69,4 +69,17 @@ func newToken() string {
 	b := make([]byte, 16)
 	rand.Read(b) //nolint:errcheck
 	return hex.EncodeToString(b)
+}
+
+// redactToken renders a peer token safe to log.
+//
+// The token is the only credential that authorises removing a peer, so a log
+// line containing one is a credential in a file that outlives the session and
+// is read by more people than the peer. The prefix is enough to correlate
+// entries without being enough to use.
+func redactToken(token string) string {
+	if len(token) <= 6 {
+		return "redacted"
+	}
+	return token[:6] + "…"
 }

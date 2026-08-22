@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -230,8 +231,7 @@ func icmpHandshake(cfg Config, uc *net.UDPConn) (*icmpClientSession, error) {
 
 // icmpConfirmMAC = SHA256(sessionKey || "confirm" || sessionToken)[:16].
 func icmpConfirmMAC(key [32]byte, token [2]byte) []byte {
-	h := sha256.New()
-	h.Write(key[:])
+	h := hmac.New(sha256.New, key[:])
 	h.Write([]byte("confirm"))
 	h.Write(token[:])
 	return h.Sum(nil)[:16]

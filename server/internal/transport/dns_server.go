@@ -3,6 +3,7 @@ package transport
 import (
 	"context"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base32"
@@ -191,8 +192,6 @@ func (s *DNSServer) evictLoop(ctx context.Context) {
 				sess := v.(*dnsSession)
 				sess.mu.Lock()
 				ls := sess.lastSeen
-				sess.mu.Unlock()
-				sess.mu.Lock()
 				active := sess.activated
 				sess.mu.Unlock()
 
@@ -826,8 +825,7 @@ func uint32BESrv(v uint32) []byte {
 
 // dnsSrvConfirmMAC = SHA256(sessionKey || "confirm" || token)[:16].
 func dnsSrvConfirmMAC(key [32]byte, token []byte) []byte {
-	h := sha256.New()
-	h.Write(key[:])
+	h := hmac.New(sha256.New, key[:])
 	h.Write([]byte("confirm"))
 	h.Write(token)
 	return h.Sum(nil)[:16]
