@@ -138,8 +138,12 @@ the moment anyone else connects.
   characters rather than rejecting them. All of it is blocked behind the
   Developer ID, because none of it can be tested without installing the helper —
   and fixing untestable pf code is how the wifi broke earlier in this project.
-- ECH is not implemented. uTLS hides the handshake fingerprint, but SNI still
-  names the destination in cleartext.
+- ECH is not implemented, and is worth less than it appears. It could only ever
+  cover Freewire's *own* TLS connection to the server, to stop a portal blocking
+  by hostname — and on the current IP-addressed deployment that ClientHello
+  carries no SNI at all, confirmed by capture. It cannot touch the SNI the
+  server sees from user traffic: that handshake is end to end between the
+  browser and the site. See WHAT-THE-SERVER-CAN-SEE in `DECISIONS.md`.
 - DoH is hardcoded to Cloudflare 1.1.1.1: a single point of failure and of trust
   for a privacy-sensitive signal.
 - `captive-portal-testing-guide.md`'s `proxy.py` listing is broken — its relay

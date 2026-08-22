@@ -106,14 +106,21 @@ Two separate causes, worth keeping distinct because only one is fixable:
 - **Destination IP is structurally necessary.** A VPN server forwards packets to
   their destination and cannot do that without knowing the destination. No
   single-hop VPN can avoid it, and any that claims otherwise is wrong.
-- **The hostname is incidental.** SNI travels in the clear inside the TLS
-  handshake, which the server merely relays. It never needs to read it. ECH
-  removes it with no effect on function.
+- **The hostname is incidental, but Freewire cannot remove it.** SNI travels in
+  the clear inside the TLS handshake, which the server merely relays. The server
+  never needs to read it — but that handshake is end to end between the user's
+  browser and the site, so Freewire cannot rewrite or encrypt it without
+  breaking the connection. ECH is deployed by the browser and the destination,
+  not by a VPN in the middle. Freewire benefits passively when both ends support
+  it, and can do nothing to bring that about.
 
-The distinction matters because of shared hosting. An IP behind a CDN says only
-"something at Cloudflare"; the SNI says which site. For much of the web the
-hostname is far more revealing than the address, which is what makes ECH worth
-building even though addresses stay visible.
+  This corrects an earlier claim in this file that ECH would close the gap. It
+  will not. It was written from the assumption that ECH was ours to deploy.
+
+The distinction still matters because of shared hosting. An IP behind a CDN says
+only "something at Cloudflare"; the SNI says which site. For much of the web the
+hostname is far more revealing than the address. But the party who can act on
+that is the browser vendor and the site, not us.
 
 ### What this does not change
 
@@ -131,9 +138,10 @@ screen a user opens specifically to check this.
 
 ### What would reopen it
 
-- **ECH shipping with real coverage.** It hides the hostname for sites that
-  support it, which is a meaningful share but not most sites. It would justify
-  softening the claim, never removing it.
+- **Browsers and sites deploying ECH broadly.** Where both ends support it the
+  hostname stops being visible to anything in the middle, Freewire included.
+  That would justify softening the claim, never removing it, and it happens
+  without us building anything.
 - **A multi-hop architecture.** Genuinely not knowing where a user goes requires
   two independent operators: one that knows who you are and not where you went,
   another that knows where you went and not who you are. This is how iCloud
