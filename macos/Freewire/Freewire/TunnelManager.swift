@@ -497,7 +497,12 @@ final class TunnelManager: ObservableObject {
         await Task.detached(priority: .userInitiated) {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-            p.arguments = ["/usr/bin/pkill", "-x", "freewire-tunnel"]
+            // -n so a missing sudo rule fails immediately instead of blocking
+            // on a password prompt nobody can answer. `--stop` returns only
+            // once the tunnel has restored routes, resolvers and IPv6, so
+            // waiting here waits for the cleanup rather than for a signal to
+            // be delivered.
+            p.arguments = ["-n", TunnelManager.helperPath, "--stop"]
             p.standardOutput = FileHandle.nullDevice
             p.standardError  = FileHandle.nullDevice
             try? p.run()
@@ -508,7 +513,15 @@ final class TunnelManager: ObservableObject {
 
     // MARK: - Tunnel launch
 
-    private var tunnelHelperURL: URL? {
+    /// Path to the tunnel helper, shared with the termination handler.
+    ///
+    /// `nonisolated` because both callers need it off the main actor: the
+    /// termination handler cannot await a main-actor property, and killTunnel
+    /// runs on a detached task. The value depends only on the bundle layout and
+    /// the filesystem, so there is no actor state to protect.
+    nonisolated static var helperPath: String { tunnelHelperURL?.path ?? "" }
+
+    nonisolated static var tunnelHelperURL: URL? {
         if let bundled = Bundle.main.executableURL?
             .deletingLastPathComponent()
             .appendingPathComponent("freewire-tunnel"),
@@ -528,7 +541,7 @@ final class TunnelManager: ObservableObject {
     }
 
     private func launchTunnel(config: TunnelConfig) async throws -> (String, TunnelTransport) {
-        guard let helperURL = tunnelHelperURL else {
+        guard let helperURL = Self.tunnelHelperURL else {
             throw TunnelError.helperNotFound
         }
 

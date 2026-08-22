@@ -43,14 +43,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // Signal the tunnel, then wait for it to actually go.
         //
-        // waitUntilExit() here waits for *pkill*, not for the tunnel to handle
-        // SIGTERM and run its routing cleanup. The app could exit first, so the
-        // tunnel's routes outlived it. That matters less since the tunnel stopped
-        // replacing the default route -- its routes now die with the interface --
-        // but waiting is still what makes cleanup deterministic rather than a race.
+        // `--stop` waits for the tunnel to finish its cleanup before returning,
+        // so waiting on this process waits on the thing that matters. The
+        // previous `sudo pkill` returned as soon as the signal was delivered,
+        // which made cleanup a race the app could lose by exiting first.
+        //
+        // It also removes the passwordless sudo rule that pkill required. That
+        // rule let anything running as this user kill any process on the
+        // machine as root, to solve a problem belonging to one binary.
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
-        p.arguments = ["-n", "/usr/bin/pkill", "-x", "freewire-tunnel"]
+        p.arguments = ["-n", TunnelManager.helperPath, "--stop"]
         p.standardOutput = FileHandle.nullDevice
         p.standardError  = FileHandle.nullDevice
         try? p.run()

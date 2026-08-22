@@ -9,12 +9,19 @@ set -uo pipefail
 
 STATE="/tmp/freewire-test"
 SERVER="${FREEWIRE_SERVER:-52.203.246.145}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if pgrep -f "freewire-tunnel$" >/dev/null 2>&1; then
   echo "==> stopping tunnel"
-  # SIGTERM so the tunnel runs its own cleanup. SIGKILL would leave exactly the
+  # `--stop` sends SIGTERM to the recorded pid and waits for the process to
+  # finish restoring routes, resolvers and IPv6. SIGKILL would leave exactly the
   # state the recovery paths exist for, which is a different test.
-  sudo -n /usr/bin/pkill -TERM -f "freewire-tunnel$" 2>/dev/null
+  #
+  # The tunnel binary is the only command with a passwordless sudo rule, and
+  # deliberately so: stopping used to go through `sudo pkill`, which needed a
+  # second rule letting anything running as this user kill any process on the
+  # machine as root.
+  sudo -n "$ROOT/tunnel/freewire-tunnel" --stop 2>/dev/null
   for _ in $(seq 1 20); do
     pgrep -f "freewire-tunnel$" >/dev/null 2>&1 || break
     sleep 0.5

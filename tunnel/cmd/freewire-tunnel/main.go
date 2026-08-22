@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -68,7 +69,23 @@ func (c *Config) applyDefaults() {
 	}
 }
 
+// pidFile lets `--stop` find a running tunnel.
+//
+// The alternative was `sudo pkill -x freewire-tunnel`, which needed a second
+// passwordless sudo rule covering pkill itself. That rule let anything running
+// as the user kill any process on the machine as root, security software
+// included, to solve a problem that belongs to one binary. Teaching the tunnel
+// to stop itself keeps the privileged surface at exactly one command, and
+// signalling a recorded pid is also precise where pkill matches on a name
+// anything can adopt.
+const pidFile = "/var/run/freewire-tunnel.pid"
+
 func main() {
+	// --stop signals a running tunnel and waits for it to clean up.
+	if len(os.Args) > 1 && os.Args[1] == "--stop" {
+		os.Exit(stopRunningTunnel())
+	}
+
 	var cfg Config
 	if err := json.NewDecoder(os.Stdin).Decode(&cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "freewire-tunnel: config: %v\n", err)
@@ -166,6 +183,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "freewire-tunnel: routing: %v\n", err)
 		os.Exit(1)
 	}
+
+	// Record the pid before announcing ready, so a caller that reacts to the
+	// ready line by stopping the tunnel always finds it.
+	writePIDFile()
+	defer os.Remove(pidFile) //nolint:errcheck
 
 	// Signal ready to the parent Swift process.
 	fmt.Printf("ready %s %s %s\n", tunName, cfg.TunnelIP, transportName)
@@ -365,6 +387,54 @@ var bypassRoutes []string
 // DHCP. That is not a hypothetical: a SIGKILL during testing left a pin on a
 // home router and broke wifi.
 const pinnedRoutesFile = "/var/run/freewire-pinned-routes"
+
+func writePIDFile() {
+	os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o644) //nolint:errcheck
+}
+
+// stopRunningTunnel signals the recorded tunnel and waits for it to exit.
+//
+// Waiting matters: the caller's next move is usually to start a new tunnel or
+// to check that routing was restored, and both are wrong while the old process
+// is still unwinding.
+func stopRunningTunnel() int {
+	data, err := os.ReadFile(pidFile)
+	if err != nil {
+		// Nothing recorded is a successful stop, not a failure: the caller
+		// wanted no tunnel running and there is none.
+		fmt.Fprintln(os.Stderr, "freewire-tunnel: no running tunnel recorded")
+		return 0
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 1 {
+		os.Remove(pidFile) //nolint:errcheck
+		fmt.Fprintln(os.Stderr, "freewire-tunnel: pid file unreadable; nothing to stop")
+		return 0
+	}
+
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		os.Remove(pidFile) //nolint:errcheck
+		return 0
+	}
+	// SIGTERM, never SIGKILL. The process has routes, resolvers and an IPv6
+	// setting to give back, and killing it outright leaves exactly the state
+	// the stale-recovery paths exist to repair.
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		os.Remove(pidFile) //nolint:errcheck
+		fmt.Fprintln(os.Stderr, "freewire-tunnel: no such process; nothing to stop")
+		return 0
+	}
+
+	for i := 0; i < 100; i++ {
+		if err := proc.Signal(syscall.Signal(0)); err != nil {
+			return 0 // gone
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	fmt.Fprintln(os.Stderr, "freewire-tunnel: tunnel did not exit within 10s")
+	return 1
+}
 
 // releaseStalePins removes host routes left behind by a previous run.
 func releaseStalePins() {
