@@ -113,15 +113,16 @@ present and correct.
 This is not visible from a command-line build: ATS applies to app bundles, so
 the same code succeeds outside one and fails inside.
 
-The current build carries `NSAllowsArbitraryLoads`. That is broader than it
-should be for a security product, and it is a stopgap.
+**Resolved.** The control plane no longer uses URLSession. `PinnedHTTPClient`
+speaks HTTP/1.1 over `Network.framework` and installs a verify block, so
+certificate validation happens in the app's own code rather than being an
+override bolted onto the system's — which is what a pinning client wants in any
+case. ATS is fully enforced, with no `NSAllowsArbitraryLoads`.
 
-**The correct fix is to stop using URLSession for the control plane.**
-`Network.framework` with `sec_protocol_options_set_verify_block` performs
-certificate validation in the app's own code, outside ATS, which is what a
-pinning client wants anyway: the pin becomes the whole verification rather than
-an override bolted onto the system's. Managed servers with a real hostname and
-an ACME certificate are unaffected either way.
+A self-signed certificate is accepted only when the user has pinned a key out
+of band; a real hostname gets the system's normal chain validation. Verified
+both ways: the correct pin connects with ATS enforced, and a wrong pin is
+refused.
 
 ---
 

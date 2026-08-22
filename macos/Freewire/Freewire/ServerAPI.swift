@@ -67,62 +67,40 @@ enum APIError: Error, LocalizedError {
     }
 }
 
-/// Accepts a self-signed certificate only when the user has pinned a key.
-///
-/// A server on a bare IP cannot hold a CA-signed certificate, so requiring one
-/// would make self-hosting impossible. The pin is what establishes trust in
-/// that case, not the certificate: an attacker who intercepts the TLS session
-/// still has to return the pinned public key, and if they do, the WireGuard
-/// handshake that follows fails because they do not hold the matching private
-/// key. The worst they achieve is denial of service, not interception.
-///
-/// With no user pin, this delegate does nothing and the system's normal
-/// certificate validation applies.
-private final class PinnedTrustDelegate: NSObject, URLSessionDelegate {
-    func urlSession(
-        _ session: URLSession,
-        didReceive challenge: URLAuthenticationChallenge,
-        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
-    ) {
-        guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-              let trust = challenge.protectionSpace.serverTrust,
-              let pinned = ServerTrust.userPinnedKey, !pinned.isEmpty
-        else {
-            completionHandler(.performDefaultHandling, nil)
-            return
-        }
-        completionHandler(.useCredential, URLCredential(trust: trust))
-    }
-}
-
 final class ServerAPI {
     let serverHost: String
-    private let base: URL
-    private let session: URLSession
-    private let trustDelegate = PinnedTrustDelegate()
+    private let http: PinnedHTTPClient
 
-    init(host: String = "127.0.0.1", port: Int = 8080) {
+    init(host: String = "127.0.0.1", port: UInt16 = 8080) {
         serverHost = host
-        // HTTPS only. This endpoint hands over the server's WireGuard public
-        // key, which is the trust anchor for the tunnel; over plaintext anyone
-        // on the path could substitute their own and terminate the tunnel
-        // themselves.
-        base = URL(string: "https://\(host):\(port)/v1")!
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 10
-        session = URLSession(configuration: config,
-                             delegate: trustDelegate,
-                             delegateQueue: nil)
+        // HTTPS only, over a client that verifies certificates itself.
+        //
+        // This endpoint hands over the server's WireGuard public key, the trust
+        // anchor for the whole tunnel; over plaintext anyone on the path could
+        // substitute their own. URLSession cannot serve here because ATS
+        // rejects a self-signed certificate before any pinning code runs, and
+        // the only escape it offers disables ATS for the entire app.
+        http = PinnedHTTPClient(
+            host: host,
+            port: port,
+            // A self-signed certificate is acceptable exactly when the user has
+            // pinned a key out of band, because the pin rather than the
+            // certificate is what establishes trust. A real hostname gets the
+            // system's normal chain validation.
+            acceptAnyCertificate: ServerTrust.userPinnedKey != nil
+        )
     }
 
     func fetchConfig() async throws -> ServerConfig {
-        let url = base.appendingPathComponent("server/config")
         let cfg: ServerConfig
         do {
-            let (data, response) = try await session.data(from: url)
-            try checkStatus(response, data)
-            cfg = try decode(ServerConfig.self, from: data)
-        } catch is URLError {
+            let resp = try await http.request(method: "GET", path: "/v1/server/config")
+            guard (200..<300).contains(resp.status) else {
+                throw APIError.httpError(resp.status)
+            }
+            cfg = try decode(ServerConfig.self, from: resp.body)
+        } catch let e as PinnedHTTPClient.Failure {
+            _ = e
             throw APIError.serverUnreachable
         }
 
@@ -147,69 +125,58 @@ final class ServerAPI {
     /// token, which is exactly what blind signing prevents — and it would still
     /// work, so the loss would be silent.
     func registerPeer(publicKeyBase64: String, token: String? = nil) async throws -> RegisteredPeer {
-        let url = base.appendingPathComponent("peers")
-        var req = URLRequest(url: url)
-        req.httpMethod = "POST"
-        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let token {
-            req.setValue("PrivateToken token=\(token)", forHTTPHeaderField: "Authorization")
-        }
         let clientVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
-        req.httpBody = try JSONEncoder().encode([
+        let body = try JSONEncoder().encode([
             "public_key":     publicKeyBase64,
             "client_version": clientVersion,
         ])
+        var headers = ["Content-Type": "application/json"]
+        if let token {
+            headers["Authorization"] = "PrivateToken token=\(token)"
+        }
+
         do {
-            let (data, response) = try await session.data(for: req)
-            if let http = response as? HTTPURLResponse {
-                if http.statusCode == 503 { throw APIError.capacityFull }
-                // 402 is the spec's code for both token failures, deliberately
-                // not 401 or 429: the client maps those to different retries.
-                if http.statusCode == 402 { throw APIError.tokenRejected }
+            let resp = try await http.request(
+                method: "POST", path: "/v1/peers", body: body, headers: headers
+            )
+            if resp.status == 503 { throw APIError.capacityFull }
+            // 402 is the spec's code for both token failures, deliberately not
+            // 401 or 429: the client maps those to different retries.
+            if resp.status == 402 { throw APIError.tokenRejected }
+            guard (200..<300).contains(resp.status) else {
+                throw APIError.httpError(resp.status)
             }
-            try checkStatus(response, data)
-            return try decode(RegisteredPeer.self, from: data)
-        } catch is URLError {
+            return try decode(RegisteredPeer.self, from: resp.body)
+        } catch let e as PinnedHTTPClient.Failure {
+            _ = e
             throw APIError.serverUnreachable
         }
     }
 
     func removePeer(token: String) async throws {
-        let url = base.appendingPathComponent("peers/\(token)")
-        var req = URLRequest(url: url)
-        req.httpMethod = "DELETE"
-        do {
-            let (_, response) = try await session.data(for: req)
-            // Per spec: 404 means peer already expired/evicted — safe to ignore.
-            if let http = response as? HTTPURLResponse, http.statusCode == 404 { return }
-            try checkStatus(response, nil)
-        } catch is URLError {
-            // Best-effort — don't surface a network error on disconnect.
-        }
+        // Best-effort: a failure here must not surface on disconnect, and 404
+        // means the peer already expired, which is the same outcome.
+        _ = try? await http.request(method: "DELETE", path: "/v1/peers/\(token)")
     }
 
     /// Blocking peer removal for `applicationWillTerminate`, which cannot await.
-    /// URLSession delivers its completion on a background queue, so waiting here
-    /// does not deadlock the main thread the way awaiting a main-actor method would.
+    ///
+    /// The request runs on a detached task and this waits on a semaphore, so the
+    /// main thread is never the one performing the work — awaiting a main-actor
+    /// method from a termination handler would deadlock.
     func removePeerBlocking(token: String, timeout: TimeInterval = 2) {
-        let url = base.appendingPathComponent("peers/\(token)")
-        var req = URLRequest(url: url)
-        req.httpMethod = "DELETE"
-        req.timeoutInterval = timeout
-
         let sema = DispatchSemaphore(value: 0)
-        session.dataTask(with: req) { _, _, _ in sema.signal() }.resume()
+        let client = http
+        Task.detached {
+            _ = try? await client.request(
+                method: "DELETE", path: "/v1/peers/\(token)", timeout: timeout
+            )
+            sema.signal()
+        }
         _ = sema.wait(timeout: .now() + timeout)
     }
 
     // MARK: - Helpers
-
-    private func checkStatus(_ response: URLResponse, _ body: Data?) throws {
-        guard let http = response as? HTTPURLResponse else { return }
-        guard (200..<300).contains(http.statusCode) else {
-            throw APIError.httpError(http.statusCode)
-        }
-    }
 
     private func decode<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
         do {
