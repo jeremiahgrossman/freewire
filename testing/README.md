@@ -1,7 +1,7 @@
 # Captive Portal Test Harness
 
 Runnable form of `captive-portal-testing-guide.md`. Clearing all six
-configurations is the **Phase 2 milestone gate**.
+configurations is the **Phase 2 milestone gate** — cleared 2026-08-22.
 
 The guide remains authoritative. These scripts exist so a test session is
 one command per config instead of hand-applied firewall rules, and so runs
@@ -141,7 +141,7 @@ Record each run. Bugs found here become the first regression tests.
 | 3 | 2026-08-21 | **DNS tunnel** | 3.1s | ✅ PASS | `ready utun6 10.0.0.3 dns`. 15/15 pings, 0% loss, avg 59ms (min 1.6, max 578 — variance is the poll interval). TCP connect completes over it. Confirmed twice. First with the path forced, then properly under Config 3's rules with no preferred transport set: HTTP CONNECT failed, TLS/443 was blocked, and the chain selected DNS on its own 3.1s after peer registration. 15/15 pings, 0% loss, avg 38ms. Routing skipped, so this proves path selection and transport, not egress. |
 | 4 | 2026-08-22 | **ICMP/UDP** | ~3s | ✅ PASS | `ready utun6 10.0.0.6 icmp_udp` under config 4's rules. Chain fell correctly: HTTP CONNECT no gateway, TLS/443 i/o timeout (blocked), DNS tunnel `no answers in dns response`, ICMP succeeded. Real egress to the server, 67ms through the tunnel, resolver left at 192.168.0.1 per DNS-1. Two defects found by this run — see below. |
 | 5 | 2026-08-22 | **none → CONN-2b** | ~11s | ✅ PASS | "This network is blocking secure connections." with the specified secondary copy, Try Again and Disconnect. No browser opened, so not a CONN-2a false positive. This is the run that validates the captive-portal fix: before it, a fully blocked network reported "Freewire's servers are unreachable right now", because the portal probe only ran after the transport chain, which requires getting past registration. |
-| 6 | | | | | Not run — same reason. |
+| 6 | 2026-08-22 | **DNS → TLS/443** | one probe interval | ✅ PASS | Upgraded without dropping: session timer continued at 22 min rather than resetting, reduced-speed and DNS-1 indicators cleared, and the resolver flipped from 192.168.0.1 to 127.0.0.1 — DoH re-engaging automatically because TLS/443 can carry it. Confirmed at the socket level: 20 UDP/53 sockets before, one TCP/443 after. The UPGRADE-1 transitional copy was *not* observed; the window is a handshake plus a route install and the panel was not open at that instant, so it remains unverified rather than passed. |
 
 ### Forced-transport runs (2026-08-22, against AWS, routing installed)
 
