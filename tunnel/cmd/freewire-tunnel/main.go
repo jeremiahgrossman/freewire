@@ -124,6 +124,12 @@ func main() {
 		os.Exit(dnsThroughput(os.Args[2:]))
 	}
 
+	// --icmp-probe runs only the ICMP/UDP tunnel handshake against the server.
+	// No routing, no resolver, no system state.
+	if len(os.Args) > 1 && os.Args[1] == "--icmp-probe" {
+		os.Exit(icmpProbe(os.Args[2:]))
+	}
+
 	// Repair before doing anything else, on every run. setupRouting used to be
 	// the only place this happened, so a machine left broken stayed broken
 	// until a connection attempt got far enough to reach it -- and a connection
@@ -208,6 +214,22 @@ func main() {
 	// can be taken over depend on which transport is carrying traffic, and both
 	// are consulted from code that does not otherwise know.
 	activeTransport = transportName
+
+	if selectOnly() {
+		// The chain has chosen and WireGuard has handshaked over the winner.
+		// Report it and stop before routing: this mode exists to learn the
+		// selection safely, not to carry traffic.
+		fmt.Println(transportName)
+		fmt.Fprintf(os.Stderr, "freewire-tunnel: --select-only chose %s; routing not installed\n", transportName)
+		if transportConn != nil {
+			transportConn.Close()
+		}
+		if localProxy != nil {
+			localProxy.Close()
+		}
+		wgDev.Close()
+		os.Exit(0)
+	}
 
 	if skipEgressCheck() {
 		// Path selection has already been decided by this point: the transport
@@ -419,6 +441,23 @@ const skipEgressCheckFlag = "--skip-egress-check"
 func skipEgressCheck() bool {
 	for _, a := range os.Args[1:] {
 		if a == skipEgressCheckFlag {
+			return true
+		}
+	}
+	return false
+}
+
+// selectOnlyFlag runs the real fallback chain -- including the WireGuard
+// handshake check that decides whether a transport actually carries traffic --
+// prints the winning transport's name to stdout, and exits without ever
+// installing routing. It is the safe way to answer "which transport does this
+// network leave open", e.g. under a pf config that simulates a locked captive
+// portal, with none of the machine-slowing hazard of routing over a slow path.
+const selectOnlyFlag = "--select-only"
+
+func selectOnly() bool {
+	for _, a := range os.Args[1:] {
+		if a == selectOnlyFlag {
 			return true
 		}
 	}
