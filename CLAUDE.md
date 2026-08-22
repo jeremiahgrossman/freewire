@@ -11,48 +11,64 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 > **Update this section at the start of each session.**
 
-- **Active phase:** Phase 2 — Captive portal
+- **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
 - **In progress:** nothing
-- **Next action:** run captive portal configs 2, 3, 5 via `testing/README.md`. Config 1 is blocked (see below), 4 needs a local NXDOMAIN resolver, 6 needs 3 to pass first.
-- **Blocked on:** nothing
+- **Next action:** Configs 4 and 6 (see `testing/README.md`), or the Swift client work that a Developer ID unblocks.
+- **Blocked on:** a Developer ID certificate, for `FreewireHelper` and for signed/notarized distribution.
 
-### Dev environment (as of 2026-08-21)
+### Dev environment (as of 2026-08-22)
 
-The server runs in Docker, not a VM. Start it with `make -C server docker-up`; logs via `make -C server docker-logs`.
+The server runs on **AWS**, not locally. Local container and VM runtimes all
+fail the same way: they NAT their own guests but will not forward a third
+subnet, so tunnel egress cannot be tested against them. See
+`testing/README.md`.
 
 | | |
 |---|---|
-| Server address | The container's routable address. Find it: `docker inspect freewire-server --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'` (currently `192.168.97.2`) |
-| Ports | API `8080`, TLS `443`, DNS `53`, ICMP/UDP `4500`, WireGuard `51820` — the real ports, so the harness rules from the guide apply unchanged |
-| Config + keys | `server/data/freewire-server.json`, generated on first start, gitignored |
-| Client target | `AppDelegate.swift` points at the container address. **Not `127.0.0.1`** — loopback bypasses the pf rules, so every harness config would pass without testing anything |
-| Build + run the app | `xcodebuild build -project macos/Freewire/Freewire.xcodeproj -scheme Freewire -configuration Debug CODE_SIGNING_ALLOWED=NO`, then `open` the product. No Xcode GUI needed |
-| Tunnel binary | `cd tunnel && go build -o freewire-tunnel ./cmd/freewire-tunnel`. Debug builds fall back to this path; release builds require it bundled |
+| Server | `52.203.246.145` (Elastic IP, `t4g.small`, us-east-1). Deploy with `deploy/launch-aws.sh`, remove with `deploy/destroy-aws.sh` |
+| Ports | API `8080` (HTTPS), TLS `443`, DNS `53`, ICMP/UDP `4500`, WireGuard `51820` |
+| Trust | The client pins the server's WireGuard public key. Set it with `defaults write com.freewire.vpn.Freewire pinnedServerKey '<key>'`; `provision.sh` prints it |
+| Build + run the app | `xcodebuild build -project macos/Freewire/Freewire.xcodeproj -scheme Freewire -configuration Debug CODE_SIGNING_ALLOWED=NO`, then run the product directly to see its stderr |
+| Helpers | `cd tunnel && go build -o freewire-tunnel ./cmd/freewire-tunnel && go build -o freewire-tokens ./cmd/freewire-tokens`. Debug builds fall back to these paths |
+| Tests | `go test -race ./...` in `server/` and `tunnel/`; `macos/Tests/run.sh` for Swift |
 
-**Recent work:** uTLS on both TLS paths with Chrome/Safari/Firefox fingerprint rotation. ACME/Let's Encrypt on the server (set `acme_domain`; self-signed stays the dev default). 53-finding audit applied in full. First test suite (`go test -race ./...` in `server/`) and `.github/workflows/ci.yml`, which fails on any `RemoteAddr` or private-key logging. CI has been written but never executed — nothing has been pushed yet.
+**Verified end to end against AWS:** real egress (public IP moves from the ISP
+to the server and back), 100 Mbps on TLS/443 against a 50 Mbps target, all four
+transports reaching ready, and the full Privacy Pass exchange — a signature the
+server never saw unblinded, first redemption 201, replay 402.
 
-**Two audits have run.** The first found 53 issues, all closed. A second, run
-against the rewritten code, found 89 more — including bugs introduced by the
-first pass. Of those, 88 are closed at critical and high severity; the one that remains open is listed below, along with the medium/low tail.
+**Phase 2 configs:** 0, 1, 2, 3 pass. 4 needs a local NXDOMAIN resolver; 5 will
+report CONN-3 rather than CONN-2b (a documented bootstrap gap, not a
+regression); 6 needs a live DNS session to upgrade from.
 
-The second audit found the DNS tunnel had never worked: responses omitted the
-question section so the client misread every one, and a full packet encoded to a
-~2.4 KB query name against a 255-byte limit. Both are fixed, with fragmentation
-added and round-trip tests covering the wire format.
+**Audits:** two runs, 142 findings, all closed except the privileged helper.
 
-**Known Phase 2 gaps** (none block configs 2–6):
+**Known gaps:**
 
-- **`FreewireHelper` does not exist — the pf kill switch is unimplemented.** The one audit item deliberately left open, because it is a project rather than a fix: signing configuration, an install and update flow, and fail-mode semantics. The UI no longer claims it (see `error-states-spec.md` §"Interim: kill switch not yet enforced"); the toggle is disabled and defaults off. **Resolved:** build against `SMAppService`, not SMJobBless (deprecated in macOS 13), and **fail closed** — pf rules persist if the helper dies, and release only on explicit user action. Needed before GA.
-- **FW-001 (open, critical): the control plane runs over cleartext HTTP.** `ServerAPI` builds `http://` and the Go API serves it with no TLS, so `GET /v1/server/config` hands over the server's WireGuard public key — the trust anchor for the whole tunnel — with no integrity protection, on exactly the hostile networks this product targets. An on-path attacker substitutes their own key and endpoint and terminates the tunnel. `client-server-api-spec.md` already says HTTPS only, so the implementation contradicts its own spec. Left open deliberately: it needs decisions (pin the key in the bundle? how do self-hosted servers hand over their key in Phase 3? how does it interact with the ACME work?), not just a patch.
-- **The remaining medium/low findings** from the second audit are unfixed. None block the milestone.
-- **Config 1 is untestable on one machine.** `tryHTTPConnect` probes the machine's real default gateway; `config1.sh` puts the proxy on the container bridge. They can never match. Needs a second machine or a pf `rdr`. See `testing/README.md`.
-- `PathUpgradeManager` returns false for the DNS and ICMP paths; probing either requires a full handshake.
-- ECH is not implemented. uTLS hides the handshake fingerprint, but SNI still names the destination in cleartext. Requires publishing ECH config in DNS — design the Phase 3 server DNS setup so this can be added without rework.
-- DoH is hardcoded to Cloudflare 1.1.1.1: a single point of failure and a single point of trust for a privacy-sensitive signal. Should become a list with fallback.
-- No Swift tests. `FreewireTests/` is empty; the suite is Go-only so far.
-- **ATS blocks self-signed servers.** App Transport Security rejects the certificate before the pinning delegate is consulted, so the build carries `NSAllowsArbitraryLoads` as a stopgap. The real fix is `Network.framework` with a verify block instead of URLSession — see `error-states-spec.md`. Managed servers with an ACME certificate are unaffected.
-- Privacy Pass client-side batch refresh runs through the `freewire-tokens` helper rather than a Swift implementation of RFC 9474; see that command's doc comment for why.
-- `captive-portal-testing-guide.md`'s `proxy.py` listing is broken — its relay threads never iterate. `testing/proxy.py` is a working replacement; fold it back into the guide.
+- **`FreewireHelper` is written but cannot install.** `SMAppService` requires a
+  Developer ID and this machine has no signing identity. The rule generation is
+  done and tested (16 assertions); the packaging is not. The UI does not claim
+  the kill switch — see `error-states-spec.md` §"Interim". **Resolved:**
+  `SMAppService`, and **fail closed**.
+- **ATS blocks self-signed servers.** App Transport Security rejects the
+  certificate before the pinning delegate is consulted, so the build carries
+  `NSAllowsArbitraryLoads` as a stopgap. The fix is `Network.framework` with a
+  verify block instead of URLSession. Managed servers with an ACME certificate
+  are unaffected.
+- `PathUpgradeManager` returns false for the DNS and ICMP paths; probing either
+  needs a full handshake.
+- ECH is not implemented. uTLS hides the handshake fingerprint, but SNI still
+  names the destination in cleartext.
+- DoH is hardcoded to Cloudflare 1.1.1.1: a single point of failure and of trust
+  for a privacy-sensitive signal.
+- Privacy Pass issuance is not rate-limited. The spec calls for a per-IP cap,
+  which sits awkwardly against the no-client-IP rule — resolve before anyone
+  else uses the server.
+- **No abuse posture.** A free VPN with no accounts attracts spam and infringing
+  traffic; complaints go to the host, and hosts terminate VPN operators. Needed
+  before anyone else is on the service.
+- `captive-portal-testing-guide.md`'s `proxy.py` listing is broken — its relay
+  threads never iterate. `testing/proxy.py` is a working replacement.
 
 ---
 
