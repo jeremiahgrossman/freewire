@@ -177,10 +177,10 @@ Once any path establishes a tunnel, the client renegotiates: if a faster path is
 - Distribution is signed + notarized DMG only. Mac App Store distribution is permanently incompatible with direct utun access.
 - The client routes all device traffic through the tunnel when connected (full-tunnel mode)
 - The client shows current connection status: disconnected, connecting, connected, error
-- The client shows which server (managed or self-hosted) is active and in which region
+- The client shows which server (managed or self-hosted) is active and in which region. **Region is not shown** — one region exists, so there is nothing to disambiguate. Becomes real alongside the region picker in §6.2.
 - The client reconnects automatically when the network changes (NWPathMonitor detects path changes)
 - Kill switch is enabled by default; all traffic is blocked via pf rules if the VPN tunnel drops unexpectedly until the tunnel is restored or the user explicitly disconnects. **Not yet true, and the default is currently the opposite:** while the switch is unenforced the preference defaults to off, so no user carries a stored `true` that implies protection they do not have. Restored to on when the helper ships.
-- The kill switch can be disabled by the user in settings, with a plain-language explanation of the tradeoff shown before the setting is changed
+- The kill switch can be disabled by the user in settings, with a plain-language explanation of the tradeoff shown before the setting is changed. **Currently the control is disabled entirely,** with the caption "Not available yet. When the VPN drops, traffic is not blocked." — per `error-states-spec.md` §Interim. There is nothing to opt out of until the helper ships.
 - Split-tunnel is out of scope at launch (full-tunnel mode only)
 - The onboarding flow — from first launch to first successful connection — requires no more than two user decisions on the managed path (privileged helper installation, notification permission); self-hosting adds steps but is a secondary link, not the default
 
@@ -195,7 +195,7 @@ Once any path establishes a tunnel, the client renegotiates: if a faster path is
 - The managed path must complete in under 2 minutes with no account creation — the app generates device keys in the background at first launch
 - The self-hosted path must complete in under 15 minutes
 - Each step in onboarding has a single clear action — no step requires the user to interpret technical output
-- Permission prompts (VPN configuration, notifications) are explained in plain language immediately before they appear
+- Permission prompts (VPN configuration, notifications) are explained in plain language immediately before they appear. **The macOS prompt is not the one described:** with no NetworkExtension there is no VPN-configuration prompt. The privileged step is administrator authorisation for the tunnel helper, which is what onboarding must explain instead.
 - On completion, the user is connected and the app shows confirmation
 
 ---
@@ -247,26 +247,30 @@ iOS is not in scope at launch. When iOS work resumes, the requirements below app
 **macOS**
 
 **Requirements:**
-- The macOS app is distributed via direct download (DMG containing a signed and notarized application bundle) at launch; Mac App Store submission follows in a subsequent release
+- The macOS app is distributed via direct download (DMG containing a signed and notarized application bundle). **Corrected:** this previously said "Mac App Store submission follows in a subsequent release", contradicting §6.4, which states the App Store is *permanently* incompatible with direct `utun` access. §6.4 is the accurate one: sandboxing rules out the interface the tunnel depends on, so there is no subsequent release in which this becomes possible without abandoning the architecture. Direct download is the only macOS channel.
 - See Decision #8 for rationale
 - The direct download app is signed with a valid Apple Developer ID certificate and notarized by Apple's notarization service — Gatekeeper will block unsigned or un-notarized builds on default macOS settings
 - The direct download path hosts the DMG on Freewire's own infrastructure; the download URL is stable and versioned
-- On first launch, the app requests VPN configuration permission; the same plain-language explanation required on iOS applies here
+- On first launch, the app requests administrator authorisation to install the tunnel helper. **Not a VPN configuration prompt:** that prompt belongs to NetworkExtension, which macOS does not use here.
 - The app supports macOS versions: current major version and the two prior at launch
-- The Mac App Store version operates under App Sandbox restrictions; the NetworkExtension system extension must be declared in the entitlements file and approved by the user at first launch via a system prompt
 
-**macOS System Extension:**
-- On macOS, NEPacketTunnelProvider runs as a System Extension (replacing the legacy Kernel Extension model deprecated in macOS 10.15)
-- System Extensions require user approval via a macOS system prompt on first install; this is a mandatory step that cannot be bypassed
-- The System Extension approval prompt is preceded by an in-app explanation
-- System Extensions installed via the Mac App Store path require the same `com.apple.developer.networking.networkextension` entitlement as iOS
+**macOS System Extension — no longer applicable.**
+
+This block described NEPacketTunnelProvider running as a System Extension, with
+its approval prompt and entitlement. None of it applies: the macOS client drives
+a `utun` device directly and ships no system extension. The privileged component
+is a launchd daemon applying `pf` rules, which needs a Developer ID for
+`SMAppService` registration but no NetworkExtension entitlement and no Apple
+approval beyond notarization. Retained as a record of the original design, which
+was reversed when the transports turned out to need socket control that
+NEPacketTunnelProvider does not expose.
 
 **Shared distribution requirements (iOS and macOS):**
 - App version numbers follow semantic versioning (major.minor.patch)
-- The App Store listings for iOS and macOS are maintained under a single Apple Developer account using Universal Purchase where applicable
+- App Store listings (iOS only — see above) are maintained under a single Apple Developer account
 - Crash reporting is integrated and reports are reviewed before each release; no release ships with a known crash rate above 0.5% in the beta channel
 
-- The direct download (signed and notarized DMG) is the primary distribution channel at launch; Mac App Store submission follows in a subsequent release
+- The direct download (signed and notarized DMG) is the **only** macOS distribution channel. There is no Mac App Store path: sandboxing rules out direct `utun` access, so submission is not deferred, it is architecturally excluded.
 - The direct download app uses the Sparkle framework for automatic updates; the app checks for updates on launch and notifies the user when one is available, with a one-click install flow
 
 ---
@@ -355,7 +359,7 @@ iOS is not in scope at launch. When iOS work resumes, the requirements below app
 - Tor integration
 - Streaming/geo-unblocking as a marketed feature
 - Android and Windows client apps (post-launch)
-- IPv6-only network support (nice-to-have, not required at launch)
+- IPv6-only network support (nice-to-have, not required at launch). **The build goes further than "not supported":** the tunnel disables IPv6 on every active network service for the duration of a session and restores it on teardown. Carrying v6 inside the tunnel is the better answer and is not in scope; until it is, leaving v6 enabled would send v6-reachable traffic outside the tunnel in the clear while the client reported "Protected". On an IPv6-only network the client therefore does not degrade — it has no connectivity at all.
 - Pricing, subscriptions, or any paid tier (out of scope for this document)
 - Mobile device management (MDM) or corporate deployment
 
@@ -395,7 +399,7 @@ iOS is not in scope at launch. When iOS work resumes, the requirements below app
 
 7. **Server region count** — resolved: one region at launch. Additional regions added post-launch based on usage.
 
-8. **macOS distribution** — resolved: direct download (signed, notarized DMG) is the primary launch channel. Sparkle framework handles automatic updates. Mac App Store submission follows in a subsequent release.
+8. **macOS distribution** — resolved: direct download (signed, notarized DMG) is the *only* channel. Sparkle handles automatic updates. **Corrected:** this said Mac App Store submission follows in a subsequent release, which contradicts the architecture — sandboxing rules out the direct `utun` access the tunnel depends on, so there is no later release in which it becomes possible short of rebuilding on NetworkExtension.
 
 9. **iOS distribution** — deferred. iOS is post-launch. When iOS work resumes, distribution will be via TestFlight first (requires `NEPacketTunnelProvider` entitlement in provisioning profile); App Store follows after entitlement approval. See `apple-entitlement-application.md`.
 
@@ -417,7 +421,7 @@ iOS is not in scope at launch. When iOS work resumes, the requirements below app
 
 18. **DoH resolver** — resolved: hardcoded to Cloudflare 1.1.1.1. Not user-configurable at launch. Consumer users should not need to know what a DNS resolver is. User-configurable resolver may be added as an advanced setting post-launch.
 
-19. **Software license** — resolved: Freewire is proprietary, closed-source software. The codebase is not published. Dependencies (WireGuardKit, wireguard-go) are MIT-licensed and permit proprietary use with no copyleft obligation. Server software is distributed to self-hosting users as a prebuilt binary only.
+19. **Software license** — resolved: Freewire is proprietary, closed-source software. The codebase is not published. Dependencies (wireguard-go, uTLS, cloudflare/circl for the blind signatures) are MIT- or BSD-licensed and permit proprietary use with no copyleft obligation. Server software is distributed to self-hosting users as a prebuilt binary only.
 
 20. **Privacy Pass token issuance timing** — resolved: client requests initial token batch on first connection attempt (not at launch). Client refreshes in the background when the batch drops below 3 tokens remaining. Re-issuance is silent — no user-visible state. If re-issuance fails, connection continues and the client retries silently on the next connection attempt.
 
@@ -438,6 +442,15 @@ iOS is not in scope at launch. When iOS work resumes, the requirements below app
 ---
 
 ## 11. Success Metrics
+
+> **None of these are measured.** They require a user population and telemetry
+> that deliberately does not exist — the client collects no usage analytics, and
+> the server counts connections without retaining anything per session. Metrics
+> like onboarding completion and crash rate would need instrumentation that
+> contradicts §6.7 and Decision 25. Reconciling that is unresolved: either these
+> targets are assessed some other way (beta cohorts reporting by hand), or the
+> product accepts it cannot measure them. Recorded here rather than left as
+> numbers nobody can check.
 
 - **Captive portal success rate:** ≥90% of connection attempts on captive portal networks succeed without user intervention
 - **Onboarding completion rate:** ≥80% of users who start onboarding reach a first successful connection
