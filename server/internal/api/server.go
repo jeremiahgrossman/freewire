@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/freewire/server/internal/config"
+	"github.com/freewire/server/internal/privacypass"
 	"github.com/freewire/server/internal/tunnel"
 )
 
@@ -18,7 +19,12 @@ type Server struct {
 	cfg *config.Config
 	wg  *tunnel.Manager
 	tls *tls.Config
-	log *zap.Logger
+	// issuer is nil on self-hosted servers, which do not implement Privacy
+	// Pass: the operator controls which keys are registered, so anonymous rate
+	// limiting has nothing to add.
+	issuer *privacypass.Issuer
+	spent  *privacypass.SpentStore
+	log    *zap.Logger
 }
 
 // NewServer creates the API server.
@@ -29,8 +35,15 @@ type Server struct {
 // endpoint and terminate the tunnel themselves, with uTLS and the tunnel's own
 // cryptography protecting nothing. client-server-api-spec.md has always said
 // HTTPS only.
-func NewServer(cfg *config.Config, wg *tunnel.Manager, tlsCfg *tls.Config, log *zap.Logger) *Server {
-	return &Server{cfg: cfg, wg: wg, tls: tlsCfg, log: log}
+func NewServer(
+	cfg *config.Config,
+	wg *tunnel.Manager,
+	tlsCfg *tls.Config,
+	issuer *privacypass.Issuer,
+	spent *privacypass.SpentStore,
+	log *zap.Logger,
+) *Server {
+	return &Server{cfg: cfg, wg: wg, tls: tlsCfg, issuer: issuer, spent: spent, log: log}
 }
 
 func (s *Server) Run(ctx context.Context) error {
@@ -39,6 +52,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("POST /v1/peers", s.handleRegisterPeer)
 	mux.HandleFunc("DELETE /v1/peers/{token}", s.handleRemovePeer)
 	mux.HandleFunc("GET /v1/health", s.handleHealth)
+	mux.HandleFunc("POST /v1/tokens/issue", s.handleIssueTokens)
 
 	addr := fmt.Sprintf(":%d", s.cfg.APIPort)
 	if s.tls == nil {

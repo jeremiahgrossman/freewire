@@ -5,12 +5,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/freewire/server/internal/api"
 	"github.com/freewire/server/internal/certs"
 	"github.com/freewire/server/internal/config"
+	"github.com/freewire/server/internal/privacypass"
 	"github.com/freewire/server/internal/transport"
 	"github.com/freewire/server/internal/tunnel"
 )
@@ -60,7 +62,29 @@ func main() {
 		log.Fatal("build tls config", zap.Error(err))
 	}
 
-	srv := api.NewServer(cfg, wg, tlsCfg, log)
+	// Privacy Pass is a managed-server feature. A self-hosted server leaves
+	// privacy_pass_key empty: its operator controls which keys are registered,
+	// so anonymous rate limiting has nothing to add there.
+	expiryStop := make(chan struct{})
+	defer close(expiryStop)
+
+	var issuer *privacypass.Issuer
+	var spent *privacypass.SpentStore
+	if cfg.PrivacyPassKey != "" {
+		key, keyErr := config.ParseRSAPrivateKey(cfg.PrivacyPassKey)
+		if keyErr != nil {
+			log.Fatal("parse privacy pass key", zap.Error(keyErr))
+		}
+		issuer, err = privacypass.NewIssuer(key)
+		if err != nil {
+			log.Fatal("privacy pass issuer", zap.Error(err))
+		}
+		spent = privacypass.NewSpentStore(privacypass.DefaultTokenTTL)
+		go spent.RunExpiry(time.Hour, expiryStop)
+		log.Info("privacy pass enabled")
+	}
+
+	srv := api.NewServer(cfg, wg, tlsCfg, issuer, spent, log)
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()

@@ -2,9 +2,12 @@ package api
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"github.com/freewire/server/internal/privacypass"
 	"net/http"
+	"strings"
 
 	"go.uber.org/zap"
 )
@@ -33,8 +36,20 @@ func (s *Server) handleRegisterPeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Phase 1: no Privacy Pass — all peers accepted (self-hosted mode).
-	// Privacy Pass token verification is added in Phase 4.
+	// Spend a Privacy Pass token, on servers that issue them.
+	//
+	// Deliberately the only thing consulted: the token is verified and marked
+	// spent, and nothing about the caller is examined or recorded. Attaching a
+	// device identifier or an address to this step would let issuance and
+	// redemption be correlated afterwards, which is precisely what the blind
+	// signature exists to prevent -- and it would still verify, so the loss
+	// would be silent.
+	if s.issuer != nil {
+		if code, msg := s.redeemToken(r); code != 0 {
+			writeError(w, code, msg.code, msg.message)
+			return
+		}
+	}
 
 	// Capacity check is enforced inside AddPeer atomically to avoid TOCTOU.
 	peerToken := newToken()
@@ -90,4 +105,47 @@ func redactToken(token string) string {
 		return "redacted"
 	}
 	return token[:6] + "…"
+}
+
+type tokenError struct {
+	code    string
+	message string
+}
+
+// redeemToken verifies and spends the token on a registration request.
+//
+// Returns 0 when the request may proceed, otherwise an HTTP status and the
+// error to report.
+func (s *Server) redeemToken(r *http.Request) (int, tokenError) {
+	const scheme = "PrivateToken token="
+
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, scheme) {
+		return http.StatusPaymentRequired,
+			tokenError{"TOKEN_INVALID", "A token is required to register a peer."}
+	}
+
+	raw, err := base64.RawURLEncoding.DecodeString(strings.Trim(strings.TrimPrefix(auth, scheme), `"`))
+	if err != nil {
+		return http.StatusPaymentRequired,
+			tokenError{"TOKEN_INVALID", "The token could not be decoded."}
+	}
+
+	tok, err := privacypass.ParseToken(raw)
+	if err != nil {
+		return http.StatusPaymentRequired,
+			tokenError{"TOKEN_INVALID", "The token is malformed."}
+	}
+	if err := s.issuer.Verify(tok); err != nil {
+		return http.StatusPaymentRequired,
+			tokenError{"TOKEN_INVALID", "The token is not valid."}
+	}
+
+	// Verification and spending are separate questions and both must pass: a
+	// perfectly valid token that has already been used is still refused.
+	if !s.spent.Redeem(tok.NonceHash()) {
+		return http.StatusPaymentRequired,
+			tokenError{"TOKEN_SPENT", "This token has already been used."}
+	}
+	return 0, tokenError{}
 }

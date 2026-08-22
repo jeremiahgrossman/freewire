@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/base64"
 	"net"
 	"net/http"
 )
@@ -19,6 +20,16 @@ type serverConfigResponse struct {
 	MinClientVersion  string   `json:"min_client_version"`
 	Region            string   `json:"region"`
 	CapacityAvailable bool     `json:"capacity_available"`
+
+	// Privacy Pass issuer public key, absent on self-hosted servers.
+	//
+	// A client cannot blind a token without it, so withholding it would leave
+	// issuance reachable but unusable. Publishing it costs nothing: it is a
+	// public key, and its whole purpose is that anyone can verify a token
+	// against it.
+	PrivacyPassKeyN  string `json:"privacy_pass_key_n,omitempty"`
+	PrivacyPassKeyE  int    `json:"privacy_pass_key_e,omitempty"`
+	PrivacyPassKeyID string `json:"privacy_pass_key_id,omitempty"`
 }
 
 func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
@@ -33,7 +44,7 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 			host = hh
 		}
 	}
-	writeJSON(w, http.StatusOK, serverConfigResponse{
+	resp := serverConfigResponse{
 		PublicKey:         s.cfg.PublicKey,
 		EndpointHost:      host,
 		EndpointPort:      s.cfg.ListenPort,
@@ -47,7 +58,17 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 		MinClientVersion:  s.cfg.MinClientVersion,
 		Region:            s.cfg.Region,
 		CapacityAvailable: s.wg.PeerCount() < s.cfg.Capacity,
-	})
+	}
+
+	if s.issuer != nil {
+		pub := s.issuer.PublicKey()
+		keyID := s.issuer.KeyID()
+		resp.PrivacyPassKeyN = base64.RawURLEncoding.EncodeToString(pub.N.Bytes())
+		resp.PrivacyPassKeyE = pub.E
+		resp.PrivacyPassKeyID = base64.RawURLEncoding.EncodeToString(keyID[:])
+	}
+
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func splitHostPort(addr string) (host, port string, err error) {

@@ -2,8 +2,11 @@ package config
 
 import (
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"os"
 
@@ -29,6 +32,14 @@ type Config struct {
 	DNSTunnelPort int    `json:"dns_tunnel_port"` // default 53
 	ICMPUDPPort   int    `json:"icmp_udp_port"`   // default 4500
 
+	// PrivacyPassKey is the PEM-encoded RSA issuer key, empty on self-hosted
+	// servers.
+	//
+	// Its presence is what turns anonymous rate limiting on: a self-hosted
+	// operator controls which device keys are registered, so blind tokens would
+	// add ceremony without adding a guarantee.
+	PrivacyPassKey string `json:"privacy_pass_key"`
+
 	// PublicHost is the externally reachable IP or hostname for this server.
 	// Used in /v1/server/config responses so clients know where to connect.
 	// Defaults to empty string; clients fall back to the address they connected from.
@@ -41,6 +52,34 @@ type Config struct {
 	ACMEDomain   string `json:"acme_domain"`    // e.g. "vpn.freewire.com"; empty disables ACME
 	ACMEEmail    string `json:"acme_email"`     // contact for expiry notices
 	ACMECacheDir string `json:"acme_cache_dir"` // cert cache; defaults to "./acme-cache"
+}
+
+// ParseRSAPrivateKey decodes a PEM-encoded RSA private key.
+func ParseRSAPrivateKey(pemStr string) (*rsa.PrivateKey, error) {
+	block, _ := pem.Decode([]byte(pemStr))
+	if block == nil {
+		return nil, fmt.Errorf("no PEM block found")
+	}
+	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, fmt.Errorf("parse private key: %w", err)
+	}
+	key, ok := parsed.(*rsa.PrivateKey)
+	if !ok {
+		return nil, fmt.Errorf("key is %T, want an RSA private key", parsed)
+	}
+	return key, nil
+}
+
+// MarshalRSAPrivateKey encodes a key as PEM for storage in the config file.
+func MarshalRSAPrivateKey(key *rsa.PrivateKey) string {
+	return string(pem.EncodeToMemory(&pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: x509.MarshalPKCS1PrivateKey(key),
+	}))
 }
 
 // Load reads config from path. If the file does not exist, a new config with a
