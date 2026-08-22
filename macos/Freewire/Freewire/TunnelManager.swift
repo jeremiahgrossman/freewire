@@ -295,6 +295,32 @@ final class TunnelManager: ObservableObject {
             case .genuineBlock:
                 state = .networkBlock
             }
+        } catch APIError.serverUnreachable {
+            // The API was unreachable, which on this product's core use case is
+            // not a server outage: a captive portal blocks everything until you
+            // log in, including our API, so this is the *first* thing that fails
+            // on hotel and airport wifi.
+            //
+            // The portal probe used to run only after the transport chain had
+            // exhausted every path, which requires getting past registration.
+            // Registration never happened, so the probe never ran, and the user
+            // was told "Freewire's servers are unreachable right now" while
+            // sitting in front of a login page the app could have opened for
+            // them. That is the exact situation the product exists for, and it
+            // reported the one thing guaranteed not to be the cause.
+            await killTunnel()
+            await deregisterPeer()
+            guard !Task.isCancelled else { return }
+            switch await probeCaptivePortal() {
+            case .captivePortal(let url):
+                state = .captivePortal(redirectURL: url)
+            case .genuineBlock:
+                // Nothing intercepting and our server unreachable. Could be a
+                // hard block or a real outage; CONN-2b says the network is
+                // blocking, which is the more actionable of the two and the one
+                // the user can do something about.
+                state = .networkBlock
+            }
         } catch {
             // Kill the helper as well as releasing the peer. launchTunnel can
             // fail after the helper is already running -- a routing error, a

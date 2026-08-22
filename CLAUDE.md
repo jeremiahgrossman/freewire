@@ -82,9 +82,18 @@ every packet left in the clear, and DNS leaked to the ISP's resolver while
 traffic was tunneled. Prefer an end-to-end run over another test pass when
 deciding what to trust.
 
-**Phase 2 configs:** 0, 1, 2, 3 pass. 4 needs a local NXDOMAIN resolver; 5 will
-report CONN-3 rather than CONN-2b (a documented bootstrap gap, not a
-regression); 6 needs a live DNS session to upgrade from.
+**Phase 2 configs:** 0, 1, 2, 3 pass. 4, 5 and 6 are ready to run and need a
+password-prompting `sudo`; see `testing/README.md` for what each needs and the
+safe-combination table.
+
+Config 5 was recorded as "will report CONN-3 rather than CONN-2b, a documented
+bootstrap gap, not a regression". That was wrong, and preparing to run it is
+what surfaced the reason: the portal probe only ran after the transport chain
+had exhausted every path, which requires getting past registration. On a real
+captive portal the API is blocked too, so registration fails first and the probe
+never ran — the user was told "Freewire's servers are unreachable" while sitting
+in front of a login page. Fixed; the probe now runs when the API is unreachable.
+Config 5 should now show CONN-2b, and a real portal should show CONN-2a.
 
 **Audits:** three runs. The third audit's verification budget ran out after
 confirming eight findings; its remaining 209 unique candidates were adjudicated
