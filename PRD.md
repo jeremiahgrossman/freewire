@@ -112,7 +112,7 @@ A technically capable user who wants to run their own VPN server for privacy or 
 **Requirements:**
 - The client detects when it is behind a captive portal automatically, without user input, using platform-native signals (iOS: CNA/NEHotspotHelper; Android: captive portal detection API; macOS/Windows: connectivity check intercept detection)
 - The client attempts tunnel establishment using a prioritized fallback chain (see §6.1 Protocol Fallback Chain below); the entire chain completes in under 10 seconds
-- The tunnel is established before the captive portal is satisfied — Freewire does not require the user to authenticate with the captive portal first
+- The tunnel is established before the captive portal is satisfied — Freewire does not require the user to authenticate with the captive portal first. **This is the product's central claim and it is not yet demonstrable.** Getting through an unauthenticated portal depends on the DNS tunnel, which needs the tunnel zone delegated to the server so the portal's own resolver forwards its queries. No such delegation exists (OQ-4). Every other transport is blocked by a portal until the user logs in, so today the client detects the portal, opens it, and connects afterwards — correct behaviour, but not this requirement.
 - If all fallback paths fail, the client displays a plain-language explanation and offers a manual retry
 - Captive portal detection and bypass require no manual network configuration by the user
 - The active tunnel path (DNS, HTTP CONNECT, or TLS/443) is displayed in the client for transparency
@@ -157,7 +157,7 @@ Once any path establishes a tunnel, the client renegotiates: if a faster path is
 **Requirements:**
 - Amazon Web Services (AWS) is the supported cloud provider at launch
 - The setup flow guides a non-technical user through deploying a Freewire server on AWS; setup must complete in under 15 minutes for a user who has never deployed a server before
-- Freewire provides a one-click deploy mechanism via AWS Marketplace (AMI and CloudFormation template); this is the sole distribution path for the server binary
+- Freewire provides a one-click deploy mechanism via AWS Marketplace (AMI and CloudFormation template); this is the sole distribution path for the server binary. **Not built.** Deployment today is `deploy/launch-aws.sh` and `deploy/provision.sh`, which stand up a working server on EC2 in one command but assume an operator with AWS credentials and a terminal. That is sufficient for the single-user scope and does not meet the "non-technical user in under 15 minutes" requirement above, which the Marketplace path exists to satisfy.
 - The server software is proprietary and not open source; the binary is embedded in the AMI — no separate download is required or provided
 - The client connects to a self-hosted server using the same app and UX as the managed server
 - Self-hosted servers support the captive portal bypass protocol (6.1)
@@ -172,14 +172,14 @@ Once any path establishes a tunnel, the client renegotiates: if a faster path is
 **Requirements:**
 - macOS is supported at launch. iOS, Android, and Windows are post-launch.
 - The macOS app uses `wireguard-go` (userspace) via direct `utun` interface — no Apple NetworkExtension framework required.
-- Kill switch is implemented via `pf` firewall rules managed by an `SMJobBless` privileged helper installed at first launch.
+- Kill switch is implemented via `pf` firewall rules managed by a privileged helper installed at first launch. **Superseded in detail:** `SMJobBless` was deprecated in macOS 13 and the design moved to `SMAppService`. Neither is installed yet — see §6.6 and OQ-5.
 - Network change detection uses `NWPathMonitor`.
 - Distribution is signed + notarized DMG only. Mac App Store distribution is permanently incompatible with direct utun access.
 - The client routes all device traffic through the tunnel when connected (full-tunnel mode)
 - The client shows current connection status: disconnected, connecting, connected, error
 - The client shows which server (managed or self-hosted) is active and in which region
 - The client reconnects automatically when the network changes (NWPathMonitor detects path changes)
-- Kill switch is enabled by default; all traffic is blocked via pf rules if the VPN tunnel drops unexpectedly until the tunnel is restored or the user explicitly disconnects
+- Kill switch is enabled by default; all traffic is blocked via pf rules if the VPN tunnel drops unexpectedly until the tunnel is restored or the user explicitly disconnects. **Not yet true, and the default is currently the opposite:** while the switch is unenforced the preference defaults to off, so no user carries a stored `true` that implies protection they do not have. Restored to on when the helper ships.
 - The kill switch can be disabled by the user in settings, with a plain-language explanation of the tradeoff shown before the setting is changed
 - Split-tunnel is out of scope at launch (full-tunnel mode only)
 - The onboarding flow — from first launch to first successful connection — requires no more than two user decisions on the managed path (privileged helper installation, notification permission); self-hosting adds steps but is a secondary link, not the default
@@ -208,7 +208,7 @@ Once any path establishes a tunnel, the client renegotiates: if a faster path is
 - The client detects network changes (wifi → cellular, network switch) and re-establishes the tunnel automatically without user action
 - Reconnection attempt begins within 3 seconds of detecting a dropped tunnel
 - If reconnection fails after 3 attempts, the user is notified and shown a manual retry option
-- On reconnection, the kill switch remains active (no traffic leaks during reconnect)
+- On reconnection, the kill switch remains active (no traffic leaks during reconnect). **Not yet true.** The kill switch is unimplemented: the privileged helper's rule generation is written and tested, and the pf logic is now runnable, but nothing in the app invokes it and it has never run against live pf. Until it ships, traffic flows unprotected during reconnection and the UI says so verbatim (SESSION-1, SESSION-2, and the disabled preferences toggle in `error-states-spec.md` §Interim). That section is deleted and this requirement restored when the helper lands.
 - The client handles IP address changes on the underlying network without dropping the session where the protocol supports it
 
 ---
@@ -273,6 +273,8 @@ iOS is not in scope at launch. When iOS work resumes, the requirements below app
 
 ### 6.9 Network Path Intelligence
 
+**Status: specified, deliberately not built.** The requirements below stand as written; the implementation is declined for now. Two things changed after they were drafted. Reconnect learned to remember the last working transport, so a device's own history already goes straight to the right path and the crowdsourced hint only helps on a first connection to an unseen network. And a BSSID hash turns out not to be anonymous in the way the word implies: the input space is small and heavily enumerated, so anyone holding a wardriving database can hash it and reverse these by lookup, making this the one feature that would transmit a location signal. The preferences toggle in the requirements below must not be added while this stands — a toggle for a feature that does nothing is its own false claim. See `DECISIONS.md` §NETWORK-INTELLIGENCE for what would make it acceptable.
+
 **Description:** An opt-in crowdsourced signal that helps Freewire recommend faster connection paths based on anonymized reports from other users on the same network.
 
 **Requirements:**
@@ -293,12 +295,17 @@ iOS is not in scope at launch. When iOS work resumes, the requirements below app
 
 **Launch requirements:**
 
-- **DNS over HTTPS (DoH):** The client encrypts all DNS queries using DoH and forwards them to Cloudflare 1.1.1.1, bypassing Freewire's servers entirely. The resolver is hardcoded; not user-configurable at launch. Freewire's managed servers never see which domains a user resolves. This is a cryptographic guarantee, not a logging policy.
-- **Encrypted Client Hello (ECH):** The client requests ECH when connecting to TLS destinations that support it. ECH encrypts the SNI (server name) in the TLS ClientHello using the destination server's public key, so Freewire's servers see the destination IP but not the specific hostname. ECH support is negotiated automatically; the client falls back gracefully on destinations that do not support it.
+- **DNS over HTTPS (DoH):** *Implemented, with a documented exception.* The client runs a DoH forwarder on loopback, points the system resolver at it, and relays every query over HTTPS to Cloudflare 1.1.1.1. Queries cross the tunnel as TLS to port 443, so Freewire's servers cannot read them. The resolver is hardcoded; not user-configurable at launch.
+
+  **The exception:** DoH is not used on the DNS and ICMP transports. A DoH round trip over those paths measured 5–10 seconds, and because the takeover is system-wide, every application on the machine pays it — which stops the machine working rather than merely slowing the VPN. On those two transports the system resolver is left alone and queries go to the network's own resolver in cleartext. The user is told (DNS-1 in `error-states-spec.md`). See `DECISIONS.md` §DNS-ON-SLOW-TRANSPORTS for the alternatives considered and what would reverse this.
+
+- **Encrypted Client Hello (ECH):** *Removed from scope. The requirement as written cannot be implemented by a VPN.* ECH encrypts the SNI in a TLS handshake, but the handshake carrying a user's destination is end-to-end between their browser and the site; Freewire only relays those packets and cannot rewrite or encrypt them without breaking the connection. ECH is deployed by the browser and the destination, never by an intermediary. Freewire benefits passively wherever both ends already support it and can do nothing to bring that about.
+
+  ECH would still apply to Freewire's *own* TLS connection to its server, to stop a portal blocking by hostname. On a server addressed by bare IP that is also worth nothing, since SNI cannot carry an IP and the client's ClientHello contains no hostname at all (confirmed by packet capture). It becomes worth building only for a managed server reached by name. See `DECISIONS.md` §WHAT-THE-SERVER-CAN-SEE.
 
 **Explicit limitation to document for users:**
 
-- Freewire's managed servers are trusted intermediaries that decrypt VPN traffic to forward it. They can technically observe destination IP addresses, traffic timing, and volume during active sessions. The protections above reduce what can be observed; they do not eliminate it. Users with the highest privacy requirements should use the self-hosted path, where they control the server.
+- Freewire's managed servers are trusted intermediaries that decrypt VPN traffic to forward it. They can observe destination IP addresses, the hostnames in TLS handshakes they relay, traffic timing, and volume during active sessions. **Destination visibility is structural:** a server that forwards a packet must know where to send it, and no single-hop VPN can avoid this. What Freewire does instead is not keep it — connections are counted into hourly totals and never logged individually, enforced by tests that fail if a per-connection log statement is reintroduced. The claim that survives scrutiny is "we do not keep it", not "we cannot see it". The product's user-facing copy was corrected to say so. Users with the highest privacy requirements should use the self-hosted path, where they control the server.
 
 **Post-launch design goal:**
 
@@ -347,8 +354,19 @@ iOS is not in scope at launch. When iOS work resumes, the requirements below app
 
 ## 10. Open Questions → Decisions Log
 
+> **Synced with the implementation on 2026-08-22.** Requirements that the build
+> diverged from are marked in place rather than rewritten, so the original
+> intent stays legible next to what was actually done and why. Decisions 21–27
+> were taken during implementation and had no entry here.
+>
+> `DECISIONS.md` carries the long form for the five choices that traded one
+> stated goal against another, including what evidence supports each and what
+> would justify reopening it. This log is the index; that file is the argument.
+
 ### Open Questions
 
+- **OQ-4 (open):** DNS tunnel delegation. The transport needs `tunnel.freewire.com` delegated to the server so a portal's own resolver forwards its queries. `freewire.com` is registered to a third party and no delegation exists, so the DNS tunnel — the one transport that gets through an unauthenticated portal — cannot be exercised against a real captive portal. Testing to date has pointed the client straight at the server's IP, which a real portal would block. Resolving this needs a domain under Freewire's control, and it gates any field test of the product's core premise.
+- **OQ-5 (open):** Kill switch delivery. `SMAppService` registration requires a Developer ID; the machine has none. The helper is buildable and runnable under `sudo`, which is enough to develop and test against real pf, but not to ship. Distribution needs the certificate regardless, and no workaround should be entertained — the alternatives all end in instructing users to bypass Gatekeeper to install a VPN that asks for root.
 - **OQ-2 (closed):** ~~Server software open-source repository location~~ — resolved: Freewire software is proprietary. No public repository. Server software is distributed as a deployable binary only. Decision #18.
 - **OQ-3 (closed):** ~~Privacy Pass token issuance timing~~ — resolved: Decision #19.
 
@@ -364,7 +382,7 @@ iOS is not in scope at launch. When iOS work resumes, the requirements below app
 
 5. **Self-hosted cloud support** — resolved: Amazon Web Services (AWS) at launch, via one-click deploy (AWS Marketplace AMI or CloudFormation template). Additional providers post-launch.
 
-6. **Kill switch default** — resolved: on by default. Users may disable it in settings with a plain-language explanation of the tradeoff. Rationale: the primary use case is protection on hostile public networks; defaulting to maximum protection is consistent with the product's purpose.
+6. **Kill switch default** — resolved: on by default *as the end state*; currently off, because the switch is unenforced and a stored `true` would imply protection that does not exist. Users may disable it in settings with a plain-language explanation of the tradeoff. Rationale: the primary use case is protection on hostile public networks; defaulting to maximum protection is consistent with the product's purpose.
 
 7. **Server region count** — resolved: one region at launch. Additional regions added post-launch based on usage.
 
@@ -384,7 +402,7 @@ iOS is not in scope at launch. When iOS work resumes, the requirements below app
 
 15. **iOS captive portal banner** — resolved: Freewire handles silently. Fallback chain continues in background. No Freewire-specific guidance shown when iOS "Sign in to network" banner appears.
 
-16. **Client language** — resolved: Swift for iOS and macOS. WireGuardKit (the official open-source Swift/Objective-C wrapper around the reference WireGuard implementation) handles the WireGuard protocol layer. Custom DNS tunnel code is written in Swift on top of that foundation.
+16. **Client language** — **superseded.** Originally: Swift throughout, with WireGuardKit handling the protocol layer and the DNS tunnel written in Swift on top. As built: the macOS app is Swift, but the tunnel is a separate Go binary (`tunnel/cmd/freewire-tunnel`) using wireguard-go over a `utun` device, and every transport — HTTP CONNECT, TLS/443 with uTLS, the DNS tunnel, ICMP/UDP — is Go. WireGuardKit is explicitly not used on macOS. The split exists because the transports need raw socket and routing control that a NetworkExtension-shaped API does not give, and because the same Go code then runs on both ends of the DNS and ICMP protocols, so the two implementations cannot drift. The privileged work (routing, DNS takeover, pf) lives in that binary, which runs as root; the app never does.
 
 17. **Server language** — resolved: Go. wireguard-go (the reference userspace WireGuard implementation) is in Go; the authoritative DNS tunnel server and Privacy Pass token issuer are also built in Go. Compiles to a single static binary for the CloudFormation/AMI deploy.
 
@@ -393,6 +411,20 @@ iOS is not in scope at launch. When iOS work resumes, the requirements below app
 19. **Software license** — resolved: Freewire is proprietary, closed-source software. The codebase is not published. Dependencies (WireGuardKit, wireguard-go) are MIT-licensed and permit proprietary use with no copyleft obligation. Server software is distributed to self-hosting users as a prebuilt binary only.
 
 20. **Privacy Pass token issuance timing** — resolved: client requests initial token batch on first connection attempt (not at launch). Client refreshes in the background when the batch drops below 3 tokens remaining. Re-issuance is silent — no user-visible state. If re-issuance fails, connection continues and the client retries silently on the next connection attempt.
+
+21. **Rate-limiting token issuance** — resolved: proof of work, plus a global budget as an absolute ceiling. Issuance is unauthenticated by design, so without a cost anyone could mint tokens freely and the rate limit those tokens exist to impose would be free to bypass. Every ordinary rate-limit key was unavailable: the client IP must not exist in the process, a device handle would defeat blind signing by making issuance correlatable with redemption, and there are no accounts. Proof of work charges the caller in CPU rather than in identity — a challenge is an HMAC over a coarse time window, verifiable without being stored, and each solution is single-use. A batch costs roughly 0.08s on one core. The global budget remains because work alone cannot cap an attacker with more cores; its cost is that one heavy caller can exhaust it for everyone, accepted while there is one user.
+
+22. **Token expiry** — resolved: a coarse expiry in whole UTC days, carried inside the signed message. Wire format is `type(2) || expiry(4) || nonce(32) || signature(256)`. Previously a token was valid forever while its spent record was dropped after thirty days, so anyone holding one past that window could replay it indefinitely. An issuer key epoch was the alternative and was rejected as more machinery than the problem needs; it would also have closed CRYPTO-09, which consequently stays open. Two non-obvious properties: the issuer signs blindly and cannot set the expiry, so the client does and the server refuses anything over-dated at redemption; and the granularity is whole days because a finer timestamp would partition tokens into cohorts small enough to identify a device, undoing the blinding. See `DECISIONS.md` §TOKEN-EXPIRY.
+
+23. **Server trust for self-hosted deployments** — resolved: two independent pins. The server's WireGuard public key is pinned out of band by the user, and the certificate's public key is pinned trust-on-first-use. The second exists because accepting any certificate — justified by the WireGuard pin — left `POST /v1/peers` carrying a Privacy Pass token an interceptor could read and spend, since that pin is checked after the fact and only on the config response. A user pin is scoped to the host it was set for, so pinning a self-hosted server no longer disables CA validation for the managed one.
+
+24. **Privacy Pass issuer key trust** — resolved: pinned trust-on-first-use, and a changed key is refused rather than followed. Blind signing hides the token from the issuer but not which key signed it, so an issuer handing every client a distinct keypair learns at redemption exactly which client a token came from, with every signature still verifying and no error raised anywhere. A key-consistency check is the only thing that catches it.
+
+25. **What the server records** — resolved: counts, not events. Registrations, transport sessions and evictions each used to write a timestamped line. None named a client IP, but a timestamped record that a connection happened is what the privacy policy says does not exist, and on a small server that timeline approximates a usage history. Those events are counted and reported as hourly rollups. Two tests hold the line: one fails if any source file logs a single connection event, the other requires the rollup to emit only numeric fields. wireguard-go's own logger, which names peers by public-key fragment from vendored code, is wrapped to redact them.
+
+26. **Multipath transports** — resolved: not pursued for throughput; the redundancy half was implemented instead. Running permitted transports in parallel does not pay, because the paths differ by roughly 300× (166 Mbps measured on TLS/443 against 0.5–2 Mbps for the DNS tunnel), and WireGuard's 8128-packet anti-replay window would reject traffic arriving late on the slow path while TCP inside the tunnel thrashed its retransmit timer across the mismatched latencies. What did pay: reconnect now names the transport that was working instead of restarting the chain from the top, which on a portal permitting only the DNS tunnel had been spending most of the fallback budget to arrive back where it started, with the user unprotected throughout. See `technical-architecture.md` §10.
+
+27. **DNS and ICMP handshake authentication** — deferred until Freewire serves people other than its operator. Both handshakes use unauthenticated ephemeral DH, so the on-path adversary those transports exist to defeat can sit in the middle of them. An active attacker gains transport framing and the ability to disrupt; they do not gain traffic, because the WireGuard session inside is authenticated by the pinned server key. The fix when picked up is to mix the server's known public key into the handshake, needing no new key material — it is deferred because it is a protocol change to both ends of both transports, and because today the on-path adversary is a portal the sole operator chose to connect to.
 
 ---
 
