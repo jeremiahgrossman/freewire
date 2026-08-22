@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -800,13 +801,11 @@ func verifyTunnelCarriesTraffic() error {
 		if got > 0 {
 			time.Sleep(gap)
 		}
-		c, err := net.DialTimeout("tcp", probeAddr(), probeBudget())
-		if err != nil {
+		if err := probeCarriesData(probeBudget()); err != nil {
 			lastErr = err
 			got = 0 // a miss breaks the sustained streak
 			continue
 		}
-		c.Close()
 		got++
 		if got >= need {
 			return nil
@@ -814,6 +813,34 @@ func verifyTunnelCarriesTraffic() error {
 	}
 	return fmt.Errorf("egress did not sustain: best streak %d/%d to %s: %w",
 		got, need, probeAddr(), lastErr)
+}
+
+// probeCarriesData confirms the tunnel carries a real, multi-fragment exchange
+// end to end -- not just a TCP handshake. It completes a TLS handshake to a
+// well-known host on 443, which sends a multi-hundred-byte ClientHello and reads
+// a multi-packet ServerHello + certificate back. A bare TCP dial (three tiny
+// packets) passed on the DNS tunnel while every real HTTPS request failed,
+// because the tunnel carried single-fragment packets but broke on multi-fragment
+// ones -- a TCP SYN is one fragment, a TLS ClientHello is several. This probe
+// exercises exactly that, so a tunnel that cannot move real data fails the check
+// instead of reporting a false "Protected".
+//
+// InsecureSkipVerify is deliberate: this measures whether bytes flow both ways,
+// not who the peer is. The user's actual traffic is authenticated end to end by
+// WireGuard; this probe authenticates nothing and carries no user data.
+func probeCarriesData(budget time.Duration) error {
+	host, _, err := net.SplitHostPort(probeAddr())
+	if err != nil {
+		host = probeAddr()
+	}
+	dialer := net.Dialer{Timeout: budget}
+	conn, err := tls.DialWithDialer(&dialer, "tcp", net.JoinHostPort(host, "443"),
+		&tls.Config{InsecureSkipVerify: true}) //nolint:gosec // reachability probe, not authentication
+	if err != nil {
+		return err
+	}
+	conn.Close()
+	return nil
 }
 
 // pinOutsideTunnel adds a host route for ip along the path it currently uses,
