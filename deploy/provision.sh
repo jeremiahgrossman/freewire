@@ -55,6 +55,22 @@ else
   netfilter-persistent save >/dev/null 2>&1 || true
 fi
 
+echo "==> freeing port 53"
+# systemd-resolved binds 0.0.0.0:53 on Ubuntu, so the DNS tunnel cannot start.
+# The failure is easy to miss: every other transport comes up and only the DNS
+# fallback is silently absent.
+if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+  mkdir -p /etc/systemd/resolved.conf.d
+  cat > /etc/systemd/resolved.conf.d/freewire.conf <<EOF
+[Resolve]
+DNSStubListener=no
+EOF
+  systemctl restart systemd-resolved
+  # resolv.conf pointed at the stub that was just switched off.
+  ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+  echo "    stub listener disabled"
+fi
+
 echo "==> installing service"
 cat > "$UNIT" <<EOF
 [Unit]

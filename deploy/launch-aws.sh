@@ -46,7 +46,8 @@ if [[ -z "$SG_ID" || "$SG_ID" == "None" ]]; then
   aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --region "$REGION" \
     --ip-permissions \
       "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=$MYIP,Description='ssh from deployer'}]" \
-      "IpProtocol=tcp,FromPort=443,ToPort=443,IpRanges=[{CidrIp=0.0.0.0/0,Description='TLS transport and API'}]" \
+      "IpProtocol=tcp,FromPort=443,ToPort=443,IpRanges=[{CidrIp=0.0.0.0/0,Description='TLS transport'}]" \
+      "IpProtocol=tcp,FromPort=8080,ToPort=8080,IpRanges=[{CidrIp=0.0.0.0/0,Description='API'}]" \
       "IpProtocol=udp,FromPort=51820,ToPort=51820,IpRanges=[{CidrIp=0.0.0.0/0,Description='WireGuard'}]" \
       "IpProtocol=udp,FromPort=53,ToPort=53,IpRanges=[{CidrIp=0.0.0.0/0,Description='DNS tunnel'}]" \
       "IpProtocol=udp,FromPort=4500,ToPort=4500,IpRanges=[{CidrIp=0.0.0.0/0,Description='ICMP/UDP tunnel'}]" \
@@ -104,7 +105,7 @@ cat <<EOF
   Done. Instance $INSTANCE_ID at $IP
 
   Point the client at it:
-    macos/Freewire/Freewire/AppDelegate.swift -> ServerAPI(host: "$IP", port: 443)
+    macos/Freewire/Freewire/AppDelegate.swift -> ServerAPI(host: "$IP")
 
   Pin the key printed above:
     defaults write com.freewire.vpn.Freewire pinnedServerKey '<key>'
