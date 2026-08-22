@@ -11,6 +11,11 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 > **Update this section at the start of each session.**
 
+> **Scope: single user (2026-08-22).** Build only what one person running their
+> own server needs. Anything whose purpose is serving *other* people is
+> deferred, not cancelled — see "Deferred until there are other users" below.
+> Do not add multi-user machinery without checking that decision has changed.
+
 - **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
 - **In progress:** nothing
 - **Next action:** Configs 4 and 6 (see `testing/README.md`), or the Swift client work that a Developer ID unblocks.
@@ -43,7 +48,25 @@ regression); 6 needs a live DNS session to upgrade from.
 
 **Audits:** two runs, 142 findings, all closed except the privileged helper.
 
-**Known gaps:**
+### Deferred until there are other users
+
+None of these matter for one person on their own server. They become blocking
+the moment anyone else connects.
+
+- **Privacy Pass issuance limits.** The mechanism is built and working, but
+  nothing caps how many tokens a requester may mint, so it does not yet
+  rate-limit anything. With one user there is nothing to limit. Resolving it
+  needs a decision, because the spec's per-IP cap collides with the
+  no-client-IP rule.
+- **Abuse posture.** A free VPN with no accounts attracts spam and infringing
+  traffic; complaints reach the host, and hosts terminate VPN operators.
+- **Capacity.** 253 peers per server, one /24. Fine for one device.
+- **Hosting economics.** EC2 meters egress at $0.09/GB, which is a rounding
+  error for personal use and ruinous for a free service. See `deploy/COSTS.md`.
+- **Server dashboard, QR config generation** (`server-dashboard-api-spec.md`) —
+  these exist to enrol *other* devices.
+
+### Known gaps that matter at any scale
 
 - **`FreewireHelper` is written but cannot install.** `SMAppService` requires a
   Developer ID and this machine has no signing identity. The rule generation is
@@ -61,12 +84,6 @@ regression); 6 needs a live DNS session to upgrade from.
   names the destination in cleartext.
 - DoH is hardcoded to Cloudflare 1.1.1.1: a single point of failure and of trust
   for a privacy-sensitive signal.
-- Privacy Pass issuance is not rate-limited. The spec calls for a per-IP cap,
-  which sits awkwardly against the no-client-IP rule — resolve before anyone
-  else uses the server.
-- **No abuse posture.** A free VPN with no accounts attracts spam and infringing
-  traffic; complaints go to the host, and hosts terminate VPN operators. Needed
-  before anyone else is on the service.
 - `captive-portal-testing-guide.md`'s `proxy.py` listing is broken — its relay
   threads never iterate. `testing/proxy.py` is a working replacement.
 
