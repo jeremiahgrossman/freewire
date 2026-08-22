@@ -29,6 +29,11 @@ struct KillSwitchController {
     private let anchor = KillSwitchRules.anchorName
     private let rulesPath = "/etc/freewire/killswitch.conf"
 
+    /// Where the ruleset displaced by engage is kept, so release can restore it.
+    static let savedRulesPath = "/etc/freewire/pf-previous.conf"
+    /// Exposed so the dead-man switch in main.swift can clear it.
+    static let stateFile = "/etc/freewire/killswitch.conf"
+
     /// Loads the ruleset and enables pf.
     func engage(_ rules: KillSwitchRules) throws {
         let text = rules.render()
@@ -48,6 +53,19 @@ struct KillSwitchController {
         let check = run("/sbin/pfctl", ["-n", "-f", rulesPath])
         guard check.status == 0 else {
             throw Failure.rulesRejected(check.output)
+        }
+
+        // Capture whatever is loaded before replacing it, so release can put it
+        // back. `pfctl -f` replaces the entire ruleset -- there is no way to add
+        // rules without an anchor reference in /etc/pf.conf, and editing a
+        // system file to get one is a larger intrusion than this. What must not
+        // happen is the previous version's behaviour: replace the ruleset, then
+        // release by flushing everything, leaving the machine with no pf rules
+        // at all and every other consumer's rules silently gone.
+        let existing = run("/sbin/pfctl", ["-s", "rules"])
+        if existing.status == 0 {
+            try? existing.output.write(toFile: Self.savedRulesPath,
+                                       atomically: true, encoding: .utf8)
         }
 
         let load = run("/sbin/pfctl", ["-f", rulesPath])
@@ -72,10 +90,23 @@ struct KillSwitchController {
     /// Only ever called on an explicit user action — disconnecting, or quitting
     /// the app. Never on a timer, and never because reconnection failed.
     func release() throws {
-        let flush = run("/sbin/pfctl", ["-F", "all"])
-        guard flush.status == 0 else {
-            throw Failure.pfctlFailed(flush.output)
+        // Restore, do not flush.
+        //
+        // This ran `pfctl -F all`, which erases every rule on the machine --
+        // ours, macOS's own anchors, and anything any other application had
+        // loaded. Releasing a kill switch is not a reason to disarm the
+        // system's firewall, and the previous state is recoverable: either what
+        // was captured at engage, or failing that the system default.
+        let restore: (status: Int32, output: String)
+        if FileManager.default.fileExists(atPath: Self.savedRulesPath) {
+            restore = run("/sbin/pfctl", ["-f", Self.savedRulesPath])
+        } else {
+            restore = run("/sbin/pfctl", ["-f", "/etc/pf.conf"])
         }
+        guard restore.status == 0 else {
+            throw Failure.pfctlFailed(restore.output)
+        }
+        try? FileManager.default.removeItem(atPath: Self.savedRulesPath)
 
         if let token = try? String(contentsOfFile: "/etc/freewire/pf.token", encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty {
@@ -90,8 +121,22 @@ struct KillSwitchController {
     /// Read from pf rather than from any state this process holds, so a helper
     /// that restarted still reports the truth.
     func isEngaged() -> Bool {
-        FileManager.default.fileExists(atPath: rulesPath)
-            && run("/sbin/pfctl", ["-s", "info"]).output.contains("Status: Enabled")
+        // Ask pf what is loaded, not the filesystem what we once wrote.
+        //
+        // This tested for the existence of the rules file, which survives a
+        // ruleset being replaced, flushed, or rejected. The file is written
+        // before pf is touched, so a load that failed left the file present and
+        // this reporting the kill switch active over a machine with no rules at
+        // all -- the one lie a kill switch must never tell.
+        let info = run("/sbin/pfctl", ["-s", "info"])
+        guard info.status == 0, info.output.contains("Status: Enabled") else {
+            return false
+        }
+        let rules = run("/sbin/pfctl", ["-s", "rules"])
+        guard rules.status == 0 else { return false }
+        // The marker is the default-deny our ruleset opens with. Its presence
+        // means our rules are the ones loaded, not merely that pf is on.
+        return rules.output.contains("block drop all")
     }
 
     // MARK: - Helpers

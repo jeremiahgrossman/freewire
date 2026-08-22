@@ -41,8 +41,15 @@ struct KillSwitchRules {
         self.allowLocalNetwork = allowLocalNetwork
     }
 
-    /// The anchor name the helper loads rules under, so they can be replaced or
-    /// flushed without touching anyone else's ruleset.
+    /// Identifier for the ruleset.
+    ///
+    /// Named for an anchor because that was the intent, but nothing loads into
+    /// one: an anchor only takes effect if /etc/pf.conf references it, and
+    /// editing a system file to add that reference is a larger intrusion than
+    /// replacing the ruleset and putting the previous one back. The controller
+    /// saves what it displaces and restores it on release. Left here because
+    /// the anchor approach is still the right end state if the app ever ships
+    /// with an installer that can own /etc/pf.conf.
     static let anchorName = "com.freewire.killswitch"
 
     /// Renders the ruleset.
@@ -52,7 +59,7 @@ struct KillSwitchRules {
         out.append("# Freewire kill switch. Generated — do not edit by hand.")
         out.append("#")
         out.append("# Blocks everything except what is needed to rebuild the tunnel.")
-        out.append("# Loaded into anchor \(Self.anchorName).")
+        out.append("# Replaces the main ruleset; the displaced one is restored on release.")
         out.append("")
 
         // Loopback is exempted wholesale: local IPC has nothing to do with the
