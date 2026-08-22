@@ -3,6 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -63,5 +66,103 @@ func dnsProbe(args []string) int {
 		return 3
 	}
 	fmt.Fprintln(os.Stderr, "dns-probe: post-handshake poll OK -- DNS transport is live end to end")
+	return 0
+}
+
+// dnsThroughput measures how many DNS round trips per second the resolver,
+// delegation and server sustain, and translates that into an upper bound on
+// upstream tunnel throughput. It does not route traffic or take over the system
+// resolver, so it is safe on a machine in use.
+//
+//	freewire-tunnel --dns-throughput [--resolver 1.1.1.1] [--count 300] [--concurrency 8]
+//
+// The number that matters for the DNS tunnel is not bandwidth to the server --
+// the server has 166 Mbps -- but how fast a resolver will carry a stream of
+// queries to a single zone before its own rate limits or a slow recursion path
+// throttle it. That, times the ciphertext each query carries (dnsFragCipherBytes),
+// bounds real upstream throughput. Concurrency mirrors the tunnel's sliding
+// window: the live tunnel pipelines queries rather than sending them one at a
+// time, so a serial measurement would understate capacity.
+func dnsThroughput(args []string) int {
+	resolver := "1.1.1.1"
+	domain := ""
+	count := 300
+	concurrency := 8
+
+	for i := 0; i < len(args); i++ {
+		next := func() (string, bool) {
+			if i+1 < len(args) {
+				i++
+				return args[i], true
+			}
+			return "", false
+		}
+		switch args[i] {
+		case "--resolver":
+			if v, ok := next(); ok {
+				resolver = v
+			}
+		case "--domain":
+			if v, ok := next(); ok {
+				domain = v
+			}
+		case "--count":
+			if v, ok := next(); ok {
+				if n, err := strconv.Atoi(v); err == nil {
+					count = n
+				}
+			}
+		case "--concurrency":
+			if v, ok := next(); ok {
+				if n, err := strconv.Atoi(v); err == nil && n > 0 {
+					concurrency = n
+				}
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "dns-throughput: unknown argument %q\n", args[i])
+			return 2
+		}
+	}
+
+	cfg := Config{DNSTunnelDomain: domain}
+	zone := effectiveDNSTunnelDomain(cfg)
+	perQuery := dnsFragCipherBytes(zone)
+	fmt.Fprintf(os.Stderr, "dns-throughput: zone %q via %s, %d queries at concurrency %d (%d ciphertext bytes/query)\n",
+		zone, resolver, count, concurrency, perQuery)
+
+	sess, err := dnsHandshake(cfg, resolver)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dns-throughput: FAIL handshake: %v\n", err)
+		return 1
+	}
+
+	var done, failed int64
+	var wg sync.WaitGroup
+	start := time.Now()
+	for w := 0; w < concurrency; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for atomic.AddInt64(&done, 1) <= int64(count) {
+				if _, err := sess.poll(); err != nil {
+					atomic.AddInt64(&failed, 1)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	fails := atomic.LoadInt64(&failed)
+	ok := int64(count) - fails
+	qps := float64(ok) / elapsed.Seconds()
+	// Upper bound: every query carrying a full ciphertext fragment upstream.
+	kbps := qps * float64(perQuery) * 8 / 1000
+
+	fmt.Fprintf(os.Stderr, "dns-throughput: %d/%d queries ok in %s\n", ok, count, elapsed.Round(time.Millisecond))
+	fmt.Fprintf(os.Stderr, "dns-throughput: %.0f queries/sec  ->  ~%.0f Kbps upstream ceiling\n", qps, kbps)
+	if fails > 0 {
+		fmt.Fprintf(os.Stderr, "dns-throughput: %d queries failed (resolver throttling or loss)\n", fails)
+	}
 	return 0
 }

@@ -112,6 +112,12 @@ func main() {
 		os.Exit(dnsProbe(os.Args[2:]))
 	}
 
+	// --dns-throughput measures the resolver/delegation query capacity and the
+	// upstream ceiling it implies. Like --dns-probe it changes no system state.
+	if len(os.Args) > 1 && os.Args[1] == "--dns-throughput" {
+		os.Exit(dnsThroughput(os.Args[2:]))
+	}
+
 	// Repair before doing anything else, on every run. setupRouting used to be
 	// the only place this happened, so a machine left broken stayed broken
 	// until a connection attempt got far enough to reach it -- and a connection
