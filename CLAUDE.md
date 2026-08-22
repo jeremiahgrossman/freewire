@@ -22,6 +22,12 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   design decisions below; or the kill-switch cluster once a Developer ID exists.
 - **Blocked on:** a Developer ID certificate, for `FreewireHelper` and for signed/notarized distribution.
 
+> **Do not test the DNS or ICMP transports with routing on a machine in use.**
+> Every lookup on the host then goes through a 500 Kbps tunnel at 5-10s each,
+> and the machine becomes unusable — including any agent session running the
+> test. This was misread as a crash twice. See `testing/README.md`.
+> Repair with `sudo tunnel/freewire-tunnel --restore`.
+
 **Scripted end-to-end runs:** `testing/connect.sh` brings the tunnel up against
 the live server and `testing/disconnect.sh` tears it down and asserts the
 machine was restored (routes, resolvers, IPv6, state files, egress). Use these

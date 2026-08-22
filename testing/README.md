@@ -41,6 +41,33 @@ passes every config without testing anything.
 Linux/Raspberry Pi gateway with the test device behind it. Use when you
 outgrow the single-machine setup.
 
+## Do not run these on a machine you are using
+
+**Never run the DNS or ICMP transports with routing installed on a working
+machine.** With the DNS takeover active, every name lookup on the host goes
+through the tunnel, and those transports resolve in 5-10 seconds. Every
+application stops working — browser, chat, and any agent session driving the
+test. It looks exactly like the network has failed, because for practical
+purposes it has.
+
+This broke the developer's machine three times before the cause was understood.
+Twice it was misread as a crash; it is not, it is the machine being asked to put
+all of its DNS through a 500 Kbps channel.
+
+Safe combinations:
+
+| Transport | Routing | DoH | Safe to run here |
+|---|---|---|---|
+| TLS/443, WireGuard | on | on | yes |
+| DNS, ICMP | on | on | **no — takes the machine down** |
+| DNS, ICMP | `--skip-egress-check` | off | yes, proves transport only |
+
+Repair after any run that ends badly:
+
+```bash
+sudo tunnel/freewire-tunnel --restore
+```
+
 ## Safety
 
 These scripts install `block all` firewall rules on your own machine. Each

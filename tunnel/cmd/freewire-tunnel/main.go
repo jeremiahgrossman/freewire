@@ -181,6 +181,9 @@ func main() {
 			bypassHost = h
 		}
 	}
+	// The transport is chosen by now, so the probe can be budgeted for it.
+	probeBudget = probeBudgetFor(transportName)
+
 	if skipEgressCheck() {
 		// Path selection has already been decided by this point: the transport
 		// is chosen and WireGuard has handshaked over it. Routing is the only
@@ -305,8 +308,32 @@ func (h *healthTally) record(ok bool) bool {
 }
 
 // probeThroughTunnel performs one round trip over the current routes.
+// probeBudget is how long a probe through the tunnel may take.
+//
+// Set once the transport is known, because the transports differ by orders of
+// magnitude: a TCP handshake over the DNS tunnel is several fragmented queries
+// and a poll round trip, where the same handshake over TLS/443 is one RTT.
+// handshakeBudgetFor already scales for exactly this reason.
+//
+// It was a flat 2s, which the DNS transport could not meet -- the tunnel came
+// up, failed its own egress check and tore itself down. Raising it to a flat
+// 12s fixed that and broke the other end: a genuinely dead tunnel then took
+// three 12s attempts to notice, with the user unprotected throughout.
+var probeBudget = 3 * time.Second
+
+func probeBudgetFor(transport string) time.Duration {
+	switch transport {
+	case "dns":
+		return 12 * time.Second
+	case "icmp_udp":
+		return 8 * time.Second
+	default:
+		return 3 * time.Second
+	}
+}
+
 func probeThroughTunnel() error {
-	c, err := net.DialTimeout("tcp", probeAddr(), 12*time.Second)
+	c, err := net.DialTimeout("tcp", probeAddr(), probeBudget)
 	if err != nil {
 		return err
 	}
@@ -625,7 +652,7 @@ func setupRouting(tunName, bypassHost string) error {
 func verifyTunnelCarriesTraffic() error {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		c, err := net.DialTimeout("tcp", probeAddr(), 12*time.Second)
+		c, err := net.DialTimeout("tcp", probeAddr(), probeBudget)
 		if err == nil {
 			c.Close()
 			return nil
