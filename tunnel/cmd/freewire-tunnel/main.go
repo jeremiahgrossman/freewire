@@ -753,19 +753,51 @@ func setupRouting(tunName, bypassHost string, dohEndpoints []string) error {
 // It runs after the split-default pair is in place, so it exercises the real
 // post-routing path. Failing here is what turns a total loss of connectivity
 // into a clean teardown and an error message.
+// sustainedProbesRequired is how many egress probes, spaced across time, a
+// transport must pass consecutively before its tunnel is called usable.
+//
+// Fast transports need one: if the carrier is up it stays up. The DNS and ICMP
+// transports need more, because a throttling resolver or captive portal lets a
+// brief burst through and then stalls. A single probe passed that burst and
+// produced a "Protected" that carried no traffic on a real Starbucks portal
+// (health checks then failed and every egress sample timed out). Requiring
+// successes spaced seconds apart makes a burst-then-stall transport fail the
+// check instead of lying about protection.
+func sustainedProbesRequired(transport string) int {
+	if transportCanCarryDoH(transport) {
+		return 1
+	}
+	return 2
+}
+
 func verifyTunnelCarriesTraffic() error {
+	need := sustainedProbesRequired(activeTransport)
+	// After a success, wait before the next probe so successes must span time; a
+	// transport that only bursts cannot answer probes seconds apart. A failure
+	// breaks the streak, so `need` successes must be consecutive.
+	const gap = 2 * time.Second
+	maxAttempts := need + probeAttempts(activeTransport)
+
+	got := 0
 	var lastErr error
-	for attempt := 0; attempt < probeAttempts(activeTransport); attempt++ {
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if got > 0 {
+			time.Sleep(gap)
+		}
 		c, err := net.DialTimeout("tcp", probeAddr(), probeBudget())
-		if err == nil {
-			c.Close()
+		if err != nil {
+			lastErr = err
+			got = 0 // a miss breaks the sustained streak
+			continue
+		}
+		c.Close()
+		got++
+		if got >= need {
 			return nil
 		}
-		lastErr = err
-		time.Sleep(300 * time.Millisecond)
 	}
-	return fmt.Errorf("no response from %s after %d attempts: %w",
-		probeAddr(), probeAttempts(activeTransport), lastErr)
+	return fmt.Errorf("egress did not sustain: best streak %d/%d to %s: %w",
+		got, need, probeAddr(), lastErr)
 }
 
 // pinOutsideTunnel adds a host route for ip along the path it currently uses,
