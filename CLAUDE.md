@@ -18,8 +18,32 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 - **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
 - **In progress:** nothing
-- **Next action:** Configs 4 and 6 (see `testing/README.md`), or the Swift client work that a Developer ID unblocks.
+- **Next action:** Configs 4 and 6 (see `testing/README.md`); the two Privacy Pass
+  design decisions below; or the kill-switch cluster once a Developer ID exists.
 - **Blocked on:** a Developer ID certificate, for `FreewireHelper` and for signed/notarized distribution.
+
+**Scripted end-to-end runs:** `testing/connect.sh` brings the tunnel up against
+the live server and `testing/disconnect.sh` tears it down and asserts the
+machine was restored (routes, resolvers, IPv6, state files, egress). Use these
+before trusting a change. Every serious defect found on 2026-08-21/22 — a false
+"Protected" over unrouted traffic, a DNS leak to the ISP, a certificate pin that
+would have locked the client out on the next deploy — passed every static check
+and appeared only when the product actually ran.
+
+**Two open decisions, both Privacy Pass, both needing a call rather than an
+implementation:**
+
+1. **Token expiry vs spent-record retention.** Tokens carry no expiry but spent
+   records drop after 30 days, so an aged-out token is replayable forever. The
+   candidate fixes (an expiry field, an issuer key epoch, RFC 9577's
+   `token_key_id` enabling the dual-key rotation the spec already describes)
+   change the wire format differently and are not interchangeable. Recommended:
+   the key epoch, since it also closes CRYPTO-09.
+2. **Unauthenticated DH on the DNS and ICMP handshakes.** The on-path adversary
+   those transports exist to defeat can sit in the middle of them. WireGuard
+   inside still authenticates the server by its pinned key, so this costs
+   transport framing rather than traffic. Fixing it means binding the handshake
+   to the server's known key — a protocol change to both ends.
 
 ### Dev environment (as of 2026-08-22)
 
@@ -102,6 +126,12 @@ the moment anyone else connects.
   `SMAppService`, and **fail closed**.
 - `PathUpgradeManager` returns false for the DNS and ICMP paths; probing either
   needs a full handshake.
+- The kill-switch cluster is real and untouched: the helper replaces the whole
+  pf ruleset instead of loading its anchor, `release()` runs `pfctl -F all`,
+  `isEngaged()` infers state from a file, and `sanitize()` strips hostile
+  characters rather than rejecting them. All of it is blocked behind the
+  Developer ID, because none of it can be tested without installing the helper —
+  and fixing untestable pf code is how the wifi broke earlier in this project.
 - ECH is not implemented. uTLS hides the handshake fingerprint, but SNI still
   names the destination in cleartext.
 - DoH is hardcoded to Cloudflare 1.1.1.1: a single point of failure and of trust
