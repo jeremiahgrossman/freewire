@@ -18,9 +18,36 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 - **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
 - **In progress:** nothing
-- **Next action:** Configs 4 and 6 (see `testing/README.md`); the two Privacy Pass
-  design decisions below; or the kill-switch cluster once a Developer ID exists.
+- **Next action:** a **clean-slate real-portal retest** — reboot the Mac (clears the
+  stale `utun` cruft from the 2026-08-22 field session), connect on a real café
+  portal pre-login, and run `testing/cafe-diagnostic.sh` to confirm the DNS tunnel
+  carries a sustained session. Every piece is proven separately (delegation live,
+  carrier sustains ~400–500 Kbps at 0% loss through the café's own resolver, cache
+  fallback works in the config7 sim, false-Protected fixed); the one open thing is
+  a real end-to-end pre-login run. See "Field findings" below.
 - **Blocked on:** a Developer ID certificate, for `FreewireHelper` and for signed/notarized distribution.
+
+### Field findings (2026-08-22, Starbucks + desk)
+
+- **Captive-portal connect is now wired end to end.** The client caches the
+  control-plane state (server key, ports, tunnel IP, peer token, DNS zone) after a
+  successful connect, and when a portal blocks the API it falls back to the cache
+  and comes up over the DNS tunnel. Peer registration is now **persistent for
+  single-user** (disconnect/quit no longer deregister), or the cache goes stale.
+- **The DNS tunnel carrier is fine.** Sustained throughput is steady ~409 Kbps
+  through Starbucks' own resolver and ~496 Kbps through 1.1.1.1, both 0% loss —
+  the resolver does not throttle it. The real-portal stall was a **false-Protected
+  bug** (a single burst passed the egress check) plus accumulated local routing
+  cruft, not the transport.
+- **Two reliability bugs fixed and verified:** (1) the server's NAT MASQUERADE
+  vanished on instance stop/start (netfilter-persistent was a no-op, iptables-
+  persistent never installed) — every "connected but no traffic" failure traced
+  here; now re-applied on each service start via `ExecStartPre` (`deploy/freewire-nat.sh`),
+  verified surviving a reboot. (2) false Protected — the tunnel now requires
+  sustained egress (2 spaced probes) on the DNS/ICMP transports before claiming
+  protection.
+- **Known residue:** the dev Mac accumulated ~9 stale `utun` interfaces during the
+  session; a reboot clears them. Do this before the next real-portal test.
 
 > **Do not test the DNS or ICMP transports with routing on a machine in use.**
 > Every lookup on the host then goes through a 500 Kbps tunnel at 5-10s each,
