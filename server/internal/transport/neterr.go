@@ -38,3 +38,11 @@ func netErrCause(err error) string {
 	}
 	return err.Error()
 }
+
+// wgReadBuffer bounds a read from the local WireGuard socket.
+//
+// A WireGuard datagram is the tunnel MTU plus its own and the AEAD's overhead,
+// which stays under 2 KB; 4 KB leaves room without committing 64 KB per session
+// to a peer who has authenticated nothing. A UDP read truncates silently into a
+// buffer that is too small, so this must stay comfortably above a real packet.
+const wgReadBuffer = 4096

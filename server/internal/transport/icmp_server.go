@@ -42,7 +42,15 @@ type ICMPServer struct {
 	// flood. The DNS server has had this bound since its own audit; the ICMP
 	// path was left without one.
 	pending atomic.Int64
+
+	// established counts activated sessions, each holding a UDP socket and two
+	// goroutines. Bounding the half-open state without bounding what it
+	// promotes into only moves the descriptor exhaustion one step along.
+	established atomic.Int64
 }
+
+// maxEstablishedICMPSessions caps live tunnels, mirroring the DNS server.
+const maxEstablishedICMPSessions = 128
 
 // icmpSrvSession holds the server-side state for one ICMP/UDP tunnel session.
 type icmpSrvSession struct {
@@ -199,6 +207,8 @@ func (s *ICMPServer) evictLoop(ctx context.Context) {
 				s.sessions.Delete(k)
 				if wasPending {
 					s.pending.Add(-1)
+				} else {
+					s.established.Add(-1)
 				}
 				if conn != nil {
 					conn.Close() // causes wgInbound reader to exit and close the channel
@@ -398,6 +408,13 @@ func (s *ICMPServer) handleConfirm(pkt []byte, srcAddr *net.UDPAddr, conn *net.U
 		return
 	}
 
+	// Refuse to promote past the established ceiling, before any socket is
+	// opened. The pending session stays pending and expires on its own.
+	if s.established.Load() >= maxEstablishedICMPSessions {
+		s.log.Warn("icmp server: established session limit reached; refusing to activate")
+		return
+	}
+
 	// Open WG bridge socket.
 	wgAddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("127.0.0.1:%d", s.wgPort))
 	if err != nil {
@@ -414,12 +431,16 @@ func (s *ICMPServer) handleConfirm(pkt []byte, srcAddr *net.UDPAddr, conn *net.U
 	sess.activated = true
 	sess.lastSeen = time.Now()
 	s.pending.Add(-1) // promoted from pending to established
+	s.established.Add(1)
 
 	// Read WG inbound packets for delivery to client.
 	// Closing wgInbound on exit unblocks the push goroutine below.
 	go func() {
 		defer close(sess.wgInbound)
-		buf := make([]byte, 1<<16)
+		// Sized to a WireGuard datagram rather than to 64 KB. One buffer per
+		// established session, and a session is created by an unauthenticated
+		// handshake, so the per-session cost is part of what a flood buys.
+		buf := make([]byte, wgReadBuffer)
 		for {
 			n, err := uc.Read(buf)
 			if err != nil {

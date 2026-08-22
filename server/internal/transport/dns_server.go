@@ -36,8 +36,19 @@ type DNSServer struct {
 	// pending counts sessions awaiting a ClientConfirm, tracked separately so a
 	// hello flood cannot displace established tunnels.
 	pending atomic.Int64
-	log     *zap.Logger
+	// established counts activated sessions. Each one holds a UDP socket and a
+	// goroutine, and the handshake that creates one is unauthenticated -- it
+	// proves possession of no key, only the ability to complete a DH exchange
+	// with a server that will exchange with anyone. Bounding the half-open
+	// state without bounding what it promotes into left the descriptor
+	// exhaustion in place one step further along.
+	established atomic.Int64
+	log         *zap.Logger
 }
+
+// maxEstablishedDNSSessions caps live tunnels. Well above one deployment's real
+// use and well below what exhausts the process's descriptors.
+const maxEstablishedDNSSessions = 128
 
 // dnsSession holds the server-side state for one DNS tunnel session.
 type dnsSession struct {
@@ -271,7 +282,9 @@ func (s *DNSServer) evictLoop(ctx context.Context) {
 
 				if expired {
 					s.sessions.Delete(k)
-					if !active {
+					if active {
+						s.established.Add(-1)
+					} else {
 						s.pending.Add(-1)
 					}
 					if sess.localConn != nil {
@@ -492,6 +505,14 @@ func (s *DNSServer) handleClientConfirm(conn *net.UDPConn, srcAddr *net.UDPAddr,
 		return
 	}
 
+	// Refuse to promote past the established ceiling, before any socket is
+	// opened. The pending session stays pending and expires on its own.
+	if s.established.Load() >= maxEstablishedDNSSessions {
+		s.log.Warn("dns: established session limit reached; refusing to activate")
+		s.sendNXDomain(conn, srcAddr, req)
+		return
+	}
+
 	// Activate session: open per-session WG bridge socket.
 	wgAddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("127.0.0.1:%d", s.wgPort))
 	if err != nil {
@@ -510,11 +531,15 @@ func (s *DNSServer) handleClientConfirm(conn *net.UDPConn, srcAddr *net.UDPAddr,
 	sess.wgAddr = wgAddr
 	sess.activated = true
 	s.pending.Add(-1) // promoted from pending to established
+	s.established.Add(1)
 	sess.lastSeen = time.Now()
 
 	// Start goroutine to read WG responses for piggybacking.
 	go func() {
-		buf := make([]byte, 1<<16)
+		// Sized to a WireGuard datagram rather than to 64 KB. One buffer per
+		// established session, and a session is created by an unauthenticated
+		// handshake, so the per-session cost is part of what a flood buys.
+		buf := make([]byte, wgReadBuffer)
 		for {
 			n, err := uc.Read(buf)
 			if err != nil {

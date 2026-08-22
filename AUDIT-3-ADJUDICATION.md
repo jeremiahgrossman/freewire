@@ -59,6 +59,10 @@ the O(n²) eviction alone was reported 9 times under 9 different ids.
 | FW-S08 | high | The root-privileged server resolved `ip`, `ifconfig` and `route` through `PATH`, so the inherited environment decided which binary got root | `firstExisting` over absolute paths, matching what the tunnel client already did |
 | FW-S17 | medium | The SSH firewall rule came from an unvalidated third-party HTTP response | validated as a dotted quad, with an override and a hard stop |
 | REL-22 | low | `log.Fatal` skipped every deferred cleanup, including the spent-store flush | exit code plus `return`; `os.Exit` deferred first so it runs last |
+| REL-12, REL-015 | medium | The TLS/443 accept loop spawned a goroutine per connection with no ceiling, and cleared all deadlines after the handshake, so a peer that connected and went silent held a goroutine, a socket and its buffers until the process died | 256-connection semaphore; rolling 120s idle read deadline (WireGuard keepalives are 25s) |
+| FW-S07, CRYPTO-010, FW-L03 | high | The `tlsMaxFrame` bound was applied to the outbound direction only. The inbound buffer was still 64 KB and the length check compared against it, so each connection committed 64 KB before the peer proved anything — most of what the bound was introduced to stop | inbound buffer and length check both use `tlsMaxFrame`; per-session WireGuard read buffers cut from 64 KB to `wgReadBuffer` |
+| SEC-013 | medium | CONNECT parsing used `ReadString`, which accumulates until its delimiter arrives, and drained headers with no count limit — a memory budget set by an unauthenticated peer | `readLineLimited` (8 KB) and a 64-header cap |
+| REL-007 | high | Half-open handshakes were bounded but what they promoted into was not, so descriptor exhaustion just moved one step along: each established DNS or ICMP session holds a UDP socket and goroutines | 128 established sessions per transport, checked before any socket is opened |
 | CRYPTO-13, CRYPTO-14, FW-L02 | low | Scheme name `PrivateToken` contradicted the docs' `PrivacyPass`, and quote trimming used a cutset that would strip interior quotes | docs corrected to RFC 9577's `PrivateToken` (the code was right, the spec was wrong); at most one surrounding quote pair stripped |
 
 ---
@@ -85,12 +89,12 @@ Recorded rather than fixed. None is a privacy or key-handling defect.
   framing rather than of the traffic. Fixing it properly means binding the
   handshake to the server's known key — a protocol change to both ends.
 
+All ceilings are asserted by `limits_test.go`, including that their total stays
+clear of a 1024 descriptor limit, and the TLS one was verified against the live
+server: 320 concurrent connections produced exactly 64 refusals.
+
 **Genuine, deferred as lower value than the work:**
 
-- REL-007, FW-S07, SEC-013, REL-12, REL-015, CRYPTO-010, FW-L03: unauthenticated
-  connections cost the server memory, sockets and goroutines with no ceiling and
-  no post-handshake deadline. Real resource exhaustion, reachable by anyone.
-  This is the largest remaining cluster and the one to do next.
 - FW-M02, FW-M03, REL-019: data races on `Peer.TunnelIP`, `sess.localConn`, and
   a non-atomic check-then-increment on the DNS pending counter. Narrow windows;
   `go test -race` does not currently reach them.
