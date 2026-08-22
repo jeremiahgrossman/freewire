@@ -126,14 +126,13 @@ replacement: they say nothing about how the chain behaves under portal rules.
 | Transport | Ready | Tunnel ping | Real egress | Notes |
 |---|---|---|---|---|
 | TLS/443 | 2.6s | 154–750ms | ✅ 52.203.246.145 | Reliable. 166 Mbps measured separately. |
-| ICMP/UDP | ~3s | 165ms, lossy | ❌ no HTTPS in 40s | Carries traffic; saturates as a full default route. |
-| DNS | ~3s | 167–750ms, lossy | ⚠️ 1 of 3 runs | First time DNS egress has been demonstrated at all. |
+| ICMP/UDP | ~3s | 66–134ms | ✅ 2 of 3 runs | Fixed: see the rate-limiter defect below. |
+| DNS | ~3s | 167–750ms, lossy | ⚠️ 1 of 3 runs | First time DNS egress has been demonstrated at all. Still marginal. |
 
-The two tunnelled transports work and are marginal as a *default route* on a
-machine with background traffic. The ICMP path caps at 20 packets/second, which
-matches its 100–500 Kbps design target at full-size packets but is consumed by
-small background packets long before that bandwidth is reached. Worth revisiting
-whether a byte-based budget suits better than a packet-based one.
+ICMP now carries a full default route. DNS does not reliably: it reaches egress
+about one run in three. That is a flow-control question (sliding window and poll
+interval) rather than the rate-limiter defect that affected ICMP, and it is
+still open.
 
 Three defects were found by these runs, all fixed:
 
@@ -145,6 +144,15 @@ Three defects were found by these runs, all fixed:
 - **The ICMP payload budget was below a full-size WireGuard packet** (1416 vs
   1452 at the 1420 MTU). Small packets passed, so the handshake completed and
   the tunnel reported ready; then TCP died on its first full segment.
+- **The ICMP rate limiter's constant did not set the rate.** `icmpRateLimit`
+  was documented as "packets/second hard cap", but the refill beside it was
+  hardcoded as "1 token per 50ms" -- so the constant only sized the bucket and
+  the rate stayed 20/s whatever it said. Raising it from 20 to 400 changed
+  nothing, which is what made an early experiment appear to rule out saturation
+  when instrumentation later showed 1054 of 1233 packets being dropped there.
+  The budget is now in bytes per second, derived from one constant: a packet cap
+  delivers the documented 100-500 Kbps only at full-size packets, and at the
+  small packets that dominate real traffic 20 packets/s is nearer 20 Kbps.
 - **The fallback chain selected a different transport on identical input.**
   `waitForHandshake` tested "is the handshake time non-zero" with no baseline,
   so once any candidate had handshaked every later one reported success

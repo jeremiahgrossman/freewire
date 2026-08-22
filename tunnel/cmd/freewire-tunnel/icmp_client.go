@@ -68,7 +68,20 @@ const (
 	icmpWindowMax   = 16
 	icmpKeepalive   = 15 * time.Second
 	icmpHandshakeTO = 2 * time.Second
-	icmpRateLimit   = 20 // packets/second hard cap
+	// Outbound budget, in bytes per second.
+	//
+	// Was a packet count with a refill of "1 token per 50ms" hardcoded beside
+	// it, so the constant named a rate it did not set: raising it from 20 to
+	// 400 left the actual rate at 20/s and only made the bucket deeper. Any
+	// future tuning would have done nothing, silently.
+	//
+	// Bytes rather than packets, because the budget this transport is designed
+	// to fit is stated in bits per second (100-500 Kbps in CLAUDE.md). A packet
+	// cap delivers that only at full-size packets; at the small packets that
+	// dominate real traffic, 20 packets/s is nearer 20 Kbps, which is why the
+	// tunnel could not carry a default route at all. 500 Kbps is the top of the
+	// documented range.
+	icmpRateBytesPerSec = 62500
 	// Outbound send pool. Small on purpose: the rate cap above already bounds
 	// throughput, so more workers would only reorder packets.
 	icmpSendWorkers = 2
@@ -243,7 +256,7 @@ func icmpHandshake(cfg Config, uc *net.UDPConn) (*icmpClientSession, error) {
 		txSeq:        2, // 0=hello, 1=confirm, data starts at 2
 		windowSize:   icmpWindowInit,
 		conn:         uc,
-		rateAvail:    icmpRateLimit,
+		rateAvail:    icmpRateBytesPerSec,
 		rateLast:     time.Now(),
 	}
 	return sess, nil
@@ -355,25 +368,30 @@ func (s *icmpClientSession) run(lp net.PacketConn) {
 	}
 }
 
-// rateCheck returns true if a packet can be sent (token bucket, 20 pkt/s).
-func (s *icmpClientSession) rateCheck() bool {
+// rateCheck reserves size bytes from the outbound budget.
+func (s *icmpClientSession) rateCheck(size int) bool {
 	s.rateMu.Lock()
 	defer s.rateMu.Unlock()
 	now := time.Now()
-	elapsed := now.Sub(s.rateLast)
-	// Refill: 20 tokens/second = 1 token per 50ms.
-	refill := int(elapsed.Milliseconds() / 50)
-	if refill > 0 {
-		s.rateAvail += refill
-		if s.rateAvail > icmpRateLimit {
-			s.rateAvail = icmpRateLimit
+
+	if elapsedMs := now.Sub(s.rateLast).Milliseconds(); elapsedMs > 0 {
+		refill := int(elapsedMs * icmpRateBytesPerSec / 1000)
+		if refill > 0 {
+			s.rateAvail += refill
+			if s.rateAvail > icmpRateBytesPerSec {
+				s.rateAvail = icmpRateBytesPerSec
+			}
+			// Advance only by the time actually converted into budget, so the
+			// remainder is carried rather than discarded -- otherwise a caller
+			// polling faster than the resolution loses it on every check.
+			s.rateLast = s.rateLast.Add(
+				time.Duration(refill) * time.Second / time.Duration(icmpRateBytesPerSec))
 		}
-		s.rateLast = now
 	}
-	if s.rateAvail <= 0 {
+	if s.rateAvail < size {
 		return false
 	}
-	s.rateAvail--
+	s.rateAvail -= size
 	return true
 }
 
@@ -384,7 +402,7 @@ func (s *icmpClientSession) sendData(payload []byte) error {
 		// with no diagnostic. Refuse it instead.
 		return fmt.Errorf("send data: payload %d exceeds the %d-byte budget", len(payload), icmpMaxPayload)
 	}
-	if !s.rateCheck() {
+	if !s.rateCheck(len(payload)) {
 		return fmt.Errorf("rate limit exceeded")
 	}
 
