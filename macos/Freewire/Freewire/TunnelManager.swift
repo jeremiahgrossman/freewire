@@ -478,6 +478,12 @@ final class TunnelManager: ObservableObject {
 
                 let alive = await processAlive(name: "freewire-tunnel")
                 if !alive {
+                    // The helper died without cleaning up. Since the DNS
+                    // takeover points the system at a forwarder inside that
+                    // process, leaving it alone means the machine has no
+                    // resolver at all -- not a slow one, none. Repair before
+                    // anything else, including before reconnecting.
+                    await Self.restoreNetworkState()
                     self.stopUpgradeManager()
                     self.reconnectTask?.cancel()
                     self.reconnectTask = Task { await self.doReconnect(startingAt: 0) }
@@ -485,6 +491,22 @@ final class TunnelManager: ObservableObject {
                 }
             }
         }
+    }
+
+    /// Puts routes and resolvers back after a helper died ungracefully.
+    ///
+    /// Cheap and safe to call when nothing is broken: it reads the state files
+    /// the helper writes and does nothing if they are absent.
+    nonisolated static func restoreNetworkState() async {
+        await Task.detached(priority: .userInitiated) {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
+            p.arguments = ["-n", TunnelManager.helperPath, "--restore"]
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            try? p.run()
+            p.waitUntilExit()
+        }.value
     }
 
     private func processAlive(name: String) async -> Bool {

@@ -39,6 +39,11 @@ if pgrep -f "freewire-tunnel$" >/dev/null 2>&1; then
   exit 1
 fi
 
+# Repair anything a previous run left behind. A run killed without cleanup
+# leaves the system pointed at a resolver that is no longer listening, and this
+# script is usually the next thing to run after that happens.
+sudo -n "$TUNNEL_BIN" --restore >/dev/null 2>&1 || true
+
 echo "==> fetching server config"
 CFG="$(curl -sk --max-time 10 "$API/v1/server/config")"
 SERVER_KEY="$(jq -r .public_key <<<"$CFG")"

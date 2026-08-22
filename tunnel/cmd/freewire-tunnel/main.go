@@ -86,6 +86,28 @@ func main() {
 		os.Exit(stopRunningTunnel())
 	}
 
+	// --restore repairs a machine a previous run left misconfigured, without
+	// connecting anything.
+	//
+	// This exists because the DNS takeover made an ungraceful exit far worse
+	// than it used to be. The system resolver points at a forwarder on
+	// loopback; if the process dies without running its cleanup, nothing is
+	// listening there and name resolution stops entirely -- not "the wrong
+	// resolver", but no DNS at all. That happened twice during development.
+	if len(os.Args) > 1 && os.Args[1] == "--restore" {
+		releaseStalePins()
+		restoreStaleDNS()
+		fmt.Fprintln(os.Stderr, "freewire-tunnel: restored routes and resolvers")
+		os.Exit(0)
+	}
+
+	// Repair before doing anything else, on every run. setupRouting used to be
+	// the only place this happened, so a machine left broken stayed broken
+	// until a connection attempt got far enough to reach it -- and a connection
+	// attempt needs DNS.
+	releaseStalePins()
+	restoreStaleDNS()
+
 	var cfg Config
 	if err := json.NewDecoder(os.Stdin).Decode(&cfg); err != nil {
 		fmt.Fprintf(os.Stderr, "freewire-tunnel: config: %v\n", err)
@@ -284,7 +306,7 @@ func (h *healthTally) record(ok bool) bool {
 
 // probeThroughTunnel performs one round trip over the current routes.
 func probeThroughTunnel() error {
-	c, err := net.DialTimeout("tcp", probeAddr(), 2*time.Second)
+	c, err := net.DialTimeout("tcp", probeAddr(), 12*time.Second)
 	if err != nil {
 		return err
 	}
@@ -478,9 +500,7 @@ func recordPins() {
 // fails with "file exists" while the original default survives. Traffic kept
 // flowing outside the tunnel while the client reported "Protected".
 func setupRouting(tunName, bypassHost string) error {
-	// Repair anything a previous run left behind before adding more.
-	releaseStalePins()
-	restoreStaleDNS()
+	// Already repaired at process start; nothing to redo here.
 
 	// Resolve bypass host to an IP if needed.
 	bypassIP := bypassHost
@@ -605,7 +625,7 @@ func setupRouting(tunName, bypassHost string) error {
 func verifyTunnelCarriesTraffic() error {
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
-		c, err := net.DialTimeout("tcp", probeAddr(), 2*time.Second)
+		c, err := net.DialTimeout("tcp", probeAddr(), 12*time.Second)
 		if err == nil {
 			c.Close()
 			return nil
@@ -751,12 +771,22 @@ var tunnelResolvers = []string{"127.0.0.1"}
 
 // savedDNSFile records each service's original resolvers.
 //
-// Same reasoning as pinnedRoutesFile, though the failure is gentler than the
-// pinned-route one. A killed run leaves the system pointed at 1.1.1.1, and the
-// split-default routes vanish with the utun interface, so 1.1.1.1 stays
-// reachable by the ordinary path: name resolution keeps working, it is just not
-// the resolver the user chose. This file is what lets the next run give their
-// own choice back.
+// Same reasoning as pinnedRoutesFile, and more urgent than it since the DoH
+// forwarder landed.
+//
+// This comment used to say the failure was gentle: a killed run left the system
+// pointed at 1.1.1.1, the split-default routes died with the utun interface, and
+// so name resolution kept working against the wrong resolver. That stopped being
+// true the moment the resolver became a forwarder on loopback. A process that
+// dies without running its cleanup now leaves the system pointed at a port
+// nothing is listening on, and the machine has no DNS at all until something
+// puts it back. It cost the user their network twice before the reasoning was
+// re-checked against the change.
+//
+// So this file is read at the start of every run, and `--restore` exists to
+// read it without connecting. A SIGKILL still leaves the machine broken until
+// one of those happens; closing that properly needs a supervisor outside this
+// process, which is what the privileged helper will be.
 const savedDNSFile = "/var/run/freewire-saved-dns"
 
 // dnsSaved maps a network service to the resolver list it had before.

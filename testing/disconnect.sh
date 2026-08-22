@@ -41,6 +41,11 @@ if [[ -f "$STATE/peer-token" ]]; then
   rm -f "$STATE/peer-token"
 fi
 
+# Belt and braces: --stop runs the tunnel's own cleanup, but if the process was
+# already gone the state files are still on disk and the machine is still
+# misconfigured.
+sudo -n "$ROOT/tunnel/freewire-tunnel" --restore >/dev/null 2>&1 || true
+
 echo "==> verifying the machine was put back"
 fail=0
 
