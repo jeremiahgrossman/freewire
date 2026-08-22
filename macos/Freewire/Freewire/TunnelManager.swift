@@ -262,7 +262,8 @@ final class TunnelManager: ObservableObject {
                 dnsTunnelPort:   server.dnsTunnelPort,
                 icmpUDPPort:     server.icmpUDPPort,
                 preferredTransport: nil,
-                dnsResolver: Preferences.shared.dnsResolverOverride
+                dnsResolver: Preferences.shared.dnsResolverOverride,
+                dnsTunnelDomain: server.dnsTunnelDomain
             )
 
             let (ifName, transport) = try await launchTunnel(config: cfg)
@@ -380,7 +381,8 @@ final class TunnelManager: ObservableObject {
                     icmpUDPPort:     server.icmpUDPPort,
                     // Try what was working before walking the whole chain again.
                     preferredTransport: lastGoodTransport?.rawValue,
-                    dnsResolver: Preferences.shared.dnsResolverOverride
+                    dnsResolver: Preferences.shared.dnsResolverOverride,
+                    dnsTunnelDomain: server.dnsTunnelDomain
                 )
 
                 let (ifName, transport) = try await launchTunnel(config: cfg)
@@ -469,7 +471,8 @@ final class TunnelManager: ObservableObject {
                 // it had before, so the upgrade rebuilt the same tunnel and then
                 // upgraded again, forever.
                 preferredTransport: transport.rawValue,
-                dnsResolver: Preferences.shared.dnsResolverOverride
+                dnsResolver: Preferences.shared.dnsResolverOverride,
+                dnsTunnelDomain: server.dnsTunnelDomain
             )
             let (ifName, newTransport) = try await launchTunnel(config: cfg)
 
@@ -797,6 +800,7 @@ private struct TunnelConfig: Encodable {
     let icmpUDPPort:     Int
     let preferredTransport: String?
     let dnsResolver:        String?
+    let dnsTunnelDomain:    String?
 
     enum CodingKeys: String, CodingKey {
         case privateKey      = "private_key"
@@ -812,6 +816,7 @@ private struct TunnelConfig: Encodable {
         case icmpUDPPort     = "icmp_udp_port"
         case preferredTransport = "preferred_transport"
         case dnsResolver        = "dns_resolver"
+        case dnsTunnelDomain    = "dns_tunnel_domain"
     }
 }
 

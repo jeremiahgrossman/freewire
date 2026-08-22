@@ -33,6 +33,10 @@ type Config struct {
 	TLSPort         int    `json:"tls_port"`          // default 443; server reports its own
 	DNSTunnelPort   int    `json:"dns_tunnel_port"`   // default 53; server reports its own
 	ICMPUDPPort     int    `json:"icmp_udp_port"`     // default 4500
+	// DNSTunnelDomain is the authoritative zone the DNS tunnel queries, reported
+	// by the server so a rotation needs no client rebuild. Empty falls back to
+	// defaultDNSTunnelDomain.
+	DNSTunnelDomain string `json:"dns_tunnel_domain,omitempty"`
 	// DNSResolver overrides the resolver the DNS tunnel queries.
 	//
 	// Normally the tunnel uses the system resolver and relies on it forwarding

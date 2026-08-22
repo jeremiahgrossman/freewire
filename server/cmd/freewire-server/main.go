@@ -124,7 +124,7 @@ func main() {
 	}()
 
 	// DNS tunnel transport.
-	dnsServer := transport.NewDNSServer(cfg.ListenPort, log)
+	dnsServer := transport.NewDNSServer(cfg.ListenPort, cfg.DNSTunnelDomain, log)
 	go func() {
 		if err := dnsServer.Run(ctx, cfg.DNSTunnelPort); err != nil {
 			log.Error("dns server error", zap.Error(err))

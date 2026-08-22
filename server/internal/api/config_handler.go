@@ -52,7 +52,7 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 		TLSEndpointPort:   s.cfg.TLSPort,
 		DNSTunnelPort:     s.cfg.DNSTunnelPort,
 		ICMPUDPPort:       s.cfg.ICMPUDPPort,
-		DNSTunnelDomain:   "tunnel.freewire.com",
+		DNSTunnelDomain:   s.cfg.DNSTunnelDomain,
 		AllowedIPs:        []string{"0.0.0.0/0", "::/0"},
 		ServerVersion:     s.cfg.ServerVersion,
 		MinClientVersion:  s.cfg.MinClientVersion,

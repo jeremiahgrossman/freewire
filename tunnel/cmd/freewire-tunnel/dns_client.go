@@ -27,11 +27,15 @@ import (
 // Session key: X25519 → HKDF-SHA256(ikm=shared, salt=token, info="freewire-dns-tunnel-v1", len=32)
 // Encryption:  ChaCha20-Poly1305, nonce = seq(4B big-endian) || 0x00000000(8B)
 // Sliding window: initial 8, AIMD, max 64
-// Domain: *.tunnel.freewire.com
+// Domain: *.<tunnel zone>, taken from the server config; see defaultDNSTunnelDomain.
 
 const (
-	dnsTunnelDomain   = "tunnel.freewire.com"
-	dnsKeepaliveEvery = 30 * time.Second
+	// defaultDNSTunnelDomain is used only when the server config does not name a
+	// zone. The server is the source of truth (it advertises dns_tunnel_domain),
+	// so a domain rotation happens server-side and needs no client rebuild. This
+	// default exists for tests and for a server old enough not to send the field.
+	defaultDNSTunnelDomain = "t.pinghop.net"
+	dnsKeepaliveEvery      = 30 * time.Second
 	// Poll interval while the tunnel is active.
 	//
 	// DNS gives the server no way to push, so pending data waits for a query.
@@ -115,7 +119,21 @@ type dnsClientSession struct {
 	txSeq      uint32      // next outbound sequence number (atomic add)
 	windowSize int         // current sliding window size (AIMD)
 	dnsServer  string      // resolved DNS server IP
-	mu         sync.Mutex
+	// tunnelDomain is the authoritative zone every query name is suffixed with.
+	// Carried per session because it is server-supplied and can change between
+	// connections, and because the per-query payload budget depends on its
+	// length -- a longer zone leaves fewer bytes for data (see dnsFragCipherBytes).
+	tunnelDomain string
+	mu           sync.Mutex
+}
+
+// effectiveDNSTunnelDomain is the zone the client queries: whatever the server
+// advertised, or the compiled-in default if it advertised nothing.
+func effectiveDNSTunnelDomain(cfg Config) string {
+	if cfg.DNSTunnelDomain != "" {
+		return cfg.DNSTunnelDomain
+	}
+	return defaultDNSTunnelDomain
 }
 
 // runDNSTunnel establishes the DNS tunnel handshake and returns a local UDP
@@ -178,11 +196,12 @@ func resolveLocalDNSServer() (string, error) {
 
 // dnsHandshake performs the 3-step handshake and returns an initialized session.
 //
-// Step 1: ClientHello — query h.1.<b32(clientPub)>.tunnel.freewire.com TXT
+// Step 1: ClientHello — query h.1.<b32(clientPub)>.<zone> TXT
 // Step 2: ServerHello — parse TXT: <b32(serverPub)>.<b32(token)>
-// Step 3: ClientConfirm — query h.3.<b32(mac)>.<b32(token)>.tunnel.freewire.com TXT
+// Step 3: ClientConfirm — query h.3.<b32(mac)>.<b32(token)>.<zone> TXT
 func dnsHandshake(cfg Config, dnsServer string) (*dnsClientSession, error) {
 	deadline := time.Now().Add(dnsHandshakeTimeout)
+	domain := effectiveDNSTunnelDomain(cfg)
 
 	// Generate ephemeral Curve25519 keypair for DH.
 	var clientPriv [32]byte
@@ -199,7 +218,7 @@ func dnsHandshake(cfg Config, dnsServer string) (*dnsClientSession, error) {
 
 	// Step 1: ClientHello
 	clientPubB32 := b32enc.EncodeToString(clientPub)
-	helloName := "h.1." + clientPubB32 + "." + dnsTunnelDomain + "."
+	helloName := "h.1." + clientPubB32 + "." + domain + "."
 
 	resp, err := dnsQuery(dnsServer, helloName, deadline)
 	if err != nil {
@@ -253,7 +272,7 @@ func dnsHandshake(cfg Config, dnsServer string) (*dnsClientSession, error) {
 	tokenB32 := b32enc.EncodeToString(token)
 
 	// Step 3: ClientConfirm
-	confirmName := "h.3." + macB32 + "." + tokenB32 + "." + dnsTunnelDomain + "."
+	confirmName := "h.3." + macB32 + "." + tokenB32 + "." + domain + "."
 	resp2, err := dnsQuery(dnsServer, confirmName, deadline)
 	if err != nil {
 		return nil, fmt.Errorf("client confirm: %w", err)
@@ -273,15 +292,16 @@ func dnsHandshake(cfg Config, dnsServer string) (*dnsClientSession, error) {
 	}
 
 	return &dnsClientSession{
-		token:      token,
-		tokenB32:   tokenB32,
-		aeadTx:     aeadTx,
-		aeadRx:     aeadRx,
-		sessionKey: sessionKey,
-		keyC2S:     keyC2S,
-		keyS2C:     keyS2C,
-		windowSize: dnsWindowInit,
-		dnsServer:  dnsServer,
+		token:        token,
+		tokenB32:     tokenB32,
+		aeadTx:       aeadTx,
+		aeadRx:       aeadRx,
+		sessionKey:   sessionKey,
+		keyC2S:       keyC2S,
+		keyS2C:       keyS2C,
+		windowSize:   dnsWindowInit,
+		dnsServer:    dnsServer,
+		tunnelDomain: domain,
 	}, nil
 }
 
@@ -434,7 +454,7 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 
 // poll asks the server whether it has anything queued, and decrypts it if so.
 func (s *dnsClientSession) poll() ([]byte, error) {
-	name := "k." + s.tokenB32 + "." + dnsTunnelDomain + "."
+	name := "k." + s.tokenB32 + "." + s.tunnelDomain + "."
 	resp, err := dnsQuery(s.dnsServer, name, time.Now().Add(2*time.Second))
 	if err != nil {
 		return nil, err
@@ -496,7 +516,7 @@ func (s *dnsClientSession) sendPacket(pkt []byte) ([]byte, error) {
 	ciphertext := s.aeadTx.Seal(nil, nonce[:], pkt, nil)
 
 	// Fragment the ciphertext so each query's encoded chunk fits the budget.
-	chunks := splitCiphertext(ciphertext, dnsFragCipherBytes())
+	chunks := splitCiphertext(ciphertext, dnsFragCipherBytes(s.tunnelDomain))
 	if len(chunks) > 255 {
 		return nil, fmt.Errorf("send packet: %d fragments exceeds the 255 the header allows", len(chunks))
 	}
@@ -511,7 +531,7 @@ func (s *dnsClientSession) sendPacket(pkt []byte) ([]byte, error) {
 		labels := chunkLabels(dataB32, dnsMaxLabel)
 
 		name := "t." + seqB32 + "." + fragB32 + "." + s.tokenB32 + "." +
-			strings.Join(labels, ".") + "." + dnsTunnelDomain + "."
+			strings.Join(labels, ".") + "." + s.tunnelDomain + "."
 
 		if l := dnsNameWireLen(name); l > dnsMaxName {
 			return nil, fmt.Errorf("send packet: fragment %d/%d builds a %d-byte name, over the %d limit",
@@ -536,13 +556,13 @@ func (s *dnsClientSession) sendPacket(pkt []byte) ([]byte, error) {
 
 // dnsFragCipherBytes is how many ciphertext bytes fit in one query, worked out
 // from the actual encoded overhead rather than assumed.
-func dnsFragCipherBytes() int {
+func dnsFragCipherBytes(domain string) int {
 	// Fixed labels: "t", seq, frag, token, plus the tunnel domain and root.
 	overhead := dnsNameWireLen("t." +
 		b32enc.EncodeToString(make([]byte, 4)) + "." +
 		b32enc.EncodeToString(make([]byte, 2)) + "." +
 		b32enc.EncodeToString(make([]byte, 10)) + "." +
-		dnsTunnelDomain + ".")
+		domain + ".")
 
 	budget := dnsMaxName - overhead
 	if budget <= 0 {
@@ -613,10 +633,10 @@ func (s *dnsClientSession) decodePiggybackTXT(txt string) ([]byte, error) {
 	return plain, nil
 }
 
-// sendKeepalive sends a DNS keepalive query k.<b32(token)>.tunnel.freewire.com.
+// sendKeepalive sends a DNS keepalive query k.<b32(token)>.<zone>.
 func (s *dnsClientSession) sendKeepalive() error {
 	tokenB32 := b32enc.EncodeToString(s.token)
-	name := "k." + tokenB32 + "." + dnsTunnelDomain + "."
+	name := "k." + tokenB32 + "." + s.tunnelDomain + "."
 	deadline := time.Now().Add(3 * time.Second)
 	_, err := dnsQuery(s.dnsServer, name, deadline)
 	return err

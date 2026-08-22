@@ -12,7 +12,7 @@ import (
 func buildName(seqB32, fragB32, tokenB32 string, chunk []byte) string {
 	labels := chunkLabels(b32enc.EncodeToString(chunk), dnsMaxLabel)
 	return "t." + seqB32 + "." + fragB32 + "." + tokenB32 + "." +
-		strings.Join(labels, ".") + "." + dnsTunnelDomain + "."
+		strings.Join(labels, ".") + "." + defaultDNSTunnelDomain + "."
 }
 
 func TestEveryFragmentFitsTheNameLimit(t *testing.T) {
@@ -23,7 +23,7 @@ func TestEveryFragmentFitsTheNameLimit(t *testing.T) {
 	// Payload sizes spanning empty, typical, and a full-MTU datagram plus tag.
 	for _, size := range []int{0, 1, 64, 96, 512, 1416, 1436, 2048} {
 		cipher := make([]byte, size)
-		for _, chunk := range splitCiphertext(cipher, dnsFragCipherBytes()) {
+		for _, chunk := range splitCiphertext(cipher, dnsFragCipherBytes(defaultDNSTunnelDomain)) {
 			name := buildName(seqB32, fragB32, tokenB32, chunk)
 			if l := dnsNameWireLen(name); l > dnsMaxName {
 				t.Errorf("payload %d: fragment builds a %d-byte name, over the %d limit",
@@ -45,7 +45,7 @@ func TestFragmentsReassembleToTheOriginal(t *testing.T) {
 			orig[i] = byte(i % 251)
 		}
 		var out []byte
-		for _, c := range splitCiphertext(orig, dnsFragCipherBytes()) {
+		for _, c := range splitCiphertext(orig, dnsFragCipherBytes(defaultDNSTunnelDomain)) {
 			out = append(out, c...)
 		}
 		if len(out) != len(orig) {
@@ -63,7 +63,7 @@ func TestFragmentsReassembleToTheOriginal(t *testing.T) {
 
 // An empty packet still needs one fragment, or the server never learns a total.
 func TestEmptyPayloadProducesOneFragment(t *testing.T) {
-	if got := len(splitCiphertext(nil, dnsFragCipherBytes())); got != 1 {
+	if got := len(splitCiphertext(nil, dnsFragCipherBytes(defaultDNSTunnelDomain))); got != 1 {
 		t.Errorf("empty payload produced %d fragments, want 1", got)
 	}
 }
@@ -71,18 +71,18 @@ func TestEmptyPayloadProducesOneFragment(t *testing.T) {
 // The fragment header carries index and total in one byte each.
 func TestFullDatagramStaysWithinTheFragmentHeader(t *testing.T) {
 	// 1420 MTU + 16-byte Poly1305 tag is the largest ciphertext expected.
-	n := len(splitCiphertext(make([]byte, 1436), dnsFragCipherBytes()))
+	n := len(splitCiphertext(make([]byte, 1436), dnsFragCipherBytes(defaultDNSTunnelDomain)))
 	if n > 255 {
 		t.Errorf("a full datagram needs %d fragments, more than the header's 255", n)
 	}
 	if n < 2 {
 		t.Errorf("a full datagram produced %d fragments; the budget looks wrong", n)
 	}
-	t.Logf("full datagram spans %d fragments (%d ciphertext bytes each)", n, dnsFragCipherBytes())
+	t.Logf("full datagram spans %d fragments (%d ciphertext bytes each)", n, dnsFragCipherBytes(defaultDNSTunnelDomain))
 }
 
 func TestFragmentBudgetIsPositive(t *testing.T) {
-	if got := dnsFragCipherBytes(); got < 32 {
+	if got := dnsFragCipherBytes(defaultDNSTunnelDomain); got < 32 {
 		t.Errorf("fragment budget is %d bytes, too small to make progress", got)
 	}
 }

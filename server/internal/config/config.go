@@ -13,6 +13,11 @@ import (
 	"golang.org/x/crypto/curve25519"
 )
 
+// DefaultDNSTunnelDomain is the zone used when a config names none. It must
+// match the delegation set up in the registrar's DNS (an NS record for this
+// name pointing at a nameserver A record on this server's public IP).
+const DefaultDNSTunnelDomain = "t.pinghop.net"
+
 type Config struct {
 	PrivateKey       string `json:"private_key"`
 	PublicKey        string `json:"public_key"`
@@ -31,6 +36,12 @@ type Config struct {
 	TLSKeyFile    string `json:"tls_key_file"`    // path to key PEM; empty = self-signed
 	DNSTunnelPort int    `json:"dns_tunnel_port"` // default 53
 	ICMPUDPPort   int    `json:"icmp_udp_port"`   // default 4500
+
+	// DNSTunnelDomain is the authoritative zone this server answers for and
+	// advertises to clients. It must be delegated to this host's public IP (an
+	// NS record in the parent zone) or the DNS tunnel cannot be reached through
+	// a resolver the client does not control. Default "t.pinghop.net".
+	DNSTunnelDomain string `json:"dns_tunnel_domain"`
 
 	// PrivacyPassKey is the PEM-encoded RSA issuer key, empty on self-hosted
 	// servers.
@@ -124,6 +135,9 @@ func (c *Config) applyDefaults() {
 	if c.ICMPUDPPort == 0 {
 		c.ICMPUDPPort = 4500
 	}
+	if c.DNSTunnelDomain == "" {
+		c.DNSTunnelDomain = DefaultDNSTunnelDomain
+	}
 	if c.ACMECacheDir == "" {
 		c.ACMECacheDir = "./acme-cache"
 	}
@@ -157,6 +171,7 @@ func generate(path string) (*Config, error) {
 		TLSPort:          443,
 		DNSTunnelPort:    53,
 		ICMPUDPPort:      4500,
+		DNSTunnelDomain:  DefaultDNSTunnelDomain,
 	}
 
 	data, err := json.MarshalIndent(cfg, "", "  ")

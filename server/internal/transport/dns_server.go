@@ -25,16 +25,19 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
-// DNSServer is an authoritative DNS server for tunnel.freewire.com.
+// DNSServer is the authoritative DNS server for the configured tunnel zone (see NewDNSServer).
 // It handles the Freewire DNS tunnel protocol:
 //
-//	h.1.<b32(clientPub)>.tunnel.freewire.com  → ClientHello
-//	h.3.<b32(mac)>.<b32(token)>.tunnel.freewire.com → ClientConfirm
-//	t.<b32(seq)>.<b32(token)>.<...data...>.tunnel.freewire.com → data
-//	k.<b32(token)>.tunnel.freewire.com → keepalive
+//	h.1.<b32(clientPub)>.<zone>  → ClientHello
+//	h.3.<b32(mac)>.<b32(token)>.<zone> → ClientConfirm
+//	t.<b32(seq)>.<b32(token)>.<...data...>.<zone> → data
+//	k.<b32(token)>.<zone> → keepalive
 type DNSServer struct {
-	wgPort   int
-	sessions sync.Map // base32(token) → *dnsSession
+	wgPort int
+	// tunnelSuffix is the uppercased, dot-prefixed authoritative zone
+	// (e.g. ".T.PINGHOP.NET"), set once at construction from the server config.
+	tunnelSuffix string
+	sessions     sync.Map // base32(token) → *dnsSession
 	// pending counts sessions awaiting a ClientConfirm, tracked separately so a
 	// hello flood cannot displace established tunnels.
 	pending atomic.Int64
@@ -192,13 +195,12 @@ const (
 
 var srvB32enc = base32.StdEncoding.WithPadding(base32.NoPadding)
 
-// dnsTunnelSuffix is the authoritative zone, uppercased once at init rather
-// than rebuilt per query.
-const dnsTunnelSuffix = ".TUNNEL.FREEWIRE.COM"
-
-// NewDNSServer creates a DNSServer that bridges to WireGuard on wgPort.
-func NewDNSServer(wgPort int, log *zap.Logger) *DNSServer {
-	return &DNSServer{wgPort: wgPort, log: log}
+// NewDNSServer creates a DNSServer that bridges to WireGuard on wgPort and
+// answers for the given tunnel zone. The suffix is uppercased once here rather
+// than rebuilt per query, matching the uppercasing the query path does.
+func NewDNSServer(wgPort int, tunnelDomain string, log *zap.Logger) *DNSServer {
+	suffix := "." + strings.ToUpper(strings.Trim(tunnelDomain, "."))
+	return &DNSServer{wgPort: wgPort, tunnelSuffix: suffix, log: log}
 }
 
 // Run starts the authoritative DNS UDP listener on port and serves until ctx is done.
@@ -316,12 +318,12 @@ func (s *DNSServer) handleQuery(buf []byte, srcAddr *net.UDPAddr, conn *net.UDPC
 		return
 	}
 	name = strings.ToUpper(strings.TrimSuffix(name, "."))
-	if !strings.HasSuffix(name, dnsTunnelSuffix) {
+	if !strings.HasSuffix(name, s.tunnelSuffix) {
 		s.sendNXDomain(conn, srcAddr, req)
 		return
 	}
 	// Strip the tunnel domain suffix.
-	label := strings.TrimSuffix(name, dnsTunnelSuffix)
+	label := strings.TrimSuffix(name, s.tunnelSuffix)
 
 	parts := strings.Split(label, ".")
 	if len(parts) < 2 {

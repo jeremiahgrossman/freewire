@@ -8,6 +8,9 @@ struct ServerConfig: Decodable {
     let dnsTunnelPort: Int
     let icmpUDPPort: Int
     let capacityAvailable: Bool
+    // Authoritative DNS tunnel zone. Optional so a server old enough not to send
+    // it still decodes; the Go tunnel falls back to its own default when empty.
+    let dnsTunnelDomain: String?
 
     var endpoint: String { "\(endpointHost):\(endpointPort)" }
 
@@ -19,6 +22,7 @@ struct ServerConfig: Decodable {
         case dnsTunnelPort = "dns_tunnel_port"
         case icmpUDPPort = "icmp_udp_port"
         case capacityAvailable = "capacity_available"
+        case dnsTunnelDomain = "dns_tunnel_domain"
     }
 }
 
