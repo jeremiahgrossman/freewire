@@ -119,6 +119,14 @@ The third audit's confirmed set, and what closed each:
 - Token-rejection copy was invented; `error-states-spec.md` now specifies it as
   TRUST-3 and TRUST-4.
 
+**Network intelligence is deliberately not built.** The spec stands
+(`PRD.md` §6.9) and the implementation is declined: reconnect now remembers the
+last working transport, so the crowdsourced hint only helps on a first
+connection to an unseen network, while a BSSID hash is a location identifier
+that public wardriving databases can reverse by lookup. See
+NETWORK-INTELLIGENCE in `DECISIONS.md`. Do not add the preferences toggle while
+this stands — a toggle for a feature that does nothing is its own false claim.
+
 ### Deferred until there are other users
 
 None of these matter for one person on their own server. They become blocking

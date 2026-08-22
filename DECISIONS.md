@@ -237,3 +237,67 @@ private key can derive the session key. The client already has the public half
 pinned and the server already has the private half in its config, so this needs
 no new key material and no signatures. It is a protocol change to both ends of
 both transports, which is the whole reason it is not a small job.
+
+---
+
+## NETWORK-INTELLIGENCE
+
+**Deliberately not built, 2026-08-22. The spec stands; the implementation is
+declined for now. Revisit if first-connect latency on hostile networks becomes a
+real complaint, or if an anonymisation design lands that does not require
+storing a location signal.**
+
+### What it would do
+
+`PRD.md` §6.9. On a wifi network the client reports which transport worked and
+which failed, keyed by SHA-256 of the BSSID. Once five independent devices have
+reported the same network, the server tells a sixth which path to try first. The
+hint reorders the fallback chain and never removes paths, so a stale hint costs
+one wasted attempt rather than a failure.
+
+### Why it is not being built
+
+**The payoff shrank.** The value was avoiding a walk down the fallback chain on
+a network known to block most of it. Reconnect now remembers the last working
+transport, so a device's own history already goes straight to the right path.
+The hint only helps on the *first* connection to a network never used before;
+after that, local memory is better than the crowd's and needs no reporting at
+all.
+
+**The cost is a location signal.** A BSSID hash is not anonymous in the way the
+word "hash" suggests. The input space is small and heavily enumerated: public
+wardriving databases map millions of BSSIDs to street addresses, so anyone
+holding one can hash the lot and reverse these by lookup. `data-model.md`
+acknowledges reversal "requires deliberate attack effort", which is a
+preimage-resistance argument applied to a low-entropy input, where it does not
+hold. The k-anonymity gate governs which hints are *served*; reports below the
+threshold are still stored.
+
+So the server would learn which physical places its users visit, in exchange for
+saving a few seconds on a first connection.
+
+**It cuts against everything else decided this week.** Per-connection logging was
+replaced with counters, DNS was moved to DoH, and the privacy copy was corrected
+where it claimed more than was true. Adding the one feature that transmits
+something about the user's surroundings would be the only movement in the
+opposite direction.
+
+### What would make it acceptable
+
+- Salted, per-epoch hashes with server-side aggregation that cannot retain
+  sub-threshold reports, so a single device's report is unusable even to the
+  operator holding the database.
+- Or private set intersection, so the server answers "is this network known
+  hostile" without learning which network was asked about.
+
+Both are materially more work than the feature saves, which is the actual
+argument here — not that crowdsourcing is wrong, but that this version buys
+little and costs something the rest of the product is designed not to hold.
+
+### Status
+
+`PRD.md` §6.9, `client-server-api-spec.md` §Network Intelligence API and
+`data-model.md` §network_path_hint remain as written. Nothing is implemented on
+either side. The preferences toggle described in §6.9 is not present and should
+not be added while this stands, since a toggle for a feature that does nothing
+is its own kind of false claim.
