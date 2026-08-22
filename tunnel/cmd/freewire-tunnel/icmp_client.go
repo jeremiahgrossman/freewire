@@ -29,6 +29,15 @@ import (
 // Rate limit: 20 packets/second hard cap
 // Keepalive:  every 15s when idle
 
+// maxSessionSeq bounds the sequence space a session may use.
+//
+// The nonce is derived from the sequence number, so a counter that wraps
+// repeats a (key, nonce) pair -- which for ChaCha20-Poly1305 leaks the XOR of
+// two plaintexts and forfeits authentication entirely. This ceiling is reached
+// long before the wrap, and reaching it ends the session rather than continuing
+// unsafely. Session keys are ephemeral, so reconnecting derives new ones.
+const maxSessionSeq = 1 << 31
+
 const (
 	icmpVersion     = 0x01
 	icmpTypeHello   = 0x01
@@ -369,10 +378,18 @@ func (s *icmpClientSession) sendData(payload []byte) error {
 	}
 
 	seq := atomic.AddUint32(&s.txSeq, 1) - 1
-	aead, err := chacha20poly1305.New(s.keyC2S[:])
-	if err != nil {
-		return fmt.Errorf("aead: %w", err)
+	// The nonce is derived from the sequence number, so a counter that wraps
+	// reuses a (key, nonce) pair -- which for ChaCha20-Poly1305 leaks the
+	// XOR of two plaintexts and forfeits authentication. Refuse to send
+	// rather than wrap. Reaching this needs billions of packets in one
+	// session and should never happen; if it does, the session must end, and
+	// session keys are ephemeral so reconnecting derives new ones.
+	if seq >= maxSessionSeq {
+		return fmt.Errorf("session sequence space exhausted; reconnect to rekey")
 	}
+	// The AEAD is built once at handshake. Rebuilding it per packet was pure
+	// overhead on the forwarding path, and the prebuilt fields sat unused.
+	aead := s.aeadTx
 
 	// Build header (8 bytes): Version + Type + SessionToken(2) + Seq(4).
 	hdr := make([]byte, icmpHeaderLen)
@@ -387,7 +404,7 @@ func (s *icmpClientSession) sendData(payload []byte) error {
 	ciphertext := aead.Seal(nil, nonce, payload, hdr)
 
 	pkt := append(hdr, ciphertext...)
-	_, err = s.conn.Write(pkt)
+	_, err := s.conn.Write(pkt)
 	return err
 }
 
@@ -411,6 +428,9 @@ func (s *icmpClientSession) decryptData(pkt []byte) ([]byte, error) {
 // sendKeepalive sends a KEEPALIVE packet.
 func (s *icmpClientSession) sendKeepalive() error {
 	seq := atomic.AddUint32(&s.txSeq, 1) - 1
+	if seq >= maxSessionSeq {
+		return fmt.Errorf("session sequence space exhausted; reconnect to rekey")
+	}
 	pkt := make([]byte, icmpHeaderLen)
 	pkt[0] = icmpVersion
 	pkt[1] = icmpTypeKA

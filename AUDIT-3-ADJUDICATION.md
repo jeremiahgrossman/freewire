@@ -63,6 +63,15 @@ the O(n²) eviction alone was reported 9 times under 9 different ids.
 | FW-S07, CRYPTO-010, FW-L03 | high | The `tlsMaxFrame` bound was applied to the outbound direction only. The inbound buffer was still 64 KB and the length check compared against it, so each connection committed 64 KB before the peer proved anything — most of what the bound was introduced to stop | inbound buffer and length check both use `tlsMaxFrame`; per-session WireGuard read buffers cut from 64 KB to `wgReadBuffer` |
 | SEC-013 | medium | CONNECT parsing used `ReadString`, which accumulates until its delimiter arrives, and drained headers with no count limit — a memory budget set by an unauthenticated peer | `readLineLimited` (8 KB) and a 64-header cap |
 | REL-007 | high | Half-open handshakes were bounded but what they promoted into was not, so descriptor exhaustion just moved one step along: each established DNS or ICMP session holds a UDP socket and goroutines | 128 established sessions per transport, checked before any socket is opened |
+| FW-A01, FW-A02, REL-04 | critical | CONN-1, CONN-2a and CONN-2b each showed a "Try again" button that did nothing: `connect()` admitted only `.disconnected` and `.failed`, so a user whose network dropped had no route back except quitting | `TunnelState.allowsConnectAttempt` |
+| FW-A10, FW-A11, REL-017, SEC-010 | high | Cancel was inert on every automatic retry — the portal watcher and the CONN-2b retry called `doConnect()` directly, leaving `connectTask` nil, so Cancel set `.disconnected` and the running attempt overwrote it seconds later | one `startConnect` funnel |
+| FW-A04, REL-003 | critical | Path upgrade claimed "Protected" while there was no tunnel at all, and ran untracked so a disconnect mid-upgrade was undone by it | UPGRADE-1 state and copy; tracked `upgradeTask` with cancellation checked either side of the launch |
+| FW-H02 | high | A connect failure released the peer but never killed the helper, leaving it holding routes and DNS with nothing tracking it | `killTunnel()` in the catch |
+| FW-A17, FW-A15 | low | The captive-portal retry reopened Apple's probe page, because the captured redirect was never stored | `lastPortalURL` |
+| REL-08, REL-011, FW-L04, REL-09, REL-012 | medium | `hasNetwork()` froze the UI for up to a second on every connect and every retry; `defaultGateway()` forked and waited inline on every upgrade probe | both async |
+| FW-A18, FW-C-017, FW-M06 | medium | The HTTP CONNECT probe asked proxies for `vpn.freewire.com`, so against a self-hosted server it reported a path that does not exist and triggered an upgrade that tore down a working tunnel | probes the configured server |
+| FW-A10 (privacy sheet) | high | "No connection logs" was false: every registration, session and eviction wrote a timestamped line, and wireguard-go logged peers by public-key fragment from vendored code | events counted, hourly rollup; wireguard-go's logger redacts peer references; two tests hold the line |
+| CRYPTO-013, REL-20, CRYPTO-016, REL-020 | medium | Sequence counters wrapped with no rekey. The nonce is derived from the sequence number, so a wrap repeats a (key, nonce) pair — for ChaCha20-Poly1305 that leaks the XOR of two plaintexts and forfeits authentication. The ICMP client also rebuilt its AEAD per packet while the prebuilt fields sat unused | `maxSessionSeq` refuses to send at half the space, ending the session; prebuilt `aeadTx` used |
 | CRYPTO-13, CRYPTO-14, FW-L02 | low | Scheme name `PrivateToken` contradicted the docs' `PrivacyPass`, and quote trimming used a cutset that would strip interior quotes | docs corrected to RFC 9577's `PrivateToken` (the code was right, the spec was wrong); at most one surrounding quote pair stripped |
 
 ---
@@ -98,9 +107,6 @@ server: 320 concurrent connections produced exactly 64 refusals.
 - FW-M02, FW-M03, REL-019: data races on `Peer.TunnelIP`, `sess.localConn`, and
   a non-atomic check-then-increment on the DNS pending counter. Narrow windows;
   `go test -race` does not currently reach them.
-- CRYPTO-013: sequence counters wrap with no rekey, which would reuse a
-  ChaCha20-Poly1305 nonce. Requires 2³² packets in one session — unreachable in
-  practice, catastrophic if reached. Worth a refusal-to-send at the boundary.
 - CRYPTO-007, CRYPTO-08: neither tunnel client applies a replay window to the
   server-to-client direction.
 - The kill-switch cluster (SEC-004, FW-C-008, FW-S09, FW-H07, CRYPTO-011,
@@ -111,16 +117,5 @@ server: 320 concurrent connections produced exactly 64 refusals.
   thing: the helper cannot be installed without a Developer ID, so none of it
   can be tested. Fixing untestable code here is how the pf ruleset broke the
   wifi earlier in this project.
-- The UX and lifecycle cluster (FW-A*, REL-0*): CONN-1 is a terminal dead end,
-  Cancel is inert on automatic retries, path upgrade shows "Protected" while it
-  rebuilds the tunnel, several main-actor blocking calls, the CONNECT upgrade
-  probe uses a hardcoded hostname, the fallback chain's worst case is ~32s
-  against an 11s budget. Roughly 60 candidates. These are correctness bugs in
-  the client's state machine and deserve their own pass rather than being
-  folded into a security fix.
-- FW-A10: the "What Freewire sees" sheet claims "No connection logs" while the
-  server writes a line per connection. The line contains a redacted session
-  token and a tunnel address, not a client IP, so the privacy guarantee holds —
-  but the copy overstates it and should be reworded.
 
 The raw list is in `.audit-tail.txt`, one line per candidate.

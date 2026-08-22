@@ -413,6 +413,13 @@ func dnsNameWireLen(name string) int {
 // whole packet rather than each piece.
 func (s *dnsClientSession) sendPacket(pkt []byte) ([]byte, error) {
 	seq := atomic.AddUint32(&s.txSeq, 1) - 1
+	// Same construction as the ICMP transport, same hazard: the nonce is
+	// derived from the sequence number, so a wrap repeats a (key, nonce) pair
+	// and ChaCha20-Poly1305 loses both confidentiality and authentication.
+	// End the session instead. See maxSessionSeq.
+	if seq >= maxSessionSeq {
+		return nil, fmt.Errorf("session sequence space exhausted; reconnect to rekey")
+	}
 
 	var nonce [12]byte
 	dnsNonceInto(seq, &nonce)
