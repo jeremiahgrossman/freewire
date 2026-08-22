@@ -247,3 +247,47 @@ All questions below are resolved. Full rationale is in `engineering-handoff.md` 
 4. **uTLS maintenance** — Resolved. Quarterly updates; out-of-cycle update within 30 days of a major Chrome/Safari release; rotate among 3 current fingerprints (Chrome, Safari/iOS, Firefox). See `build-and-release-pipeline.md` §uTLS Fingerprint Maintenance.
 
 5. **Key exchange in DNS tunnel** — Resolved. Minimum 3 round trips: ClientHello query → ServerHello response (1), MAC confirmation query → "OK" response (2), data flow begins on round trip 3. X25519 public keys (32 bytes → 58 Base32 chars) fit in a single label. See `dns-tunnel-protocol-spec.md` §Handshake.
+
+---
+
+## 10. Future work: warm standby, and why not path bonding
+
+Raised 2026-08-22: once the chain has established which transports a network
+permits, could the permitted ones run in parallel to raise throughput?
+
+**Bonding for throughput: no.** The paths are not comparable. TLS/443 measured
+166 Mbps against this server; the DNS tunnel is 0.5–2 Mbps and the ICMP tunnel
+is capped at 500 Kbps by design. Aggregating 166 Mbps with 0.5 Mbps buys 0.3%.
+The only case where the arithmetic is interesting is DNS plus ICMP when
+everything faster is blocked, and that doubles 0.5 Mbps to 1 Mbps.
+
+It would also cost more than it pays, for two reasons that are structural
+rather than implementation detail:
+
+- **WireGuard's anti-replay window is 8128 packets** (`replay.windowSize`,
+  RFC 6479). With one path near 70 ms and another beyond 500 ms, packets sent
+  early on the slow path arrive after thousands sent later on the fast one and
+  are rejected as too old. The tunnel would drop traffic it had successfully
+  carried.
+- **TCP inside the tunnel sees one path.** Heterogeneous latency across a
+  single congestion-control loop causes retransmit-timer thrash and spurious
+  retransmits; naive bonding across unequal paths reliably performs worse than
+  the fast path alone. MPTCP needs per-subflow congestion control and an
+  explicit scheduler precisely to avoid this, and none of that structure exists
+  here.
+
+There is also a detection cost: running DNS tunnelling, ICMP and TLS at once is
+far more anomalous to a portal that is watching than any one of them.
+
+**Warm standby: worth doing.** The version of the idea that pays is redundancy
+rather than aggregation. Keep a second permitted transport handshaked but idle,
+so that losing the active path fails over in one round trip instead of
+re-walking the chain from the top — which currently costs up to the full
+fallback budget, during which the user is unprotected. This needs no packet
+scheduler and no change to the replay window: only one path carries traffic at
+a time.
+
+Open questions if it is picked up: what holds the standby session alive without
+the keepalives themselves becoming a signal; whether the server should count a
+standby peer against capacity; and whether the standby should be re-probed on
+network change or only on failure.
