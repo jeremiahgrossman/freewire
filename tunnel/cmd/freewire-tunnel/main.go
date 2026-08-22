@@ -567,9 +567,24 @@ func setupRouting(tunName, bypassHost string) error {
 		return fmt.Errorf("tunnel routes installed but carry no traffic: %w", err)
 	}
 
+	// Start the DoH forwarder before pointing the system at it, so the resolver
+	// it is sent to is already answering.
+	fwd, dohErr := startDoHForwarder()
+	dohNotice(dohErr)
+	if dohErr == nil {
+		dohActive = fwd
+	}
+
 	// Move DNS last, once traffic is known to survive the tunnel. Pointing the
 	// system at a resolver that is only reachable through the tunnel before
 	// knowing the tunnel works would take name resolution down with it.
+	if dohErr != nil {
+		// Without the forwarder there is nothing safe to point at: sending the
+		// system to 1.1.1.1 directly is the cleartext path this replaced, and
+		// leaving it alone keeps queries on the local network. The second is
+		// the status quo and the one the user was already told about.
+		return nil
+	}
 	if err := setupDNS(); err != nil {
 		// Not fatal. A tunnel that carries traffic while DNS leaks is a real
 		// privacy loss and has to be said out loud, but refusing to connect
@@ -672,11 +687,19 @@ func interfaceForDest(dest string) (string, error) {
 //
 // The system default route is never touched now, so there is nothing to
 // restore: removing the two halves hands traffic back to it automatically.
+// dohActive is the running forwarder, stopped on teardown.
+var dohActive *dohForwarder
+
 func cleanupRouting(tunName, bypassHost string) {
 	// DNS first. The resolvers it points at are only reachable through the
 	// tunnel, so restoring them after tearing the routes down would leave a
 	// window with no working name resolution.
 	cleanupDNS()
+	// Then the forwarder, once nothing is pointed at it.
+	if dohActive != nil {
+		dohActive.Close()
+		dohActive = nil
+	}
 
 	for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
 		exec.Command(routeBin, "-q", "-n", "delete", "-inet", half).Run() //nolint:errcheck
@@ -719,7 +742,12 @@ var ipv6Services []string
 //
 // Cloudflare's resolvers are used because the tech stack already fixes on them,
 // and they are reached through the tunnel like any other address.
-var tunnelResolvers = []string{"1.1.1.1", "1.0.0.1"}
+// The system resolver points at the local DoH forwarder, not at Cloudflare
+// directly. Pointing it straight at 1.1.1.1 stopped the leak to the local
+// network but left queries as plain DNS on port 53: they crossed the tunnel in
+// the clear and left the VPN server in the clear, so the one party the product
+// promises cannot see your browsing could read every domain. See doh.go.
+var tunnelResolvers = []string{"127.0.0.1"}
 
 // savedDNSFile records each service's original resolvers.
 //

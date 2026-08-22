@@ -159,7 +159,14 @@ func resolveLocalDNSServer() (string, error) {
 			line = strings.TrimSpace(line)
 			if strings.HasPrefix(line, "nameserver") {
 				parts := strings.Fields(line)
-				if len(parts) >= 2 && net.ParseIP(parts[1]) != nil {
+				ip := net.ParseIP(parts[1])
+				// Loopback is skipped. Once the tunnel points the system at its
+				// own forwarder on 127.0.0.1, a later run reading resolv.conf
+				// would find that address and try to reach the authoritative
+				// server through it -- and after an unclean exit the forwarder
+				// is not there at all. The DNS transport needs a resolver that
+				// exists independently of this process.
+				if ip != nil && !ip.IsLoopback() {
 					return parts[1], nil
 				}
 			}
