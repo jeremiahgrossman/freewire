@@ -33,9 +33,11 @@ struct PanelView: View {
             }
         }
         .frame(width: 320)
-        // Bump every semantic font one step up so labels and buttons are easier
-        // to read and hit. Applied at the root so all screens inherit it.
-        .dynamicTypeSize(.xLarge)
+        // Base font for the whole popover. Set explicitly (not via dynamicTypeSize,
+        // which barely affects macOS) so unstyled text and Toggle labels render at
+        // the native menu size (~14pt) instead of SwiftUI's smaller macOS default.
+        // Elements below override with their own explicit sizes for hierarchy.
+        .font(.system(size: 14))
         .background(.background)
     }
 }
@@ -48,7 +50,7 @@ private struct PanelHeader: View {
     var body: some View {
         HStack {
             Text("Freewire")
-                .font(.headline)
+                .font(.system(size: 16, weight: .semibold))
             Spacer()
             Button(action: onSettings) {
                 Image(systemName: "gearshape")
@@ -74,7 +76,7 @@ private struct SubHeader: View {
             }
             .buttonStyle(.plain)
             Text(title)
-                .font(.headline)
+                .font(.system(size: 16, weight: .semibold))
             Spacer()
         }
         .padding(.horizontal, 12)
@@ -127,7 +129,7 @@ private struct DisconnectedBody: View {
         VStack(alignment: .leading, spacing: 8) {
             StatusRow(symbol: "circle", label: "Not protected", color: .secondary)
             Text("Traffic is not encrypted on this network.")
-                .font(.caption)
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
             Spacer().frame(height: 4)
             ConnectButton(tunnelManager: tunnelManager)
@@ -147,10 +149,10 @@ private struct ConnectingBody: View {
             HStack(spacing: 6) {
                 ProgressView().scaleEffect(0.6)
                 Text("Connecting...")
-                    .font(.subheadline.weight(.medium))
+                    .font(.system(size: 14, weight: .medium))
             }
             Text(status)
-                .font(.caption)
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
             Spacer().frame(height: 4)
             Button("Cancel") {
@@ -197,13 +199,13 @@ private struct ConnectedBody: View {
                 StatusRow(symbol: "exclamationmark.triangle.fill",
                           label: "Debug mode: routing off", color: .orange)
                 Text("Your traffic is NOT going through the VPN.")
-                    .font(.caption)
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             } else {
                 StatusRow(symbol: "checkmark.shield.fill", label: "Protected", color: .green)
             }
             Text("Connected · \(duration)")
-                .font(.caption)
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
             if transport != .wireguard {
                 TransportIndicator(transport: transport)
@@ -213,7 +215,7 @@ private struct ConnectedBody: View {
             // carrying traffic and encrypting it. Only the lookups are exposed.
             if transport.leaksDNSToNetwork {
                 Text("Your traffic is protected, but this network can see which sites you visit.")
-                    .font(.caption)
+                    .font(.system(size: 12))
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -244,9 +246,9 @@ private struct TransportIndicator: View {
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: transport.isReducedSpeed ? "tortoise.fill" : "arrow.triangle.2.circlepath")
-                .font(.caption2)
+                .font(.system(size: 11))
             Text(transport.isReducedSpeed ? "Reduced speed · \(transport.displayName)" : transport.displayName)
-                .font(.caption2)
+                .font(.system(size: 11))
         }
         .foregroundStyle(transport.isReducedSpeed ? Color.orange : Color.secondary)
     }
@@ -268,13 +270,13 @@ private struct AwaitingPortalBody: View {
             HStack(spacing: 6) {
                 if !timedOut { ProgressView().scaleEffect(0.6) }
                 Text(timedOut ? "Still not connected" : "Waiting for you to finish signing in…")
-                    .font(.subheadline.weight(.medium))
+                    .font(.system(size: 14, weight: .medium))
                     .fixedSize(horizontal: false, vertical: true)
             }
             Text(timedOut
                  ? "Finish signing in to this network, then try again."
                  : "Freewire will connect as soon as this network lets it through.")
-                .font(.caption)
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer().frame(height: 4)
@@ -301,10 +303,10 @@ private struct NoNetworkBody: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("No internet connection")
-                .font(.subheadline.weight(.medium))
+                .font(.system(size: 14, weight: .medium))
             // Copy per error-states-spec.md CONN-1.
             Text("Connect to a network and try again.")
-                .font(.caption)
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer().frame(height: 4)
@@ -329,10 +331,10 @@ private struct ReconnectingBody: View {
             HStack(spacing: 6) {
                 ProgressView().scaleEffect(0.6)
                 Text("Reconnecting...")
-                    .font(.subheadline.weight(.medium))
+                    .font(.system(size: 14, weight: .medium))
             }
             Text("Attempt \(attempt + 1) of 3. Your traffic is not protected while reconnecting.")
-                .font(.caption)
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer().frame(height: 4)
@@ -357,7 +359,7 @@ private struct BlockedBody: View {
         VStack(alignment: .leading, spacing: 8) {
             StatusRow(symbol: "exclamationmark.circle.fill", label: "Connection lost", color: .red)
             Text("Reconnection failed. Your traffic is not protected. Reconnect or disconnect.")
-                .font(.caption)
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
             Spacer().frame(height: 4)
             Button("Try Again") {
@@ -386,7 +388,7 @@ private struct CaptivePortalBody: View {
             StatusRow(symbol: "wifi.exclamationmark", label: "Network login required", color: .orange)
             // Exact copy from error-states-spec.md CONN-2a
             Text("Authenticate with this network, then Freewire will reconnect automatically.")
-                .font(.caption)
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer().frame(height: 4)
@@ -415,7 +417,7 @@ private struct NetworkBlockBody: View {
             StatusRow(symbol: "xmark.shield.fill", label: "This network is blocking secure connections.", color: .red)
             // Exact copy from error-states-spec.md CONN-2b
             Text("Freewire tried every available method. This network may restrict all VPN traffic.")
-                .font(.caption)
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer().frame(height: 4)
@@ -444,7 +446,7 @@ private struct FailedBody: View {
         VStack(alignment: .leading, spacing: 8) {
             StatusRow(symbol: "xmark.circle.fill", label: "Failed to connect", color: .red)
             Text(error.localizedDescription)
-                .font(.caption)
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .lineLimit(4)
             Spacer().frame(height: 4)
@@ -480,7 +482,7 @@ private struct FooterButton: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
-        .font(.subheadline)
+        .font(.system(size: 14))
     }
 }
 
@@ -511,7 +513,7 @@ private struct PanelSettingsView: View {
                     .onChange(of: killSwitch) { _, v in Preferences.shared.killSwitchEnabled = v }
                     .disabled(true)
                 Text("Not available yet. When the VPN drops, traffic is not blocked. Coming in a future release.")
-                    .font(.caption)
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -520,7 +522,7 @@ private struct PanelSettingsView: View {
                 Toggle("Help improve captive portal detection", isOn: $netIntelligence)
                     .onChange(of: netIntelligence) { _, v in Preferences.shared.networkIntelligenceEnabled = v }
                 Text("Shares which connection method worked on this network. No personal data collected.")
-                    .font(.caption)
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -532,20 +534,20 @@ private struct PanelSettingsView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text("Key fingerprint")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
                 Text(fingerprint)
-                    .font(.system(.caption, design: .monospaced))
+                    .font(.system(size: 13, design: .monospaced))
                     .textSelection(.enabled)
             }
             HStack {
                 Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
                 Spacer()
                 Button("Privacy Policy") {
                     if let url = URL(string: "https://freewire.com/privacy") { NSWorkspace.shared.open(url) }
                 }
                 .buttonStyle(.link)
-                .font(.caption)
+                .font(.system(size: 12))
             }
         }
         .padding(12)
@@ -574,8 +576,8 @@ private struct PanelPrivacyView: View {
                     Image(systemName: item.0 ? "checkmark.circle.fill" : "xmark.circle.fill")
                         .foregroundStyle(item.0 ? .green : .red)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(item.1).font(.subheadline.weight(.medium))
-                        Text(item.2).font(.caption).foregroundStyle(.secondary)
+                        Text(item.1).font(.system(size: 14, weight: .medium))
+                        Text(item.2).font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                 }
             }
@@ -602,7 +604,7 @@ private struct StatusRow: View {
                 .foregroundStyle(color)
             Text(label)
                 // Regular weight to read like a native menu item, not a heading.
-                .font(.subheadline)
+                .font(.system(size: 14))
         }
     }
 }
@@ -624,7 +626,7 @@ private struct ConnectButton: View {
 struct PrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.subheadline.weight(.medium))
+            .font(.system(size: 14, weight: .medium))
             .foregroundStyle(.white)
             .padding(.vertical, 6)
             .frame(maxWidth: .infinity)
@@ -636,7 +638,7 @@ struct PrimaryButtonStyle: ButtonStyle {
 struct SecondaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.subheadline)
+            .font(.system(size: 14))
             .foregroundStyle(.primary)
             .padding(.vertical, 6)
             .frame(maxWidth: .infinity)
@@ -662,7 +664,7 @@ struct UpgradingBody: View {
             StatusRow(symbol: "arrow.triangle.2.circlepath",
                       label: "Switching to a faster connection", color: .orange)
             Text("Your traffic is not protected for a moment.")
-                .font(.caption)
+                .font(.system(size: 12))
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
