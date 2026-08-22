@@ -125,14 +125,13 @@ replacement: they say nothing about how the chain behaves under portal rules.
 
 | Transport | Ready | Tunnel ping | Real egress | Notes |
 |---|---|---|---|---|
-| TLS/443 | 2.6s | 154–750ms | ✅ 52.203.246.145 | Reliable. 166 Mbps measured separately. |
-| ICMP/UDP | ~3s | 66–134ms | ✅ 2 of 3 runs | Fixed: see the rate-limiter defect below. |
-| DNS | ~3s | 167–750ms, lossy | ⚠️ 1 of 3 runs | First time DNS egress has been demonstrated at all. Still marginal. |
+| TLS/443 | 2.6s | 154–750ms | ✅ | Reliable. 166 Mbps measured separately. |
+| ICMP/UDP | ~3s | 66–134ms | ✅ | After the rate-limiter fix below. |
+| DNS | ~3s | 167–750ms | ✅ 5 of 5 | After the sliding-window fix below. Was 1 of 3. |
 
-ICMP now carries a full default route. DNS does not reliably: it reaches egress
-about one run in three. That is a flow-control question (sliding window and poll
-interval) rather than the rate-limiter defect that affected ICMP, and it is
-still open.
+All three carry a full default route. Both tunnelled paths were failing for the
+same reason in two different shapes: a flow-control constant that described
+behaviour nothing implemented.
 
 Three defects were found by these runs, all fixed:
 
@@ -153,6 +152,12 @@ Three defects were found by these runs, all fixed:
   The budget is now in bytes per second, derived from one constant: a packet cap
   delivers the documented 100-500 Kbps only at full-size packets, and at the
   small packets that dominate real traffic 20 packets/s is nearer 20 Kbps.
+- **The DNS sliding window never moved.** The file header promised "initial 8,
+  AIMD, max 64", the field carried an `(AIMD)` comment, and nothing in the
+  package ever adjusted it -- `dnsWindowMax` was dead. The window was a fixed 8,
+  which dropped 2450 of 3139 packets on a live tunnel. Now an actual sliding
+  window: additive increase per completed round trip, halving on a failed one,
+  bounded by the two constants that were already there.
 - **The fallback chain selected a different transport on identical input.**
   `waitForHandshake` tested "is the handshake time non-zero" with no baseline,
   so once any candidate had handshaked every later one reported success

@@ -50,6 +50,56 @@ const (
 
 var b32enc = base32.StdEncoding.WithPadding(base32.NoPadding)
 
+// dnsWindow is the sliding window over in-flight queries.
+//
+// Additive increase on a completed round trip, multiplicative decrease on a
+// failed one, bounded by dnsWindowInit and dnsWindowMax -- which is what this
+// file's header always claimed and what nothing implemented.
+type dnsWindow struct {
+	inFlight atomic.Int64
+	limit    atomic.Int64
+	// Increases are counted rather than applied one for one, so the window
+	// grows about one slot per full window of successes instead of once per
+	// packet. Growing per packet would reach the ceiling in a few round trips
+	// and turn the decrease into the only thing doing any work.
+	credit atomic.Int64
+}
+
+func (w *dnsWindow) acquire() bool {
+	if w.inFlight.Add(1) > w.limit.Load() {
+		w.inFlight.Add(-1)
+		return false
+	}
+	return true
+}
+
+func (w *dnsWindow) release() { w.inFlight.Add(-1) }
+
+func (w *dnsWindow) increase() {
+	limit := w.limit.Load()
+	if limit >= int64(dnsWindowMax) {
+		return
+	}
+	if w.credit.Add(1) >= limit {
+		w.credit.Store(0)
+		w.limit.CompareAndSwap(limit, limit+1)
+	}
+}
+
+func (w *dnsWindow) decrease() {
+	w.credit.Store(0)
+	for {
+		limit := w.limit.Load()
+		next := limit / 2
+		if next < int64(dnsWindowInit) {
+			next = int64(dnsWindowInit)
+		}
+		if next == limit || w.limit.CompareAndSwap(limit, next) {
+			return
+		}
+	}
+}
+
 // dnsClientSession holds the state for an active DNS tunnel session.
 type dnsClientSession struct {
 	token      []byte   // 10-byte opaque session token
@@ -260,7 +310,15 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 	// goroutine was spawned per packet, each holding a pooled socket attempt, a
 	// read buffer and an encoded copy of the packet for up to a 3s round trip,
 	// with nothing capping how many could exist at once.
-	sendSlots := make(chan struct{}, s.windowSize)
+	// A resizable window, not a fixed-size semaphore.
+	//
+	// The semaphore was created once at s.windowSize and never changed, and
+	// nothing anywhere adjusted windowSize -- so the "sliding window, AIMD,
+	// max 64" in this file's header was a fixed 8, and dnsWindowMax was dead.
+	// Measured on a live tunnel, that dropped 2450 of 3139 packets for a full
+	// window: the transport could not carry a default route.
+	win := &dnsWindow{}
+	win.limit.Store(int64(dnsWindowInit))
 
 	go func() {
 		defer close(done)
@@ -276,16 +334,21 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 			peerOnce.Do(func() { peerCh <- peer })
 			pkt := make([]byte, n)
 			copy(pkt, buf[:n])
-			select {
-			case sendSlots <- struct{}{}:
-			default:
+			if !win.acquire() {
 				// Window full: drop rather than queue without bound.
 				continue
 			}
 			go func(p []byte) {
-				defer func() { <-sendSlots }()
+				defer win.release()
 				data, err := s.sendPacket(p)
-				if err != nil || len(data) == 0 {
+				if err != nil {
+					// Multiplicative decrease. A failed round trip is the only
+					// congestion signal this transport gets.
+					win.decrease()
+					return
+				}
+				win.increase()
+				if len(data) == 0 {
 					return
 				}
 				select {
