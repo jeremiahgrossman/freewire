@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/freewire/server/internal/metrics"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/hkdf"
@@ -213,7 +215,7 @@ func (s *ICMPServer) evictLoop(ctx context.Context) {
 				if conn != nil {
 					conn.Close() // causes wgInbound reader to exit and close the channel
 				}
-				s.log.Info("icmp server: session evicted", zap.Bool("half_open", wasPending))
+				metrics.Global.SessionsEvicted.Add(1)
 				return true
 			})
 		}
@@ -489,7 +491,7 @@ func (s *ICMPServer) handleConfirm(pkt []byte, srcAddr *net.UDPAddr, conn *net.U
 		}
 	}()
 
-	s.log.Info("icmp server: session activated")
+	metrics.Global.ICMPSessions.Add(1)
 }
 
 // handleData decrypts an inbound data packet and forwards to WireGuard.

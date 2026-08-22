@@ -12,6 +12,7 @@ import (
 	"github.com/freewire/server/internal/api"
 	"github.com/freewire/server/internal/certs"
 	"github.com/freewire/server/internal/config"
+	"github.com/freewire/server/internal/metrics"
 	"github.com/freewire/server/internal/privacypass"
 	"github.com/freewire/server/internal/transport"
 	"github.com/freewire/server/internal/tunnel"
@@ -74,6 +75,11 @@ func main() {
 	// so anonymous rate limiting has nothing to add there.
 	expiryStop := make(chan struct{})
 	defer close(expiryStop)
+
+	// Aggregate rollups replace the per-connection log lines the code used to
+	// write. The privacy policy says a connection timeline is not kept, and an
+	// hourly count is what can be published without keeping one.
+	go metrics.RunRollup(log, time.Hour, expiryStop)
 
 	var issuer *privacypass.Issuer
 	var spent *privacypass.SpentStore

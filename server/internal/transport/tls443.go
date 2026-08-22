@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/freewire/server/internal/metrics"
 )
 
 func isClosedErr(err error) bool {
@@ -169,7 +171,10 @@ func (s *TLS443Server) handleConn(rawConn net.Conn) {
 	// in the bridge below rather than none at all.
 	tlsConn.SetWriteDeadline(time.Time{}) //nolint:errcheck
 
-	s.log.Info("tls443: session established")
+	// Counted, not logged: a timestamped "session established" line records
+	// when someone connected, which the privacy policy says does not exist.
+	// See internal/metrics.
+	metrics.Global.TLSSessions.Add(1)
 	s.bridgeToWireGuard(tlsConn)
 }
 

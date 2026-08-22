@@ -17,6 +17,7 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 
 	"github.com/freewire/server/internal/config"
+	"github.com/freewire/server/internal/metrics"
 )
 
 // Peer holds the in-memory state for a connected peer.
@@ -47,7 +48,8 @@ func NewManager(cfg *config.Config, log *zap.Logger) (*Manager, error) {
 		return nil, fmt.Errorf("get tun name: %w", err)
 	}
 
-	wgLogger := device.NewLogger(device.LogLevelError, "")
+	// Not device.NewLogger: its output names peers by public key. See wglogger.go.
+	wgLogger := newWireGuardLogger(log)
 	dev := device.NewDevice(tdev, conn.NewDefaultBind(), wgLogger)
 
 	privateKeyBytes, err := base64.StdEncoding.DecodeString(cfg.PrivateKey)
@@ -198,7 +200,10 @@ func (m *Manager) AddPeer(peerToken, publicKeyBase64 string, capacity int) (*Pee
 	peer.TunnelIPv6 = tunnelIPv6(tunnelIP)
 	m.mu.Unlock()
 
-	m.log.Info("peer added", zap.String("session", redactToken(peerToken)), zap.String("tunnel_ip", tunnelIP))
+	// Counted, not logged. The line named no client IP, but a timestamped
+	// record that a peer connected is what the privacy policy says is not
+	// kept, and on a small server that timeline is close to a usage history.
+	metrics.Global.PeersAdded.Add(1)
 	return peer, nil
 }
 
@@ -232,7 +237,7 @@ func (m *Manager) RemovePeer(peerToken string) (bool, error) {
 		return true, fmt.Errorf("remove peer from wireguard: %w", err)
 	}
 
-	m.log.Info("peer removed", zap.String("session", redactToken(peerToken)))
+	metrics.Global.PeersRemoved.Add(1)
 	return true, nil
 }
 

@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/freewire/server/internal/metrics"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/hkdf"
@@ -290,7 +292,7 @@ func (s *DNSServer) evictLoop(ctx context.Context) {
 					if sess.localConn != nil {
 						sess.localConn.Close()
 					}
-					s.log.Info("dns server: session evicted", zap.Bool("established", active))
+					metrics.Global.SessionsEvicted.Add(1)
 				}
 				return true
 			})
