@@ -37,10 +37,20 @@ subnet, so tunnel egress cannot be tested against them. See
 | Helpers | `cd tunnel && go build -o freewire-tunnel ./cmd/freewire-tunnel && go build -o freewire-tokens ./cmd/freewire-tokens`. Debug builds fall back to these paths |
 | Tests | `go test -race ./...` in `server/` and `tunnel/`; `macos/Tests/run.sh` for Swift |
 
-**Verified end to end against AWS:** real egress (public IP moves from the ISP
-to the server and back), 100 Mbps on TLS/443 against a 50 Mbps target, all four
-transports reaching ready, and the full Privacy Pass exchange — a signature the
-server never saw unblinded, first redemption 201, replay 402.
+**Verified end to end against AWS (2026-08-21, from the real app):** real egress
+(public IP moves from the ISP to the server and back), 166 Mbps on TLS/443
+against a 50 Mbps target, 108 ms RTT, all four transports reaching ready, the
+full Privacy Pass exchange — a signature the server never saw unblinded, proof
+of work solved, first redemption 201, replay 402, and replay still 402 after a
+server restart — the issuer key pinned on first use with a changed key refused,
+the server's certificate identity stable across restarts, and DNS resolving
+through Cloudflare via `utun6` rather than leaking to the local resolver.
+
+Two defects were found only by running the app, having passed every other
+check: a leftover `skipRouting` preference produced a green "Protected" while
+every packet left in the clear, and DNS leaked to the ISP's resolver while
+traffic was tunneled. Prefer an end-to-end run over another test pass when
+deciding what to trust.
 
 **Phase 2 configs:** 0, 1, 2, 3 pass. 4 needs a local NXDOMAIN resolver; 5 will
 report CONN-3 rather than CONN-2b (a documented bootstrap gap, not a
