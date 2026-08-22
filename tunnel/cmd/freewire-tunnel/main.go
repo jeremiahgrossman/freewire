@@ -326,14 +326,36 @@ var activeTransport string
 
 func probeBudget() time.Duration { return probeBudgetFor(activeTransport) }
 
+// probeBudgetFor is how long one probe may take on a given transport.
+//
+// Measured through the DNS tunnel, a TCP connect is bimodal: three samples gave
+// 0.08s, 19.08s, 0.07s. It is usually one round trip and occasionally misses
+// poll windows badly. A budget long enough to cover the tail would be 20s, and
+// three of those exceed the client's 30s ready timeout -- the tunnel would lose
+// to its own deadline.
+//
+// So the tail is not covered on purpose. A tunnel that needs 19 seconds to open
+// a TCP connection cannot carry anything a user would wait for, and calling it
+// dead is the right answer rather than a missed one.
 func probeBudgetFor(transport string) time.Duration {
 	switch transport {
 	case "dns":
-		return 12 * time.Second
+		return 6 * time.Second
 	case "icmp_udp":
-		return 8 * time.Second
+		return 5 * time.Second
 	default:
 		return 3 * time.Second
+	}
+}
+
+// probeAttempts pairs with the budget: their product is what the client waits
+// for, and it has to leave room for the fallback chain inside the same 30s.
+func probeAttempts(transport string) int {
+	switch transport {
+	case "dns", "icmp_udp":
+		return 2
+	default:
+		return 3
 	}
 }
 
@@ -671,7 +693,7 @@ func setupRouting(tunName, bypassHost string) error {
 // into a clean teardown and an error message.
 func verifyTunnelCarriesTraffic() error {
 	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
+	for attempt := 0; attempt < probeAttempts(activeTransport); attempt++ {
 		c, err := net.DialTimeout("tcp", probeAddr(), probeBudget())
 		if err == nil {
 			c.Close()
@@ -680,7 +702,8 @@ func verifyTunnelCarriesTraffic() error {
 		lastErr = err
 		time.Sleep(300 * time.Millisecond)
 	}
-	return fmt.Errorf("no response from %s after 3 attempts: %w", probeAddr(), lastErr)
+	return fmt.Errorf("no response from %s after %d attempts: %w",
+		probeAddr(), probeAttempts(activeTransport), lastErr)
 }
 
 // pinOutsideTunnel adds a host route for ip along the path it currently uses,
