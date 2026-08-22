@@ -22,7 +22,13 @@ enum TunnelState {
         case .awaitingPortalAuth:      return "wifi.exclamationmark"
         case .noNetwork:               return "network.slash"
         case .connecting:              return "network.badge.shield.half.filled"
-        case .connected:               return "checkmark.shield.fill"
+        case .connected:
+            // DEBUG-1: with routing skipped nothing is protected, and the menu
+            // bar icon is the signal most users act on without opening the
+            // panel. A shield there would be the same lie in a smaller space.
+            return UserDefaults.standard.bool(forKey: "skipRouting")
+                ? "exclamationmark.triangle.fill"
+                : "checkmark.shield.fill"
         case .reconnecting:            return "exclamationmark.triangle.fill"
         case .blocked, .networkBlock:  return "xmark.shield.fill"
         case .captivePortal:           return "wifi.exclamationmark"

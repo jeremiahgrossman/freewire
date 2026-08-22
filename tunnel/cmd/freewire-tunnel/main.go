@@ -281,9 +281,16 @@ func probeThroughTunnel() error {
 // testing switch must reduce what is attempted, never remove a safety net.
 //
 // A flag rather than an environment variable because sudo clears the
-// environment, and the helper always runs under sudo. It is passed on the
-// command line by a person running the binary by hand; the app never passes
-// it, so no server response or config field can reach it.
+// environment, and the helper always runs under sudo.
+//
+// The app DOES pass it, when the skipRouting preference is set. An earlier
+// version of this comment claimed it did not, which is how a preference left
+// enabled after a debugging session came to produce a tunnel that reported
+// "Protected" while every packet left in the clear. It is still unreachable
+// from any server response or config field -- only from a local preference the
+// user set -- but "only a person can turn it on" is not the same as "the app
+// never passes it", and the UI has to account for the difference. See DEBUG-1
+// in error-states-spec.md.
 const skipEgressCheckFlag = "--skip-egress-check"
 
 // skipEgressCheck reports whether the run was told to accept a tunnel whose

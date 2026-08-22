@@ -146,7 +146,20 @@ private struct ConnectedBody: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            StatusRow(symbol: "checkmark.shield.fill", label: "Protected", color: .green)
+            // DEBUG-1, per error-states-spec.md. With routing skipped the
+            // tunnel is genuinely up and genuinely carrying nothing, so the
+            // headline is replaced rather than annotated: a caution underneath
+            // a green "Protected" reads as a footnote to protection, and there
+            // is no protection.
+            if Preferences.shared.skipRouting {
+                StatusRow(symbol: "exclamationmark.triangle.fill",
+                          label: "Debug mode: routing off", color: .orange)
+                Text("Your traffic is NOT going through the VPN.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                StatusRow(symbol: "checkmark.shield.fill", label: "Protected", color: .green)
+            }
             Text("Connected · \(duration)")
                 .font(.caption)
                 .foregroundStyle(.secondary)

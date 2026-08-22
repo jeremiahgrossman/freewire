@@ -24,6 +24,26 @@ The kill switch preference must also default to **off** while unenforced, so no 
 
 When `FreewireHelper` ships: restore the copy specified in SESSION-1, SESSION-2, and `ux-workflows.md`, restore the default to on, and delete this section.
 
+### Debug: routing not installed (DEBUG-1)
+
+The `skipRouting` preference runs the tunnel without taking over routing, for
+testing which transport gets chosen in environments where forwarded traffic is
+known not to survive. The tunnel comes up, WireGuard handshakes, and **every
+packet still leaves by the normal path**.
+
+The panel reported "Protected" in that state, because it reads the helper's
+ready line and the helper is genuinely ready. That is the most dangerous thing
+the UI can say: a preference left enabled after a debugging session silently
+turns the product into a placebo, and the user has no way to tell.
+
+| ID | Condition | User-visible message | Type |
+|---|---|---|---|
+| DEBUG-1 | Connected with `skipRouting` enabled | "Debug mode: routing off. Your traffic is NOT going through the VPN." | Soft warning, replaces the "Protected" headline |
+
+The headline is replaced rather than annotated. A warning underneath a green
+"Protected" is read as a footnote to protection, and there is no protection.
+The status icon takes the same treatment as any unprotected state.
+
 **Resolved design decision (2026-08-21):** if the privileged helper dies unexpectedly while the tunnel is up, `pf` rules **persist** — fail closed. Traffic stays blocked until the user explicitly reconnects or disconnects, consistent with `engineering-handoff.md` §5 ("kill switch never releases automatically without user action"). The tradeoff is accepted: a helper crash can leave the machine without network until Freewire is relaunched.
 
 ---
