@@ -18,13 +18,12 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 - **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
 - **In progress:** nothing
-- **Next action:** a **clean-slate real-portal retest** — reboot the Mac (clears the
-  stale `utun` cruft from the 2026-08-22 field session), connect on a real café
-  portal pre-login, and run `testing/cafe-diagnostic.sh` to confirm the DNS tunnel
-  carries a sustained session. Every piece is proven separately (delegation live,
-  carrier sustains ~400–500 Kbps at 0% loss through the café's own resolver, cache
-  fallback works in the config7 sim, false-Protected fixed); the one open thing is
-  a real end-to-end pre-login run. See "Field findings" below.
+- **Next action:** find why **routed WG-over-DNS carries no real traffic**, with
+  live server observation (SSH from home wifi for a stable IP + `tcpdump` on the
+  server during a routed DNS connect). Everything around it is now ruled out (see
+  "DNS routed failure — localized" below), so the break is the WireGuard layer
+  over the DNS carrier and/or downstream capacity/timing under real load. This
+  needs a coordinated routed test, not desk analysis alone.
 - **Blocked on:** a Developer ID certificate, for `FreewireHelper` and for signed/notarized distribution.
 
 ### Field findings (2026-08-22, Starbucks + desk)
@@ -36,9 +35,26 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   single-user** (disconnect/quit no longer deregister), or the cache goes stale.
 - **The DNS tunnel carrier is fine.** Sustained throughput is steady ~409 Kbps
   through Starbucks' own resolver and ~496 Kbps through 1.1.1.1, both 0% loss —
-  the resolver does not throttle it. The real-portal stall was a **false-Protected
-  bug** (a single burst passed the egress check) plus accumulated local routing
-  cruft, not the transport.
+  the resolver does not throttle it. Upstream multi-fragment reassembly works too
+  (`--dns-datatest`: 1400B/12-frag accepted), though sequentially — a large packet
+  takes ~1.66s upstream because `sendPacket` sends fragments one round trip at a
+  time (pipelining them is the obvious perf win, deferred as a risky core change).
+
+### DNS routed failure — localized (2026-08-22 desk)
+
+A routed test (config7, real routing) still carried no traffic. What is now ruled
+OUT: the resolver (doesn't throttle), the server forwarding (TLS/443 gives real
+egress right now), upstream carrier multi-fragment (`--dns-datatest` passes), and
+the client's downstream-delivery logic (reads correct on inspection). Two things
+also fixed along the way: the egress probe was too weak (a bare TCP dial passed a
+tunnel that carried no real data — now a real TLS handshake, `probeCarriesData`),
+and the café diagnostic's 3s curl timeout mis-read a slow tunnel as dead (now
+12s). What's LEFT: the WireGuard layer over the DNS carrier under real traffic —
+the probes send garbage WG drops, so a real WG handshake over DNS is still
+unexercised at the desk. Needs live server `tcpdump`.
+
+Diagnostic tools built: `--dns-probe`, `--dns-throughput [--duration]`,
+`--dns-datatest`, `--icmp-probe`, `--select-only`, `testing/cafe-diagnostic.sh`.
 - **Two reliability bugs fixed and verified:** (1) the server's NAT MASQUERADE
   vanished on instance stop/start (netfilter-persistent was a no-op, iptables-
   persistent never installed) — every "connected but no traffic" failure traced
