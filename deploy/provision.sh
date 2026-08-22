@@ -30,59 +30,19 @@ net.ipv4.ip_forward=1
 EOF
 sysctl -p /etc/sysctl.d/99-freewire.conf >/dev/null
 
-echo "==> configuring NAT"
-# Without masquerade, forwarded packets keep their 10.0.0.0/24 source and
-# nothing upstream can route replies back: the tunnel comes up and carries
-# nothing. This is the single most common way a self-hosted VPN "works" while
-# passing no traffic.
-UPLINK="$(ip route show default | awk '/default/ {print $5; exit}')"
-if [[ -z "$UPLINK" ]]; then
-  echo "no default route; cannot determine uplink" >&2; exit 1
-fi
-echo "    uplink: $UPLINK"
-
-if ! iptables -t nat -C POSTROUTING -s "$TUNNEL_CIDR" -o "$UPLINK" -j MASQUERADE 2>/dev/null; then
-  iptables -t nat -A POSTROUTING -s "$TUNNEL_CIDR" -o "$UPLINK" -j MASQUERADE
-fi
-# Deny before allow. A blanket FORWARD accept let anything inside the tunnel
-# reach the instance metadata service at 169.254.169.254, which on EC2 hands out
-# the instance role's temporary IAM credentials to whoever asks -- no
-# authentication, one HTTP GET. It also opened the whole VPC and every RFC 1918
-# range the host can route to. A VPN exists to carry traffic to the internet,
-# not to lend out the server's own identity and internal network, so those
-# destinations are refused and everything else forwards as before.
-#
-# These rules are inserted at the head of FORWARD, so they are evaluated before
-# the accepts below no matter what order the file is re-run in.
-block_forward() {
-  iptables -C FORWARD -s "$TUNNEL_CIDR" -d "$1" -j REJECT 2>/dev/null \
-    || iptables -I FORWARD 1 -s "$TUNNEL_CIDR" -d "$1" -j REJECT
-}
-# Link-local, which is where the metadata service lives on EC2, GCP and Azure.
-block_forward 169.254.0.0/16
-# The VPC and any other private network this host can reach.
-block_forward 10.0.0.0/8
-block_forward 172.16.0.0/12
-block_forward 192.168.0.0/16
-# Loopback: martian as a forwarded destination, and a way to reach services the
-# server binds only to 127.0.0.1 -- the WireGuard bridge sockets among them.
-block_forward 127.0.0.0/8
-
-# The tunnel's own subnet is a private range, so it has to be allowed back after
-# the blocks above, or peers could not reach the server's tunnel address.
-iptables -C FORWARD -s "$TUNNEL_CIDR" -d "$TUNNEL_CIDR" -j ACCEPT 2>/dev/null \
-  || iptables -I FORWARD 1 -s "$TUNNEL_CIDR" -d "$TUNNEL_CIDR" -j ACCEPT
-
-iptables -C FORWARD -s "$TUNNEL_CIDR" -j ACCEPT 2>/dev/null || iptables -A FORWARD -s "$TUNNEL_CIDR" -j ACCEPT
-iptables -C FORWARD -d "$TUNNEL_CIDR" -j ACCEPT 2>/dev/null || iptables -A FORWARD -d "$TUNNEL_CIDR" -j ACCEPT
-
-# Persist across reboots.
-if command -v netfilter-persistent >/dev/null 2>&1; then
-  netfilter-persistent save >/dev/null 2>&1 || true
-else
-  DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent >/dev/null 2>&1 || true
-  netfilter-persistent save >/dev/null 2>&1 || true
-fi
+echo "==> configuring NAT + forwarding"
+# The NAT/forward rules live in freewire-nat.sh, installed here and re-applied on
+# every service start via ExecStartPre (below). This survives reboots and
+# instance stop/starts without depending on a saved iptables blob -- which
+# silently did NOT persist: iptables-persistent was never installed, so
+# `netfilter-persistent save` was a no-op, and after a stop/start the MASQUERADE
+# rule was gone, leaving a tunnel that connected but carried nothing (the source
+# stayed 10.0.0.0/24 and no reply could route back). Re-applying at each start
+# re-derives the uplink too, in case it changed.
+NAT_SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/freewire-nat.sh"
+[[ -f "$NAT_SRC" ]] || { echo "freewire-nat.sh not found beside this script" >&2; exit 1; }
+install -m 0755 "$NAT_SRC" /usr/local/bin/freewire-nat.sh
+/usr/local/bin/freewire-nat.sh
 
 echo "==> freeing port 53"
 # systemd-resolved binds 0.0.0.0:53 on Ubuntu, so the DNS tunnel cannot start.
@@ -109,6 +69,9 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+# Re-apply NAT/forwarding before the server starts, so a reboot or instance
+# stop/start never leaves the tunnel forwarding with no MASQUERADE.
+ExecStartPre=/usr/local/bin/freewire-nat.sh
 ExecStart=$BIN_DST $CONF
 WorkingDirectory=$DATA_DIR
 Restart=always

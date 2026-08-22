@@ -128,7 +128,7 @@ done
 echo "==> provisioning"
 cp "$HERE/freewire-server-arm64" "$HERE/freewire-server"
 scp -q -o StrictHostKeyChecking=accept-new -i "$KEY_FILE" \
-    "$HERE/provision.sh" "$HERE/freewire-server" "ubuntu@$IP:~/"
+    "$HERE/provision.sh" "$HERE/freewire-nat.sh" "$HERE/freewire-server" "ubuntu@$IP:~/"
 rm -f "$HERE/freewire-server"
 ssh -o StrictHostKeyChecking=accept-new -i "$KEY_FILE" "ubuntu@$IP" \
     "chmod +x provision.sh && sudo ./provision.sh"
