@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -265,14 +266,29 @@ func main() {
 	fmt.Printf("ready %s %s %s\n", tunName, cfg.TunnelIP, transportName)
 	os.Stdout.Sync() //nolint:errcheck
 
-	// Block until a signal arrives, or until the routes stop carrying traffic.
+	// Block until a signal arrives, the routes stop carrying traffic, or the
+	// controlling app lets go of our stdin.
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
 
 	unhealthy := superviseRouting()
 
+	// The app keeps our stdin open for as long as it wants the tunnel up, and
+	// closes it on disconnect. If the app crashes or quits, the OS closes it for
+	// us. Either way the read below returns EOF -- so teardown never depends on
+	// the app re-authenticating sudo to send `--stop` later, which failed
+	// silently once the sudo timestamp expired and left the tunnel running with
+	// its routes and DNS takeover still in place.
+	stdinClosed := make(chan struct{})
+	go func() {
+		io.Copy(io.Discard, os.Stdin) //nolint:errcheck
+		close(stdinClosed)
+	}()
+
 	select {
 	case <-sigs:
+	case <-stdinClosed:
+		fmt.Fprintln(os.Stderr, "freewire-tunnel: controlling app released stdin; releasing routes")
 	case <-unhealthy:
 		// The tunnel owns the whole address space at this point, so a tunnel
 		// that has stopped forwarding leaves the host with no working network

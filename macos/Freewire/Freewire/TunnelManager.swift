@@ -72,6 +72,27 @@ final class PeerTokenBox: @unchecked Sendable {
     }
 }
 
+/// Holds the live helper's stdin write end. Thread-safe (a `let` reference set
+/// from the detached launch task and closed from the main actor). Closing it
+/// gives the helper EOF, which is how the tunnel is told to tear down without
+/// needing sudo.
+final class StdinHolder {
+    private let lock = NSLock()
+    private var handle: FileHandle?
+
+    func set(_ h: FileHandle) {
+        lock.lock(); defer { lock.unlock() }
+        try? handle?.close() // close any previous, should not normally exist
+        handle = h
+    }
+
+    func closeAndClear() {
+        lock.lock(); defer { lock.unlock() }
+        try? handle?.close()
+        handle = nil
+    }
+}
+
 @MainActor
 final class TunnelManager: ObservableObject {
     @Published private(set) var state: TunnelState = .disconnected
@@ -97,6 +118,11 @@ final class TunnelManager: ObservableObject {
     /// the user had asked for none, leaving a live tunnel behind a panel that
     /// said "Not protected".
     private var upgradeTask: Task<Void, Never>?
+    /// The live helper's stdin write end. Closing it signals the helper to tear
+    /// down (it exits on EOF), which works even when `sudo --stop` cannot because
+    /// the sudo timestamp expired. A `let` reference type so the detached launch
+    /// task and the main actor can both reach it safely. See StdinHolder.
+    private let tunnelStdin = StdinHolder()
     /// Where the captive portal last redirected us, for a later retry.
     private var lastPortalURL: URL?
     /// The transport that last carried traffic on this network.
@@ -667,6 +693,11 @@ final class TunnelManager: ObservableObject {
     }
 
     private func killTunnel() async {
+        // Primary teardown: close the helper's stdin. It exits on EOF and runs
+        // its own cleanup, with no privilege needed -- so this works even when the
+        // sudo `--stop` below cannot authenticate. The `--stop` stays as a backup
+        // and to wait for cleanup to finish.
+        tunnelStdin.closeAndClear()
         await Task.detached(priority: .userInitiated) {
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
@@ -774,7 +805,7 @@ final class TunnelManager: ObservableObject {
         let stderrLog = try? FileHandle(forWritingTo: stderrLogURL)
         let skipRouting = Preferences.shared.skipRouting
 
-        Task.detached { [helperPath, configData, readyFile, stderrLog, skipRouting] in
+        Task.detached { [helperPath, configData, readyFile, stderrLog, skipRouting, tunnelStdin] in
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
             // -n: never prompt. Without it sudo blocks on a password nobody can
@@ -798,7 +829,12 @@ final class TunnelManager: ObservableObject {
             p.standardInput = stdin
             try? p.run()
             try? stdin.fileHandleForWriting.write(contentsOf: configData)
-            try? stdin.fileHandleForWriting.close()
+            // Keep the write end OPEN. The helper watches its stdin and tears
+            // itself down on EOF, so closing this handle (on disconnect) or the
+            // app dying is what reliably stops the tunnel -- unlike `sudo --stop`,
+            // which fails silently once the sudo timestamp expires. Held so
+            // killTunnel can close it; closes automatically if the app dies.
+            tunnelStdin.set(stdin.fileHandleForWriting)
             p.waitUntilExit()
             try? stderrLog?.close()
         }
