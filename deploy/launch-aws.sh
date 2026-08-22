@@ -81,6 +81,22 @@ else
   aws ec2 wait instance-running --instance-ids "$INSTANCE_ID" --region "$REGION"
 fi
 
+# A static address, because the client pins the server by IP: a public IP that
+# changes on stop/start would break every connection with a trust error that
+# looks alarming and is not.
+ALLOC="$(aws ec2 describe-addresses --region "$REGION" \
+  --filters "Name=tag:Name,Values=$NAME" --query 'Addresses[0].AllocationId' \
+  --output text 2>/dev/null || true)"
+if [[ -z "$ALLOC" || "$ALLOC" == "None" ]]; then
+  ALLOC="$(aws ec2 allocate-address --domain vpc --region "$REGION" \
+    --query 'AllocationId' --output text)"
+  aws ec2 create-tags --resources "$ALLOC" --tags "Key=Name,Value=$NAME" --region "$REGION" 2>/dev/null || true
+  echo "==> allocated elastic ip"
+fi
+aws ec2 associate-address --instance-id "$INSTANCE_ID" --allocation-id "$ALLOC" \
+  --region "$REGION" >/dev/null 2>&1 || true
+sleep 3
+
 IP="$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --region "$REGION" \
       --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)"
 echo "==> public IP: $IP"

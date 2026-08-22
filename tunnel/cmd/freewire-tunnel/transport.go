@@ -127,9 +127,18 @@ func defaultCandidates() []transportCandidate {
 // It tries the default gateway on ports 3128, 8080, and 443 with a 2s total deadline.
 // On success it upgrades the CONNECT tunnel to TLS and returns the TLS connection.
 func tryHTTPConnect(cfg Config) (net.Conn, error) {
-	gw, err := getDefaultGateway()
-	if err != nil {
-		return nil, fmt.Errorf("http-connect: no gateway: %w", err)
+	// Candidate proxies, in order: an explicitly configured one, then the
+	// gateway on the ports portals commonly use.
+	var candidates []string
+	if cfg.HTTPProxy != "" {
+		candidates = append(candidates, cfg.HTTPProxy)
+	}
+	if gw, gwErr := getDefaultGateway(); gwErr == nil {
+		for _, port := range []string{"3128", "8080", "443"} {
+			candidates = append(candidates, net.JoinHostPort(gw, port))
+		}
+	} else if len(candidates) == 0 {
+		return nil, fmt.Errorf("http-connect: no gateway and no configured proxy: %w", gwErr)
 	}
 
 	// The proxy is asked to reach the configured server, not a hardcoded name.
@@ -149,20 +158,17 @@ func tryHTTPConnect(cfg Config) (net.Conn, error) {
 	}
 	target := net.JoinHostPort(host, fmt.Sprintf("%d", cfg.TLSPort))
 
-	ports := []string{"3128", "8080", "443"}
-
-	// The spec budgets 2s for this path in total, not per port. Every dial,
+	// The spec budgets 2s for this path in total, not per candidate. Every dial,
 	// CONNECT exchange, and TLS handshake below shares this one deadline so
-	// three unreachable ports cannot stretch the fallback chain past its budget.
+	// several unreachable candidates cannot stretch the chain past its budget.
 	overall := time.Now().Add(httpConnectBudget)
 
-	for _, port := range ports {
+	for _, proxyAddr := range candidates {
 		remaining := time.Until(overall)
 		if remaining <= 0 {
 			break
 		}
 
-		proxyAddr := net.JoinHostPort(gw, port)
 		c, dialErr := net.DialTimeout("tcp", proxyAddr, remaining)
 		if dialErr != nil {
 			continue
@@ -211,7 +217,7 @@ func tryHTTPConnect(cfg Config) (net.Conn, error) {
 		return tlsConn, nil
 	}
 
-	return nil, fmt.Errorf("http-connect: all proxy ports failed")
+	return nil, fmt.Errorf("http-connect: no proxy accepted a CONNECT")
 }
 
 // getDefaultGateway parses `route get default` output to find the gateway IP.

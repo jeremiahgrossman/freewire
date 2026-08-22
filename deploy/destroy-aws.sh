@@ -17,6 +17,17 @@ else
   echo "no instances found"
 fi
 
+# Release the Elastic IP. An allocated address that is not attached to a
+# running instance bills by the hour, so leaving it behind turns a torn-down
+# deployment into a standing charge.
+ALLOC="$(aws ec2 describe-addresses --region "$REGION" \
+  --filters "Name=tag:Name,Values=$NAME" --query 'Addresses[0].AllocationId' \
+  --output text 2>/dev/null || true)"
+if [[ -n "$ALLOC" && "$ALLOC" != "None" ]]; then
+  aws ec2 release-address --allocation-id "$ALLOC" --region "$REGION" 2>/dev/null \
+    && echo "elastic ip released" || echo "elastic ip could not be released"
+fi
+
 # The security group cannot be deleted until its instances are gone, which the
 # wait above guarantees.
 aws ec2 delete-security-group --group-name "$NAME" --region "$REGION" 2>/dev/null \

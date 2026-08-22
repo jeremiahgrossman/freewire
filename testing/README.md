@@ -109,7 +109,7 @@ Record each run. Bugs found here become the first regression tests.
 |---|---|---|---|---|---|
 | 0 | 2026-06 | TLS/443 | — | ✅ | Baseline, pre-harness, against the earlier VM |
 | — | 2026-08-21 | — | — | — | Harness retargeted to the Docker container. Server moved to real ports 443/53 so the guide's rules apply unchanged. |
-| 1 | | | | | |
+| 1 | 2026-08-21 | **HTTP CONNECT** | ~3s | ✅ PASS | `ready utun6 10.0.0.2 http_connect` through `testing/proxy.py`, confirmed in the proxy log as `200 tunnel -> <server>:443`. 5/5 pings, 0% loss, 73ms. Needed the `http_proxy` config field: probing only the gateway made this untestable on one machine. |
 | 2 | 2026-08-21 | **TLS/443** | ~2s | ✅ path / ⚠️ egress | Path selection correct: `tls443: session established`, handshake completed, `utun6` up at 10.0.0.2, 10.0.0.1 answers in ~2ms. Routing since fixed and verified installing. Egress unverifiable here — see the ECN note. |
 | 3 | 2026-08-21 | **DNS tunnel** | 3.1s | ✅ PASS | `ready utun6 10.0.0.3 dns`. 15/15 pings, 0% loss, avg 59ms (min 1.6, max 578 — variance is the poll interval). TCP connect completes over it. Confirmed twice. First with the path forced, then properly under Config 3's rules with no preferred transport set: HTTP CONNECT failed, TLS/443 was blocked, and the chain selected DNS on its own 3.1s after peer registration. 15/15 pings, 0% loss, avg 38ms. Routing skipped, so this proves path selection and transport, not egress. |
 | 4 | | | | | |
@@ -247,7 +247,21 @@ registration has to happen before a tunnel exists. Until that is
 answered, treat Config 5 as verifying CONN-3, and record it as such
 rather than forcing a CONN-2b result.
 
-## Config 1 does not work on a single machine
+## Config 1: solved with an explicit proxy address
+
+`tryHTTPConnect` probed only the machine's default gateway, and a listener
+cannot be bound to the gateway address from the client itself — so this
+config could not run without a second machine acting as the router.
+Moving the server to AWS did not help: the constraint is about where the
+*proxy* sits, not the server.
+
+The client now accepts an explicit `http_proxy` in its config and tries it
+before the gateway. That makes the path testable on one machine, and is
+defensible beyond testing: portals that advertise a proxy via WPAD or DHCP
+rather than intercepting transparently are not reachable by a
+gateway-only probe either.
+
+## Superseded: why Config 1 used to be blocked
 
 `tryHTTPConnect` finds its proxy by parsing `route get default` — the
 machine's real default gateway. `config1.sh` puts the proxy at

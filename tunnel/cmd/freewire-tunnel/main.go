@@ -40,6 +40,15 @@ type Config struct {
 	// without this the DNS transport cannot be exercised against a development
 	// server at all. Empty means use the system resolver.
 	DNSResolver string `json:"dns_resolver,omitempty"`
+	// HTTPProxy is an explicit "host:port" to attempt before probing the
+	// gateway.
+	//
+	// Real portals mostly sit transparently on the gateway, which is what the
+	// probe assumes. Some advertise a proxy elsewhere via WPAD or DHCP, and a
+	// single-machine test setup cannot put a listener on the gateway address at
+	// all -- so without this the HTTP CONNECT path is untestable without a
+	// second machine acting as the router.
+	HTTPProxy string `json:"http_proxy,omitempty"`
 	// PreferredTransport names a path to attempt before the normal chain.
 	// Set when upgrading from a slower path: without it the relaunched tunnel
 	// restarts the chain from the top and reselects whatever it had before,

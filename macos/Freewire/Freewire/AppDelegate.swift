@@ -8,7 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var clickMonitor: Any?
     private var tunnelManager: TunnelManager?
     private var cancellable: AnyCancellable?
-    private let api = ServerAPI(host: "3.88.155.229")
+    private let api = ServerAPI(host: "52.203.246.145")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
