@@ -139,7 +139,7 @@ Record each run. Bugs found here become the first regression tests.
 | 1 | 2026-08-21 | **HTTP CONNECT** | ~3s | ✅ PASS | `ready utun6 10.0.0.2 http_connect` through `testing/proxy.py`, confirmed in the proxy log as `200 tunnel -> <server>:443`. 5/5 pings, 0% loss, 73ms. Needed the `http_proxy` config field: probing only the gateway made this untestable on one machine. |
 | 2 | 2026-08-21 | **TLS/443** | ~2s | ✅ path / ⚠️ egress | Path selection correct: `tls443: session established`, handshake completed, `utun6` up at 10.0.0.2, 10.0.0.1 answers in ~2ms. Routing since fixed and verified installing. Egress unverifiable here — see the ECN note. |
 | 3 | 2026-08-21 | **DNS tunnel** | 3.1s | ✅ PASS | `ready utun6 10.0.0.3 dns`. 15/15 pings, 0% loss, avg 59ms (min 1.6, max 578 — variance is the poll interval). TCP connect completes over it. Confirmed twice. First with the path forced, then properly under Config 3's rules with no preferred transport set: HTTP CONNECT failed, TLS/443 was blocked, and the chain selected DNS on its own 3.1s after peer registration. 15/15 pings, 0% loss, avg 38ms. Routing skipped, so this proves path selection and transport, not egress. |
-| 4 | | | | | Not run — the pf configs need a password-prompting sudo. Superseded in part by the transport runs below, which prove ICMP carries traffic; the portal-rules half is still untested. |
+| 4 | 2026-08-22 | **ICMP/UDP** | ~3s | ✅ PASS | `ready utun6 10.0.0.6 icmp_udp` under config 4's rules. Chain fell correctly: HTTP CONNECT no gateway, TLS/443 i/o timeout (blocked), DNS tunnel `no answers in dns response`, ICMP succeeded. Real egress to the server, 67ms through the tunnel, resolver left at 192.168.0.1 per DNS-1. Two defects found by this run — see below. |
 | 5 | | | | | Not run — same reason. |
 | 6 | | | | | Not run — same reason. |
 
@@ -160,7 +160,19 @@ All three carry a full default route. Both tunnelled paths were failing for the
 same reason in two different shapes: a flow-control constant that described
 behaviour nothing implemented.
 
-Three defects were found by these runs, all fixed:
+Config 4 found two more:
+
+- **The HTTP CONNECT gateway lookup never worked.** The Go tunnel ran
+  `route get default` without `-n`, so `route` resolved the gateway address to a
+  name — "gateway: modem" on a home network — and parsing it as an IP failed.
+  The path reported "no gateway" and was skipped on every network whose router
+  answers reverse DNS. Config 1 passed only because it was handed an explicit
+  proxy. The Swift copy of the same lookup always passed `-n`.
+- **Captive-portal detection never ran on a captive portal.** Recorded
+  separately in `CLAUDE.md`; found while preparing config 5 rather than by
+  running it.
+
+Three defects were found by the forced-transport runs, all fixed:
 
 - **Proof-of-work solutions were deterministic.** The nonce search started at
   zero, so the same challenge produced the same nonce, and the server — which

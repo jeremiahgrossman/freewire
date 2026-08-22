@@ -222,7 +222,13 @@ func tryHTTPConnect(cfg Config) (net.Conn, error) {
 
 // getDefaultGateway parses `route get default` output to find the gateway IP.
 func getDefaultGateway() (string, error) {
-	out, err := exec.Command(routeBin, "get", "default").CombinedOutput()
+	// -n, or route resolves the gateway address to a name and this parses a
+	// hostname where it expects an IP. On a home network whose router answers
+	// reverse DNS -- "gateway: modem" -- ParseIP fails and the HTTP CONNECT
+	// path reports no gateway, so it was never probed at all. Config 1 passed
+	// only because it was given an explicit proxy. The Swift copy of this
+	// lookup in PathUpgradeManager always passed -n; this one did not.
+	out, err := exec.Command(routeBin, "-n", "get", "default").CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("route get default: %w", err)
 	}
