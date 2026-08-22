@@ -14,14 +14,33 @@ enum TunnelState {
     case awaitingPortalAuth(timedOut: Bool) // CONN-2a: waiting out the sign-in
     case noNetwork                    // CONN-1: no connectivity at all
     case networkBlock                 // CONN-2b: hard block, no portal
+    case upgrading                    // UPGRADE-1: rebuilding on a faster path
     case failed(Error)
+
+    /// Whether a connect attempt may start from this state.
+    ///
+    /// Every state listed here shows the user a button that starts one. The
+    /// guard used to admit only `.disconnected` and `.failed`, so the "Try
+    /// again" button on CONN-1, CONN-2a and CONN-2b called `connect()`, which
+    /// returned immediately and did nothing. A user whose network dropped had
+    /// no way back except quitting the app -- the button was there, it just
+    /// silently did nothing, which is worse than not offering one.
+    var allowsConnectAttempt: Bool {
+        switch self {
+        case .disconnected, .failed, .noNetwork, .networkBlock,
+             .captivePortal, .awaitingPortalAuth:
+            return true
+        case .connecting, .connected, .reconnecting, .blocked, .upgrading:
+            return false
+        }
+    }
 
     var iconSymbol: String {
         switch self {
         case .disconnected, .failed:   return "network"
         case .awaitingPortalAuth:      return "wifi.exclamationmark"
         case .noNetwork:               return "network.slash"
-        case .connecting:              return "network.badge.shield.half.filled"
+        case .connecting, .upgrading:  return "network.badge.shield.half.filled"
         case .connected:
             // DEBUG-1: with routing skipped nothing is protected, and the menu
             // bar icon is the signal most users act on without opening the
@@ -71,6 +90,15 @@ final class TunnelManager: ObservableObject {
     private var upgradeManager: PathUpgradeManager?
     private var awaitPortalTask: Task<Void, Never>?
     private var connectTask: Task<Void, Never>?
+    /// The path upgrade in flight, held so disconnect can stop it.
+    ///
+    /// It used to run as an untracked `Task`, so disconnecting mid-upgrade left
+    /// it running: it would finish registering a peer and launch a tunnel after
+    /// the user had asked for none, leaving a live tunnel behind a panel that
+    /// said "Not protected".
+    private var upgradeTask: Task<Void, Never>?
+    /// Where the captive portal last redirected us, for a later retry.
+    private var lastPortalURL: URL?
     private lazy var tokens = TokenStore(
         serverBase: "https://\(api.serverHost):8080",
         // Same rule the URLSession delegate applies: a self-signed certificate
@@ -90,18 +118,19 @@ final class TunnelManager: ObservableObject {
     // MARK: - Public API
 
     func connect() async {
-        // `.failed` must be allowed through: the failure panel shows a Connect
-        // button, and rejecting the call left that button visibly dead.
-        switch state {
-        case .disconnected, .failed:
-            break
-        default:
-            return
-        }
-        // Held so cancelConnect can actually stop it. Previously the connect ran
-        // as a detached task nothing retained, so Cancel set the state to
-        // disconnected and the still-running connect overwrote it seconds later
-        // with connected or failed.
+        guard state.allowsConnectAttempt else { return }
+        await startConnect()
+    }
+
+    /// Starts a connect attempt, tracked so Cancel can stop it.
+    ///
+    /// Every path that begins a connection goes through here. The portal
+    /// watcher and the CONN-2b retry used to call `doConnect()` directly, which
+    /// left `connectTask` nil: Cancel had nothing to cancel, so it set the state
+    /// to disconnected and the still-running attempt overwrote it seconds later
+    /// with connected or failed. One funnel means a future caller cannot
+    /// reintroduce that by forgetting.
+    private func startConnect() async {
         connectTask?.cancel()
         let task = Task { await doConnect() }
         connectTask = task
@@ -110,8 +139,7 @@ final class TunnelManager: ObservableObject {
 
     func cancelConnect() {
         connectTask?.cancel(); connectTask = nil
-        watchTask?.cancel(); watchTask = nil
-        reconnectTask?.cancel(); reconnectTask = nil
+        cancelTasks()
         state = .disconnected
         Task { await killTunnel(); await deregisterPeer() }
     }
@@ -133,13 +161,19 @@ final class TunnelManager: ObservableObject {
 
     func retryFromNetworkBlock() async {
         state = .disconnected
-        await doConnect()
+        await startConnect()
     }
 
     // Opens the captive portal URL in the default browser so the user can authenticate.
     // Resets to disconnected so they can press Connect again after logging in.
     func openCaptivePortal(url: URL?) {
-        let target = url ?? URL(string: "http://captive.apple.com")!
+        // Remember where the portal actually sent us. "Try again" after the
+        // wait lapsed reopened Apple's probe page instead, because the captured
+        // redirect was never stored -- so the user was handed a generic
+        // connectivity check rather than the sign-in form they were part way
+        // through, and any session the portal had established was lost.
+        if let url { lastPortalURL = url }
+        let target = url ?? lastPortalURL ?? URL(string: "http://captive.apple.com")!
         NSWorkspace.shared.open(target)
 
         // Stay in a state that matches what the CONN-2a copy just promised.
@@ -158,7 +192,9 @@ final class TunnelManager: ObservableObject {
                 guard case .awaitingPortalAuth = self.state else { return }
                 if case .genuineBlock = await probeCaptivePortal() {
                     // No portal intercept any more: the login went through.
-                    await self.doConnect()
+                    // Through startConnect so Cancel can stop the attempt this
+                    // begins; calling doConnect directly left it untracked.
+                    await self.startConnect()
                     return
                 }
             }
@@ -179,7 +215,7 @@ final class TunnelManager: ObservableObject {
     private func doConnect() async {
         // CONN-1. Without this an offline user is told "Freewire's servers are
         // unreachable right now", which points them at the wrong problem.
-        if !NetworkMonitor.hasNetwork() {
+        if await !NetworkMonitor.hasNetwork() {
             state = .noNetwork
             startNetworkMonitor()
             return
@@ -247,6 +283,12 @@ final class TunnelManager: ObservableObject {
                 state = .networkBlock
             }
         } catch {
+            // Kill the helper as well as releasing the peer. launchTunnel can
+            // fail after the helper is already running -- a routing error, a
+            // ready line that never arrives -- and only the peer was being
+            // cleaned up, so the process was left holding routes and DNS with
+            // nothing tracking it and the panel showing a failure.
+            await killTunnel()
             await deregisterPeer()
             guard !Task.isCancelled else { return }
             state = .failed(error)
@@ -332,7 +374,8 @@ final class TunnelManager: ObservableObject {
         let mgr = PathUpgradeManager(serverHost: serverHost, currentTransport: transport)
         mgr.onUpgradeAvailable = { [weak self] faster in
             guard let self else { return }
-            Task { await self.performPathUpgrade(to: faster) }
+            self.upgradeTask?.cancel()
+            self.upgradeTask = Task { await self.performPathUpgrade(to: faster) }
         }
         upgradeManager = mgr
         mgr.start()
@@ -351,10 +394,19 @@ final class TunnelManager: ObservableObject {
         // process is deliberately absent, and a watchdog firing in that window
         // would start a reconnect that races this upgrade.
         watchTask?.cancel(); watchTask = nil
+
+        // UPGRADE-1. From here until the new tunnel is up there is no tunnel at
+        // all: the helper has exited, the routes are gone, and traffic is on the
+        // normal path. Leaving the state at .connected kept the panel showing
+        // "Protected" across that window -- the same defect as DEBUG-1, and
+        // worse here because it happens during ordinary successful operation.
+        state = .upgrading
+
         await killTunnel()
         await deregisterPeer()
 
         do {
+            guard !Task.isCancelled else { return }
             let server = try await api.fetchConfig()
             let peer  = try await registerPeer()
             peerToken = peer.peerToken
@@ -380,6 +432,15 @@ final class TunnelManager: ObservableObject {
             )
             let (ifName, newTransport) = try await launchTunnel(config: cfg)
 
+            // A disconnect during the rebuild must not be undone by it. Without
+            // this the upgrade finished, set .connected and left a live tunnel
+            // running behind a panel that said "Not protected".
+            guard !Task.isCancelled else {
+                await killTunnel()
+                await deregisterPeer()
+                return
+            }
+
             // UX-003: the server issued a fresh address during re-registration.
             // Reporting the old one left the panel showing an address the tunnel
             // no longer used. connectedAt is deliberately preserved: an upgrade
@@ -399,6 +460,7 @@ final class TunnelManager: ObservableObject {
                 startUpgradeManager(serverHost: api.serverHost, transport: newTransport)
             }
         } catch {
+            guard !Task.isCancelled else { return }
             reconnectTask?.cancel()
             reconnectTask = Task { await self.doReconnect(startingAt: 0) }
         }
@@ -485,6 +547,7 @@ final class TunnelManager: ObservableObject {
         watchTask?.cancel();       watchTask = nil
         reconnectTask?.cancel();   reconnectTask = nil
         awaitPortalTask?.cancel(); awaitPortalTask = nil
+        upgradeTask?.cancel();     upgradeTask = nil
     }
 
     private func deregisterPeer() async {

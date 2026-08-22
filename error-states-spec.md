@@ -24,6 +24,25 @@ The kill switch preference must also default to **off** while unenforced, so no 
 
 When `FreewireHelper` ships: restore the copy specified in SESSION-1, SESSION-2, and `ux-workflows.md`, restore the default to on, and delete this section.
 
+### Path upgrade window (UPGRADE-1)
+
+When a faster transport becomes available the client tears the tunnel down and
+rebuilds it on the new path. For that window there is no tunnel: the helper has
+exited, the routes are gone, and traffic is using the normal path.
+
+The panel showed "Protected" throughout, because the state stayed `.connected`
+across the rebuild. That is the same defect as DEBUG-1 in a different place, and
+it is worse here because it happens during ordinary successful operation rather
+than only when a debug preference is set.
+
+| ID | Condition | User-visible message | Type |
+|---|---|---|---|
+| UPGRADE-1 | Rebuilding the tunnel on a faster path | "Switching to a faster connection. Your traffic is not protected for a moment." | Soft warning, replaces the "Protected" headline |
+
+The window is short — a handshake and a route install — so the copy says "for a
+moment" rather than giving a count. If the rebuild fails the client falls into
+the normal reconnect sequence and SESSION-1 applies from there.
+
 ### Debug: routing not installed (DEBUG-1)
 
 The `skipRouting` preference runs the tunnel without taking over routing, for

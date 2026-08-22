@@ -66,6 +66,8 @@ private struct PanelBody: View {
                 NetworkBlockBody(tunnelManager: tunnelManager)
             case .awaitingPortalAuth(let timedOut):
                 AwaitingPortalBody(timedOut: timedOut, tunnelManager: tunnelManager)
+            case .upgrading:
+                UpgradingBody()
             case .noNetwork:
                 NoNetworkBody(tunnelManager: tunnelManager)
             case .failed(let error):
@@ -490,5 +492,30 @@ struct SecondaryButtonStyle: ButtonStyle {
             .frame(maxWidth: .infinity)
             .background(Color.secondary.opacity(configuration.isPressed ? 0.2 : 0.1))
             .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+/// UPGRADE-1, per error-states-spec.md.
+///
+/// The tunnel is being rebuilt on a faster path. For that window there is no
+/// tunnel: the helper has exited, the routes are gone, and traffic is on the
+/// normal path. The panel used to keep showing "Protected" throughout, which is
+/// the same defect as DEBUG-1 and worse for happening during ordinary
+/// successful operation rather than only under a debug preference.
+///
+/// No Cancel button: the window is a handshake and a route install, and a
+/// control that outlives what it acts on is its own bug. Disconnect remains
+/// available from the menu and does cancel the upgrade.
+struct UpgradingBody: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            StatusRow(symbol: "arrow.triangle.2.circlepath",
+                      label: "Switching to a faster connection", color: .orange)
+            Text("Your traffic is not protected for a moment.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

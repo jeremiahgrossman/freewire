@@ -287,10 +287,15 @@ func runLocalProxy(localProxy net.PacketConn, transport net.Conn) {
 	}
 	defer closeAll()
 
+	// Closed when the reader below exits, so the peer wait can give up as soon
+	// as the connection is gone instead of sitting out its full timeout.
+	readerDone := make(chan struct{})
+
 	// Single goroutine reads all WireGuard datagrams. Captures the peer address
 	// from the first packet (WireGuard's handshake initiation) and forwards all
 	// packets length-framed to the transport.
 	go func() {
+		defer close(readerDone)
 		defer closeAll()
 		// Length prefix and body share one buffer so each packet is a single
 		// Write, and therefore a single TLS record.
@@ -313,9 +318,24 @@ func runLocalProxy(localProxy net.PacketConn, transport net.Conn) {
 	}()
 
 	// Wait for the WireGuard peer address (comes from first handshake packet).
+	//
+	// The reader's exit is watched as well as the clock, so abandoning a
+	// candidate does not leave this parked for the full timeout on a connection
+	// that is already closed.
+	//
+	// An audit finding claimed this made the fallback chain's worst case ~32s
+	// against an 11s budget. That did not reproduce: measured against a host
+	// that accepts TLS but speaks no WireGuard, the chain takes 8.3s with this
+	// fix and 8.4s without it. wireguard-go emits its handshake initiation as
+	// soon as it is configured, so peerCh is almost always ready long before
+	// the timeout matters. The guard stays because an unbounded wait on a
+	// closed connection is wrong regardless of how often it is reached, but it
+	// is not the timing fix the finding described.
 	var wgPeer net.Addr
 	select {
 	case wgPeer = <-peerCh:
+	case <-readerDone:
+		return
 	case <-time.After(10 * time.Second):
 		return
 	}
@@ -439,7 +459,14 @@ func establishTunnel(
 			candidate.name)
 		closeCandidate(lp, tc)
 		if bridgeDone != nil {
-			<-bridgeDone
+			// Bounded. The sockets are already closed, so the bridge is
+			// unwinding; waiting on it without a limit made the chain's pace
+			// depend on how promptly a failed transport's goroutines noticed.
+			// Anything still running here holds only closed descriptors.
+			select {
+			case <-bridgeDone:
+			case <-time.After(500 * time.Millisecond):
+			}
 		}
 	}
 

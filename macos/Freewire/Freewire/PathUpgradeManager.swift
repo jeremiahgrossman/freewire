@@ -116,17 +116,17 @@ final class PathUpgradeManager {
     /// VPN server. Probing the server's TCP/443 proved only that TLS/443 works,
     /// so this path reported reachable on every network where TLS already was.
     private func probeHTTPConnect() async -> Bool {
-        guard let gateway = Self.defaultGateway() else { return false }
+        guard let gateway = await Self.defaultGateway() else { return false }
 
         for port in [3128, 8080] {
-            if await Self.connectSucceeds(host: gateway, port: port) { return true }
+            if await Self.connectSucceeds(host: gateway, port: port, target: serverHost) { return true }
         }
         return false
     }
 
     /// Opens a CONNECT tunnel to the VPN endpoint through host:port and reports
     /// whether the proxy answered 200.
-    private static func connectSucceeds(host: String, port: Int) async -> Bool {
+    private static func connectSucceeds(host: String, port: Int, target serverHost: String) async -> Bool {
         await withCheckedContinuation { cont in
             // See the note above: this guard is crossed by two queues.
             let lock = NSLock()
@@ -148,8 +148,15 @@ final class PathUpgradeManager {
             conn.stateUpdateHandler = { state in
                 switch state {
                 case .ready:
-                    let request = "CONNECT vpn.freewire.com:443 HTTP/1.1\r\n" +
-                                  "Host: vpn.freewire.com:443\r\n\r\n"
+                    // The configured server, not a hardcoded hostname. Asking
+                    // the proxy for vpn.freewire.com tested whether it would
+                    // reach a host the tunnel never uses: against a self-hosted
+                    // server the probe reported a path that does not exist, and
+                    // the upgrade it triggered tore down a working tunnel to
+                    // rebuild it on one that could not connect.
+                    let target = "\(serverHost):443"
+                    let request = "CONNECT \(target) HTTP/1.1\r\n" +
+                                  "Host: \(target)\r\n\r\n"
                     conn.send(content: Data(request.utf8), completion: .contentProcessed { error in
                         if error != nil {
                             conn.cancel(); finish(false); return
@@ -179,7 +186,15 @@ final class PathUpgradeManager {
     }
 
     /// Parses `route get default` for the gateway address.
-    private static func defaultGateway() -> String? {
+    ///
+    /// Detached rather than run inline. It forks a process and waits for it,
+    /// and every upgrade probe calls it -- on the main actor that froze the UI
+    /// for the duration, on a schedule, for the whole life of a connection.
+    private static func defaultGateway() async -> String? {
+        await Task.detached(priority: .utility) { defaultGatewaySync() }.value
+    }
+
+    nonisolated private static func defaultGatewaySync() -> String? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/sbin/route")
         p.arguments = ["-n", "get", "default"]

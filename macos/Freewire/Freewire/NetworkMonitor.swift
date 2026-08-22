@@ -14,36 +14,51 @@ final class NetworkMonitor {
 
     /// One-shot reachability check, for deciding CONN-1 before a connect attempt.
     ///
-    /// NWPathMonitor delivers its first path asynchronously, so this waits
-    /// briefly for it rather than reading a path that has not arrived. A
-    /// timeout reports reachable: refusing to try because the check was slow
-    /// would be worse than attempting a connection that then fails properly.
-    static func hasNetwork(timeout: TimeInterval = 1.0) -> Bool {
+    /// NWPathMonitor delivers its first path asynchronously, so this waits for
+    /// it rather than reading a path that has not arrived. A timeout reports
+    /// reachable: refusing to try because the check was slow would be worse
+    /// than attempting a connection that then fails properly.
+    ///
+    /// Async rather than blocking on a semaphore. Every connect attempt begins
+    /// with this call, and the blocking version ran on the main actor: the
+    /// whole UI froze for up to a second each time the user pressed Connect,
+    /// and again on every automatic retry, which is exactly when the interface
+    /// most needs to stay responsive.
+    static func hasNetwork(timeout: TimeInterval = 1.0) async -> Bool {
         let monitor = NWPathMonitor()
         let queue = DispatchQueue(label: "com.freewire.netmon.oneshot", qos: .userInitiated)
-        let sema = DispatchSemaphore(value: 0)
 
-        let lock = NSLock()
-        var satisfied = true
-        var reported = false
-
-        monitor.pathUpdateHandler = { path in
-            lock.lock()
-            if !reported {
-                reported = true
-                satisfied = (path.status == .satisfied)
-                lock.unlock()
-                sema.signal()
-                return
+        let result: Bool = await withCheckedContinuation { cont in
+            let once = ResumeOnce(cont)
+            monitor.pathUpdateHandler = { path in
+                once.resume(with: path.status == .satisfied)
             }
-            lock.unlock()
+            monitor.start(queue: queue)
+            // Timing out reports reachable, so a slow check never blocks a
+            // connect the user asked for.
+            queue.asyncAfter(deadline: .now() + timeout) { once.resume(with: true) }
         }
-        monitor.start(queue: queue)
-        _ = sema.wait(timeout: .now() + timeout)
         monitor.cancel()
+        return result
+    }
 
-        lock.lock(); defer { lock.unlock() }
-        return satisfied
+    /// Resumes a continuation at most once, from any queue.
+    ///
+    /// The path handler and the timeout fire independently, and resuming a
+    /// CheckedContinuation twice is an unconditional fatalError.
+    private final class ResumeOnce: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cont: CheckedContinuation<Bool, Never>?
+
+        init(_ cont: CheckedContinuation<Bool, Never>) { self.cont = cont }
+
+        func resume(with value: Bool) {
+            lock.lock()
+            let c = cont
+            cont = nil
+            lock.unlock()
+            c?.resume(returning: value)
+        }
     }
 
     func start() {

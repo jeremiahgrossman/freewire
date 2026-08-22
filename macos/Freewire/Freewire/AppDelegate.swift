@@ -152,7 +152,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch state {
         case .disconnected:             return "Freewire — Not connected"
         case .connecting:               return "Freewire — Connecting..."
-        case .connected:                return "Freewire — Protected"
+        case .connected:
+            // Matches the panel's DEBUG-1 headline. The tooltip is what the
+            // user sees without opening anything, so a shield claim here would
+            // be the same lie the panel no longer tells.
+            return UserDefaults.standard.bool(forKey: "skipRouting")
+                ? "Freewire — Debug mode: routing off. Traffic is NOT protected."
+                : "Freewire — Protected"
+        case .upgrading:                return "Freewire — Switching to a faster connection"
         case .reconnecting:             return "Freewire — Reconnecting... Traffic not protected"
         case .blocked:                  return "Freewire — Connection lost. Click to reconnect."
         case .captivePortal:            return "Freewire — Network login required"
