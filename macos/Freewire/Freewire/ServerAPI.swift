@@ -45,6 +45,7 @@ enum APIError: Error, LocalizedError {
     case decodeFailed(Error)
     case noServerPin
     case serverKeyMismatch
+    case tokenRejected
 
     var errorDescription: String? {
         switch self {
@@ -60,6 +61,8 @@ enum APIError: Error, LocalizedError {
             return "Freewire does not have a trusted key for this server. Add the server's key before connecting."
         case .serverKeyMismatch:
             return "This server's identity does not match the one Freewire trusts. Connection refused."
+        case .tokenRejected:
+            return "Freewire could not verify this connection. Try again in a moment."
         }
     }
 }
@@ -136,11 +139,21 @@ final class ServerAPI {
         return cfg
     }
 
-    func registerPeer(publicKeyBase64: String) async throws -> RegisteredPeer {
+    /// Registers a peer, spending a Privacy Pass token when one is available.
+    ///
+    /// The token is the only thing presented. Nothing identifying the device
+    /// accompanies it: adding a device id or any other handle would let the
+    /// server correlate this registration with the issuance that produced the
+    /// token, which is exactly what blind signing prevents — and it would still
+    /// work, so the loss would be silent.
+    func registerPeer(publicKeyBase64: String, token: String? = nil) async throws -> RegisteredPeer {
         let url = base.appendingPathComponent("peers")
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let token {
+            req.setValue("PrivateToken token=\(token)", forHTTPHeaderField: "Authorization")
+        }
         let clientVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0.0"
         req.httpBody = try JSONEncoder().encode([
             "public_key":     publicKeyBase64,
@@ -148,8 +161,11 @@ final class ServerAPI {
         ])
         do {
             let (data, response) = try await session.data(for: req)
-            if let http = response as? HTTPURLResponse, http.statusCode == 503 {
-                throw APIError.capacityFull
+            if let http = response as? HTTPURLResponse {
+                if http.statusCode == 503 { throw APIError.capacityFull }
+                // 402 is the spec's code for both token failures, deliberately
+                // not 401 or 429: the client maps those to different retries.
+                if http.statusCode == 402 { throw APIError.tokenRejected }
             }
             try checkStatus(response, data)
             return try decode(RegisteredPeer.self, from: data)

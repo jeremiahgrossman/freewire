@@ -27,9 +27,20 @@ enum ServerTrust {
     /// authenticated channel to learn their key over. The user carries it
     /// across themselves — pasted or scanned from the server dashboard — and
     /// that value, not the certificate, is what makes the server trustworthy.
+    /// Read straight from UserDefaults rather than through Preferences.
+    ///
+    /// Preferences is main-actor isolated, and this is consulted from the
+    /// URLSession trust callback, which runs on a background queue. Going
+    /// through the singleton there silently yielded no pin, so the delegate
+    /// fell through to default validation and rejected the very certificate the
+    /// pin exists to accept. UserDefaults is thread-safe, so the hop bought
+    /// nothing.
     static var userPinnedKey: String? {
-        get { Preferences.shared.pinnedServerKey }
-        set { Preferences.shared.pinnedServerKey = newValue }
+        get {
+            let v = UserDefaults.standard.string(forKey: "pinnedServerKey")
+            return (v?.isEmpty ?? true) ? nil : v
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "pinnedServerKey") }
     }
 
     /// Whether `key` is an acceptable identity for `host`.

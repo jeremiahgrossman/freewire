@@ -65,6 +65,15 @@ final class TunnelManager: ObservableObject {
     private var upgradeManager: PathUpgradeManager?
     private var awaitPortalTask: Task<Void, Never>?
     private var connectTask: Task<Void, Never>?
+    private lazy var tokens = TokenStore(
+        serverBase: "https://\(api.serverHost):8080",
+        // Same rule the URLSession delegate applies: a self-signed certificate
+        // is acceptable exactly when the user has pinned a key, because the pin
+        // rather than the certificate is what establishes trust. Gating this on
+        // the address instead left the helper doing strict validation against a
+        // server the rest of the client had already accepted.
+        allowSelfSigned: ServerTrust.userPinnedKey != nil
+    )
 
     init(api: ServerAPI, identity: DeviceIdentity) {
         self.api = api
@@ -211,8 +220,16 @@ final class TunnelManager: ObservableObject {
                 throw APIError.serverAtCapacity
             }
 
-            let peer   = try await api.registerPeer(publicKeyBase64: identity.publicKeyBase64)
-            peerToken  = peer.peerToken
+            // Spend a token when the server issues them. A nil token means a
+            // self-hosted server or a failed issuance; registering without one
+            // lets the server decide rather than refusing to connect over a
+            // rate-limiting mechanism.
+            let tok = await tokens.take()
+            let peer = try await api.registerPeer(
+                publicKeyBase64: identity.publicKeyBase64,
+                token: tok
+            )
+            peerToken = peer.peerToken
 
             let cfg = TunnelConfig(
                 privateKey:      identity.privateKeyBase64,

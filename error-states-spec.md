@@ -102,6 +102,29 @@ and shipped before the server switches, so no client is ever stranded.
 
 ---
 
+## App Transport Security and self-signed servers
+
+A server on a bare IP cannot hold a CA-signed certificate, and **ATS rejects a
+self-signed certificate before the authentication challenge delegate is
+consulted** — so key pinning never gets the chance to accept it. The connection
+fails with `NSURLErrorSecureConnectionFailed` (-1200) even though the pin is
+present and correct.
+
+This is not visible from a command-line build: ATS applies to app bundles, so
+the same code succeeds outside one and fails inside.
+
+The current build carries `NSAllowsArbitraryLoads`. That is broader than it
+should be for a security product, and it is a stopgap.
+
+**The correct fix is to stop using URLSession for the control plane.**
+`Network.framework` with `sec_protocol_options_set_verify_block` performs
+certificate validation in the app's own code, outside ATS, which is what a
+pinning client wants anyway: the pin becomes the whole verification rather than
+an override bolted onto the system's. Managed servers with a real hostname and
+an ACME certificate are unaffected either way.
+
+---
+
 ## Error Type Taxonomy
 
 - **Silent failure** — logged internally; user not notified; connection continues or degrades gracefully

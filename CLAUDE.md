@@ -50,7 +50,8 @@ added and round-trip tests covering the wire format.
 - ECH is not implemented. uTLS hides the handshake fingerprint, but SNI still names the destination in cleartext. Requires publishing ECH config in DNS — design the Phase 3 server DNS setup so this can be added without rework.
 - DoH is hardcoded to Cloudflare 1.1.1.1: a single point of failure and a single point of trust for a privacy-sensitive signal. Should become a list with fallback.
 - No Swift tests. `FreewireTests/` is empty; the suite is Go-only so far.
-- Privacy Pass is not implemented — `peers_handler.go` accepts any registration. Phase 4.
+- **ATS blocks self-signed servers.** App Transport Security rejects the certificate before the pinning delegate is consulted, so the build carries `NSAllowsArbitraryLoads` as a stopgap. The real fix is `Network.framework` with a verify block instead of URLSession — see `error-states-spec.md`. Managed servers with an ACME certificate are unaffected.
+- Privacy Pass client-side batch refresh runs through the `freewire-tokens` helper rather than a Swift implementation of RFC 9474; see that command's doc comment for why.
 - `captive-portal-testing-guide.md`'s `proxy.py` listing is broken — its relay threads never iterate. `testing/proxy.py` is a working replacement; fold it back into the guide.
 
 ---
