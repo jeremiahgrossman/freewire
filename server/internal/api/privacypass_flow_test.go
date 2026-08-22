@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/cloudflare/circl/blindsign/blindrsa"
 	"go.uber.org/zap"
@@ -30,7 +31,8 @@ func issueOverHTTP(t *testing.T, s *Server, iss *privacypass.Issuer) *privacypas
 	if err != nil {
 		t.Fatalf("client: %v", err)
 	}
-	blinded, state, err := client.Blind(rand.Reader, privacypass.TokenInput(nonce))
+	exp := privacypass.ExpiryForIssuance(time.Now())
+	blinded, state, err := client.Blind(rand.Reader, privacypass.TokenInput(exp, nonce))
 	if err != nil {
 		t.Fatalf("blind: %v", err)
 	}
@@ -63,7 +65,7 @@ func issueOverHTTP(t *testing.T, s *Server, iss *privacypass.Issuer) *privacypas
 	if err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
-	return &privacypass.Token{Type: privacypass.TokenType, Nonce: nonce, Signature: sig}
+	return &privacypass.Token{Type: privacypass.TokenType, ExpiryDay: exp, Nonce: nonce, Signature: sig}
 }
 
 func testServer(t *testing.T) (*Server, *privacypass.Issuer) {

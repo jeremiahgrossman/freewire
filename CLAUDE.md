@@ -36,20 +36,20 @@ before trusting a change. Every serious defect found on 2026-08-21/22 — a fals
 would have locked the client out on the next deploy — passed every static check
 and appeared only when the product actually ran.
 
-**Two open decisions, both Privacy Pass, both needing a call rather than an
-implementation:**
+**Both Privacy Pass decisions are made** (2026-08-22), recorded in
+`DECISIONS.md`:
 
-1. **Token expiry vs spent-record retention.** Tokens carry no expiry but spent
-   records drop after 30 days, so an aged-out token is replayable forever. The
-   candidate fixes (an expiry field, an issuer key epoch, RFC 9577's
-   `token_key_id` enabling the dual-key rotation the spec already describes)
-   change the wire format differently and are not interchangeable. Recommended:
-   the key epoch, since it also closes CRYPTO-09.
-2. **Unauthenticated DH on the DNS and ICMP handshakes.** The on-path adversary
-   those transports exist to defeat can sit in the middle of them. WireGuard
-   inside still authenticates the server by its pinned key, so this costs
-   transport framing rather than traffic. Fixing it means binding the handshake
-   to the server's known key — a protocol change to both ends.
+1. **Token expiry** — tokens now carry a coarse expiry in whole UTC days inside
+   the signed message: `type(2) || expiry(4) || nonce(32) || signature(256)`,
+   294 bytes. Validity is 30 days, inside the spent store's retention. The
+   issuer signs blindly and cannot set the value, so the client does and the
+   server refuses anything over-dated at redemption. CRYPTO-09 (tokens bind to
+   no key or origin) stays open — the key-epoch option that would have closed it
+   was judged more machinery than the problem needs.
+2. **Unauthenticated DH on the DNS and ICMP handshakes** — deferred until
+   Freewire serves people other than its operator. An active on-path attacker
+   gains transport framing, not traffic: WireGuard inside is authenticated by
+   the pinned server key. See `DECISIONS.md` for the fix when it is picked up.
 
 ### Dev environment (as of 2026-08-22)
 

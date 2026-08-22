@@ -24,7 +24,8 @@ func issueToken(t *testing.T, iss *Issuer) *Token {
 	if err != nil {
 		t.Fatalf("client: %v", err)
 	}
-	blinded, state, err := client.Blind(rand.Reader, TokenInput(nonce))
+	exp := ExpiryForIssuance(time.Now())
+	blinded, state, err := client.Blind(rand.Reader, TokenInput(exp, nonce))
 	if err != nil {
 		t.Fatalf("blind: %v", err)
 	}
@@ -38,7 +39,7 @@ func issueToken(t *testing.T, iss *Issuer) *Token {
 	if err != nil {
 		t.Fatalf("finalize: %v", err)
 	}
-	return &Token{Type: TokenType, Nonce: nonce, Signature: sig}
+	return &Token{Type: TokenType, ExpiryDay: exp, Nonce: nonce, Signature: sig}
 }
 
 func newIssuer(t *testing.T) *Issuer {
@@ -71,7 +72,7 @@ func TestBlindedMessageDoesNotRevealTheToken(t *testing.T) {
 	rand.Read(nonce[:]) //nolint:errcheck
 
 	client, _ := blindrsa.NewClient(variant, iss.PublicKey())
-	blinded, _, err := client.Blind(rand.Reader, TokenInput(nonce))
+	blinded, _, err := client.Blind(rand.Reader, TokenInput(ExpiryForIssuance(time.Now()), nonce))
 	if err != nil {
 		t.Fatalf("blind: %v", err)
 	}

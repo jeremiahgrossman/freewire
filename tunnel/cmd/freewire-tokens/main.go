@@ -192,6 +192,10 @@ func issue(c *http.Client, base string, pub *rsa.PublicKey, count int) ([]string
 		return nil, fmt.Errorf("blind client: %w", err)
 	}
 
+	// One expiry for the whole batch, and the same value every client computes
+	// today, so the field cannot be used to tell batches or devices apart.
+	expiry := expiryForIssuance(time.Now())
+
 	nonces := make([][32]byte, count)
 	states := make([]blindrsa.State, count)
 	blinded := make([]string, count)
@@ -200,7 +204,7 @@ func issue(c *http.Client, base string, pub *rsa.PublicKey, count int) ([]string
 		if _, err := rand.Read(nonces[i][:]); err != nil {
 			return nil, fmt.Errorf("nonce: %w", err)
 		}
-		b, st, err := blindClient.Blind(rand.Reader, tokenInput(nonces[i]))
+		b, st, err := blindClient.Blind(rand.Reader, tokenInput(expiry, nonces[i]))
 		if err != nil {
 			return nil, fmt.Errorf("blind: %w", err)
 		}
@@ -249,7 +253,7 @@ func issue(c *http.Client, base string, pub *rsa.PublicKey, count int) ([]string
 			fmt.Fprintf(os.Stderr, "freewire-tokens: discarding token %d: %v\n", i, err)
 			continue
 		}
-		out = append(out, base64.RawURLEncoding.EncodeToString(marshalToken(nonces[i], sig)))
+		out = append(out, base64.RawURLEncoding.EncodeToString(marshalToken(expiry, nonces[i], sig)))
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("no token in the batch verified")
@@ -332,12 +336,34 @@ func leadingZeroBits(b []byte) int {
 	return n
 }
 
-func tokenInput(nonce [32]byte) []byte {
-	return append(binary.BigEndian.AppendUint16(nil, tokenType), nonce[:]...)
+// Token validity, in whole UTC days.
+//
+// The issuer signs blindly and never sees this value, so the client sets it and
+// the server judges it at redemption: a token dated further ahead than the
+// issuer would allow is refused there, which makes over-dating pointless.
+//
+// Whole days, deliberately. A finer timestamp would partition tokens into
+// cohorts by expiry, and a cohort small enough to identify a device undoes the
+// blinding that produced the token. At day granularity every token issued
+// anywhere on a given day carries the same value.
+const (
+	tokenValidityDays = 30
+	secondsPerDay     = 24 * 60 * 60
+)
+
+func expiryForIssuance(now time.Time) uint32 {
+	return uint32(now.UTC().Unix()/secondsPerDay) + tokenValidityDays
 }
 
-func marshalToken(nonce [32]byte, sig []byte) []byte {
+func tokenInput(expiryDay uint32, nonce [32]byte) []byte {
 	out := binary.BigEndian.AppendUint16(nil, tokenType)
+	out = binary.BigEndian.AppendUint32(out, expiryDay)
+	return append(out, nonce[:]...)
+}
+
+func marshalToken(expiryDay uint32, nonce [32]byte, sig []byte) []byte {
+	out := binary.BigEndian.AppendUint16(nil, tokenType)
+	out = binary.BigEndian.AppendUint32(out, expiryDay)
 	out = append(out, nonce[:]...)
 	return append(out, sig...)
 }

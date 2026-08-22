@@ -20,6 +20,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"time"
 
 	"github.com/cloudflare/circl/blindsign/blindrsa"
 )
@@ -32,7 +33,8 @@ const TokenType uint16 = 0x0001
 const (
 	NonceSize     = 32
 	SignatureSize = 256 // 2048-bit RSA
-	TokenSize     = 2 + NonceSize + SignatureSize
+	ExpirySize    = 4
+	TokenSize     = 2 + ExpirySize + NonceSize + SignatureSize
 )
 
 // variant selects RSASSA-PSS with SHA-384 and a deterministic salt length, as
@@ -84,10 +86,47 @@ func (i *Issuer) BlindSign(blinded []byte) ([]byte, error) {
 }
 
 // Token is a redeemed credential.
+//
+// ExpiryDay bounds how long the token may be presented. Without it a token was
+// good forever while its spent record was dropped after thirty days, so anyone
+// holding one past that window could replay it indefinitely -- the store had
+// forgotten, and nothing in the token said it was stale.
+//
+// The issuer cannot set this. It signs blindly and never sees the message, so
+// the value is chosen by the client and checked at redemption instead: a token
+// dated further ahead than the issuer would ever have allowed is refused, which
+// makes forging one pointless. See Verify.
 type Token struct {
 	Type      uint16
+	ExpiryDay uint32
 	Nonce     [NonceSize]byte
 	Signature []byte
+}
+
+// Expiry is expressed in whole UTC days, deliberately.
+//
+// A finer timestamp would be a fingerprint: tokens carrying distinct expiries
+// partition into cohorts, and a cohort small enough to identify a device
+// defeats the blinding that produced the token. At day granularity every token
+// issued anywhere in the world on a given day carries the same value.
+const (
+	// TokenValidityDays is how far ahead a token may be dated.
+	//
+	// It must not exceed the spent store's retention, or a token could outlive
+	// the record that stops it being replayed -- which is the defect this
+	// closes. See DefaultTokenTTL.
+	TokenValidityDays = 30
+	secondsPerDay     = 24 * 60 * 60
+)
+
+// currentDay is the UTC day number used for issuance and expiry checks.
+func currentDay(now time.Time) uint32 {
+	return uint32(now.UTC().Unix() / secondsPerDay)
+}
+
+// ExpiryForIssuance is the value a client must place in a token minted now.
+func ExpiryForIssuance(now time.Time) uint32 {
+	return currentDay(now) + TokenValidityDays
 }
 
 // ParseToken decodes the wire format: type(2) || nonce(32) || signature(256).
@@ -99,8 +138,9 @@ func ParseToken(b []byte) (*Token, error) {
 	if t.Type != TokenType {
 		return nil, fmt.Errorf("privacypass: token type 0x%04x is not supported", t.Type)
 	}
-	copy(t.Nonce[:], b[2:2+NonceSize])
-	t.Signature = append([]byte(nil), b[2+NonceSize:]...)
+	t.ExpiryDay = binary.BigEndian.Uint32(b[2 : 2+ExpirySize])
+	copy(t.Nonce[:], b[2+ExpirySize:2+ExpirySize+NonceSize])
+	t.Signature = append([]byte(nil), b[2+ExpirySize+NonceSize:]...)
 	return t, nil
 }
 
@@ -108,6 +148,7 @@ func ParseToken(b []byte) (*Token, error) {
 func (t *Token) Marshal() []byte {
 	out := make([]byte, 0, TokenSize)
 	out = binary.BigEndian.AppendUint16(out, t.Type)
+	out = binary.BigEndian.AppendUint32(out, t.ExpiryDay)
 	out = append(out, t.Nonce[:]...)
 	return append(out, t.Signature...)
 }
@@ -121,10 +162,15 @@ func (t *Token) NonceHash() [32]byte {
 	return sha256.Sum256(t.Nonce[:])
 }
 
-// TokenInput is the message the signature covers: type || nonce.
-func TokenInput(nonce [NonceSize]byte) []byte {
-	out := make([]byte, 0, 2+NonceSize)
+// TokenInput is the message the signature covers: type || expiry || nonce.
+//
+// The expiry is inside the signature so it cannot be edited after issuance. A
+// token whose expiry sat outside the signed message could simply be re-dated by
+// whoever held it, which would make the field decorative.
+func TokenInput(expiryDay uint32, nonce [NonceSize]byte) []byte {
+	out := make([]byte, 0, 2+ExpirySize+NonceSize)
 	out = binary.BigEndian.AppendUint16(out, TokenType)
+	out = binary.BigEndian.AppendUint32(out, expiryDay)
 	return append(out, nonce[:]...)
 }
 
@@ -133,11 +179,29 @@ func TokenInput(nonce [NonceSize]byte) []byte {
 // Verification says nothing about whether the token has already been spent;
 // that is the store's job, and both checks are required.
 func (i *Issuer) Verify(t *Token) error {
+	return i.VerifyAt(t, time.Now())
+}
+
+// VerifyAt checks a token's signature and its expiry against a given time.
+//
+// Both bounds matter and for different reasons. Refusing an expired token is
+// the point of the field. Refusing one dated too far ahead is what stops a
+// client simply writing itself a longer life: the issuer signs blindly and
+// never sees this value, so the only place it can be judged is here.
+func (i *Issuer) VerifyAt(t *Token, now time.Time) error {
+	today := currentDay(now)
+	if t.ExpiryDay <= today {
+		return fmt.Errorf("privacypass: token expired")
+	}
+	if t.ExpiryDay > today+TokenValidityDays {
+		return fmt.Errorf("privacypass: token is dated beyond the issuance window")
+	}
+
 	verifier, err := blindrsa.NewVerifier(variant, &i.key.PublicKey)
 	if err != nil {
 		return fmt.Errorf("privacypass: verifier: %w", err)
 	}
-	if err := verifier.Verify(TokenInput(t.Nonce), t.Signature); err != nil {
+	if err := verifier.Verify(TokenInput(t.ExpiryDay, t.Nonce), t.Signature); err != nil {
 		return fmt.Errorf("privacypass: signature: %w", err)
 	}
 	return nil

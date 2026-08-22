@@ -148,3 +148,92 @@ screen a user opens specifically to check this.
   Private Relay and Tor are built. It is a different product with a different
   cost structure, not a feature to add — logged here because the question will
   come up again the first time someone asks why the copy is not stronger.
+
+---
+
+## TOKEN-EXPIRY
+
+**Decided 2026-08-22. Revisit if the spent store's retention changes, or if
+issuer key rotation is implemented for another reason.**
+
+### What was decided
+
+Tokens carry a coarse expiry, in whole UTC days, inside the signed message. The
+wire format is now `type(2) || expiry(4) || nonce(32) || signature(256)`.
+
+### The problem
+
+A token was valid forever while its spent record was dropped after thirty days.
+Anyone holding one past that window could replay it indefinitely: the store had
+forgotten it, and nothing in the token said it was stale.
+
+### Why a field rather than key rotation
+
+An issuer key epoch was the alternative, and it would also have closed CRYPTO-09
+by binding tokens to a key. It was rejected as more machinery than the problem
+needs: key rotation has to be scheduled, coordinated across a rotation window,
+and carried in the token anyway as a key id. The field does the job in four
+bytes. CRYPTO-09 stays open and is recorded as such.
+
+### The part that is not obvious
+
+The issuer signs blindly and never sees the expiry, so it cannot set it. The
+client does. That is safe only because the value is judged at redemption: a
+token dated further ahead than the issuer would ever have allowed is refused
+there, which makes over-dating pointless. If that check were dropped the field
+would be decorative, so it has a test of its own.
+
+The expiry is inside the signed message for the same reason — outside it, anyone
+holding a token could simply re-date it.
+
+### Why whole days
+
+A finer timestamp would be a fingerprint. Tokens carrying distinct expiries
+partition into cohorts, and a cohort small enough to identify a device undoes
+the blinding that produced the token. At day granularity every token issued
+anywhere in the world on a given day carries the same value. There is a test
+asserting the value does not vary within a UTC day.
+
+Validity is 30 days, which must stay within the spent store's retention, or a
+token could again outlive the record that stops it being replayed. A test
+asserts that relationship rather than leaving it to a comment.
+
+---
+
+## DNS-ICMP-HANDSHAKE-AUTH
+
+**Deferred 2026-08-22 until Freewire serves people other than its operator.**
+
+### What was decided
+
+The DNS and ICMP handshakes keep their unauthenticated ephemeral DH. The
+limitation is recorded rather than fixed.
+
+### What is exposed
+
+Those two transports exist to get through an on-path adversary, and that same
+adversary can sit in the middle of their handshake. Neither client checks the
+server's ephemeral key against the pinned WireGuard key — there are zero
+references to it in either file.
+
+An active attacker gains the transport framing: session tokens, sequence
+numbers, the ability to inject fragments and to disrupt. They do not gain
+traffic. The WireGuard session inside is authenticated by the pinned server key,
+so contents stay confidential and unforgeable, and disruption is something a
+portal can achieve anyway by blocking.
+
+### Why defer
+
+On the current deployment the on-path adversary is a captive portal the operator
+has chosen to connect to, and the operator is the only user. The calculus
+changes entirely when strangers trust the service, which is the trigger for
+picking this up.
+
+### The fix when it is picked up
+
+Mix the server's known WireGuard public key into the handshake — a static
+ephemeral DH alongside the ephemeral one, so only the holder of the server's
+private key can derive the session key. The client already has the public half
+pinned and the server already has the private half in its config, so this needs
+no new key material and no signatures. It is a protocol change to both ends of
+both transports, which is the whole reason it is not a small job.
