@@ -105,6 +105,13 @@ func main() {
 		os.Exit(0)
 	}
 
+	// --dns-probe runs only the DNS tunnel handshake against a resolver, to
+	// prove the transport works end to end through a real delegation. It changes
+	// no system state, so it exits here before the routing/resolver repair below.
+	if len(os.Args) > 1 && os.Args[1] == "--dns-probe" {
+		os.Exit(dnsProbe(os.Args[2:]))
+	}
+
 	// Repair before doing anything else, on every run. setupRouting used to be
 	// the only place this happened, so a machine left broken stayed broken
 	// until a connection attempt got far enough to reach it -- and a connection
