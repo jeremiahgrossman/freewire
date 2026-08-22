@@ -133,6 +133,71 @@ func icmpProbe(args []string) int {
 	return 0
 }
 
+// dnsDataTest sends real packets of increasing size through a DNS tunnel session
+// to localize where the transport breaks. A bare TCP dial (one fragment) worked
+// in the field while real HTTPS (many fragments) did not, so the suspect is
+// multi-fragment handling. This sends a single-fragment packet, then a
+// multi-fragment one, and reports which the server accepts. Upstream only: it
+// exercises client fragment -> server reassemble -> decrypt; the server drops
+// the decrypted garbage at WireGuard. No routing, safe on a machine in use.
+//
+//	freewire-tunnel --dns-datatest [--resolver 1.1.1.1] [--domain t.pinghop.net]
+func dnsDataTest(args []string) int {
+	resolver := "1.1.1.1"
+	domain := ""
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--resolver":
+			if i+1 < len(args) {
+				resolver = args[i+1]
+				i++
+			}
+		case "--domain":
+			if i+1 < len(args) {
+				domain = args[i+1]
+				i++
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "dns-datatest: unknown argument %q\n", args[i])
+			return 2
+		}
+	}
+
+	cfg := Config{DNSTunnelDomain: domain}
+	zone := effectiveDNSTunnelDomain(cfg)
+	perFrag := dnsFragCipherBytes(zone)
+	fmt.Fprintf(os.Stderr, "dns-datatest: zone %q via %s (%d ciphertext bytes/fragment)\n", zone, resolver, perFrag)
+
+	sess, err := dnsHandshake(cfg, resolver)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dns-datatest: FAIL handshake: %v\n", err)
+		return 1
+	}
+
+	// Sizes chosen to straddle the fragment boundary: one fits in a single
+	// fragment, the others need several (a real WireGuard data packet is ~1420).
+	sizes := []int{40, 300, 1400}
+	failed := false
+	for _, n := range sizes {
+		frags := (n + perFrag - 1) / perFrag
+		start := time.Now()
+		_, err := sess.sendPacket(make([]byte, n))
+		took := time.Since(start).Round(time.Millisecond)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "  %4d bytes (%2d frag): FAIL after %s: %v\n", n, frags, took, err)
+			failed = true
+		} else {
+			fmt.Fprintf(os.Stderr, "  %4d bytes (%2d frag): ok in %s\n", n, frags, took)
+		}
+	}
+	if failed {
+		fmt.Fprintln(os.Stderr, "dns-datatest: multi-fragment upstream is broken (single-fragment may still pass)")
+		return 1
+	}
+	fmt.Fprintln(os.Stderr, "dns-datatest: all sizes accepted upstream -- the break is downstream or in timing")
+	return 0
+}
+
 // dnsThroughput measures how many DNS round trips per second the resolver,
 // delegation and server sustain, and translates that into an upper bound on
 // upstream tunnel throughput. It does not route traffic or take over the system

@@ -132,6 +132,12 @@ func main() {
 		os.Exit(icmpProbe(os.Args[2:]))
 	}
 
+	// --dns-datatest sends real single- and multi-fragment packets through a DNS
+	// session to localize where the transport breaks. No routing.
+	if len(os.Args) > 1 && os.Args[1] == "--dns-datatest" {
+		os.Exit(dnsDataTest(os.Args[2:]))
+	}
+
 	// Repair before doing anything else, on every run. setupRouting used to be
 	// the only place this happened, so a machine left broken stayed broken
 	// until a connection attempt got far enough to reach it -- and a connection

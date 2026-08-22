@@ -14,9 +14,9 @@ set -u
 
 SERVER_IP="52.203.246.145"
 OUT="/tmp/freewire-cafe-diagnostic.log"
-SAMPLES=15
+SAMPLES=10
 INTERVAL=1
-CURL_TIMEOUT=3
+CURL_TIMEOUT=12
 # Worst case (every sample times out): SAMPLES*(CURL_TIMEOUT+INTERVAL) seconds.
 MAXSECS=$(( SAMPLES * (CURL_TIMEOUT + INTERVAL) ))
 echo "café diagnostic: $SAMPLES samples, up to ~${MAXSECS}s if the network is fully blocked."
