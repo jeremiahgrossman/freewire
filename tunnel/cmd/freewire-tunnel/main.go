@@ -37,6 +37,12 @@ type Config struct {
 	// by the server so a rotation needs no client rebuild. Empty falls back to
 	// defaultDNSTunnelDomain.
 	DNSTunnelDomain string `json:"dns_tunnel_domain,omitempty"`
+	// DoHEndpoints overrides the DoH resolvers used once connected, tried in
+	// order as failover. Empty falls back to defaultDoHEndpoints. Each must be an
+	// https:// URL; plaintext would defeat the point and is dropped. Diversifying
+	// across operators here is what removes DNS as a single point of trust; the
+	// default stays one operator until that choice is made deliberately.
+	DoHEndpoints []string `json:"doh_endpoints,omitempty"`
 	// DNSResolver overrides the resolver the DNS tunnel queries.
 	//
 	// Normally the tunnel uses the system resolver and relies on it forwarding
@@ -211,7 +217,7 @@ func main() {
 		fmt.Fprintf(os.Stderr,
 			"freewire-tunnel: %s — tunnel is up but routing is NOT installed; traffic still uses the normal path\n",
 			skipEgressCheckFlag)
-	} else if err := setupRouting(tunName, bypassHost); err != nil {
+	} else if err := setupRouting(tunName, bypassHost, cfg.DoHEndpoints); err != nil {
 		// Fatal. A tunnel that carries nothing is worse than no tunnel: the
 		// client reports "Protected" off the ready line, so a silent routing
 		// failure means the user believes they are covered while every packet
@@ -570,7 +576,7 @@ func recordPins() {
 // an arbitrary entry (a bridge's, say, not the physical link's) and the add then
 // fails with "file exists" while the original default survives. Traffic kept
 // flowing outside the tunnel while the client reported "Protected".
-func setupRouting(tunName, bypassHost string) error {
+func setupRouting(tunName, bypassHost string, dohEndpoints []string) error {
 	// Already repaired at process start; nothing to redo here.
 
 	// Resolve bypass host to an IP if needed.
@@ -675,7 +681,7 @@ func setupRouting(tunName, bypassHost string) error {
 
 	// Start the DoH forwarder before pointing the system at it, so the resolver
 	// it is sent to is already answering.
-	fwd, dohErr := startDoHForwarder()
+	fwd, dohErr := startDoHForwarder(dohEndpoints)
 	dohNotice(dohErr)
 	if dohErr == nil {
 		dohActive = fwd

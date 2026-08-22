@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -37,13 +38,14 @@ import (
 // format unchanged, which is exactly what RFC 8484 carries. It parses only
 // enough to decide whether a reply fits in the client's UDP budget.
 type dohForwarder struct {
-	udp    *net.UDPConn
-	tcp    net.Listener
-	client *http.Client
-	wg     sync.WaitGroup
-	closed chan struct{}
-	once   sync.Once
-	cache  *dnsCache
+	udp       *net.UDPConn
+	tcp       net.Listener
+	client    *http.Client
+	wg        sync.WaitGroup
+	closed    chan struct{}
+	once      sync.Once
+	cache     *dnsCache
+	endpoints []string // tried in order as failover
 }
 
 // dnsCache holds answers for as long as their records say they are valid.
@@ -170,7 +172,28 @@ func minTTL(reply []byte) time.Duration {
 // naming one would be a bootstrap loop. Cloudflare's certificate carries these
 // addresses as IP SANs, so connecting to the bare IP still gets full
 // certificate verification rather than a skipped check.
-var dohEndpoints = []string{"https://1.1.1.1/dns-query", "https://1.0.0.1/dns-query"}
+// defaultDoHEndpoints is used when the config names none. Both are Cloudflare:
+// a failover pair for availability, not operator diversity. Diversity is a
+// deliberate config choice (Config.DoHEndpoints) because spreading queries
+// across operators trades one party seeing everything for several parties each
+// seeing some -- a privacy call that belongs to the operator, not this default.
+var defaultDoHEndpoints = []string{"https://1.1.1.1/dns-query", "https://1.0.0.1/dns-query"}
+
+// sanitizeDoHEndpoints keeps only https:// URLs. A plaintext http:// resolver
+// would send the very queries DoH exists to hide in the clear, so a misconfigured
+// entry is dropped rather than trusted. Returns the default if nothing survives.
+func sanitizeDoHEndpoints(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, e := range in {
+		if strings.HasPrefix(e, "https://") {
+			out = append(out, e)
+		}
+	}
+	if len(out) == 0 {
+		return defaultDoHEndpoints
+	}
+	return out
+}
 
 const (
 	dohListenAddr = "127.0.0.1:53"
@@ -184,8 +207,9 @@ const (
 	dohMaxMessage = 65535
 )
 
-// startDoHForwarder binds loopback:53 and relays queries over HTTPS.
-func startDoHForwarder() (*dohForwarder, error) {
+// startDoHForwarder binds loopback:53 and relays queries over HTTPS to the given
+// endpoints (or the default pair when none are given).
+func startDoHForwarder(endpoints []string) (*dohForwarder, error) {
 	udpAddr, err := net.ResolveUDPAddr("udp4", dohListenAddr)
 	if err != nil {
 		return nil, err
@@ -203,10 +227,11 @@ func startDoHForwarder() (*dohForwarder, error) {
 	}
 
 	f := &dohForwarder{
-		udp:    uc,
-		tcp:    tl,
-		closed: make(chan struct{}),
-		cache:  newDNSCache(),
+		udp:       uc,
+		tcp:       tl,
+		closed:    make(chan struct{}),
+		cache:     newDNSCache(),
+		endpoints: sanitizeDoHEndpoints(endpoints),
 		client: &http.Client{
 			Timeout: dohTimeout,
 			Transport: &http.Transport{
@@ -321,7 +346,7 @@ func (f *dohForwarder) resolve(query []byte) ([]byte, error) {
 		return reply, nil
 	}
 	var lastErr error
-	for _, endpoint := range dohEndpoints {
+	for _, endpoint := range f.endpoints {
 		reply, err := f.post(endpoint, query)
 		if err == nil {
 			f.cache.put(query, reply)
