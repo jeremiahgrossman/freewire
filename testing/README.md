@@ -220,6 +220,25 @@ Until this is fixed, a passing config proves **path selection only**, not
 that traffic is protected. Verify routing separately with
 `route get 8.8.8.8` and do not rely on the client's own indicator.
 
+## Config 4 must pass UDP 4500, not "proto icmp"
+
+The fourth transport is named `icmp_udp` and rides **UDP port 4500**, not the
+ICMP protocol. `config4.sh` originally passed `inet proto icmp` and left 4500
+blocked, so it blocked the very path it exists to force. It now passes
+`$ICMP_UDP_PORT`.
+
+## Peer registration needs a Privacy Pass token
+
+The managed server issues tokens, so `POST /v1/peers` without one returns
+`402 TOKEN_INVALID`. Get one first:
+
+```bash
+tunnel/freewire-tokens issue --server https://<server>:8080 --count 1 --insecure
+```
+
+`--insecure` is correct here: the server presents a self-signed certificate and
+trust comes from the pinned WireGuard key, exactly as the client does it.
+
 ## The bootstrap API must be reachable in every config
 
 The client calls `GET /v1/server/config` and `POST /v1/peers` *before* it

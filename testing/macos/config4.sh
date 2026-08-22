@@ -22,12 +22,16 @@ This config needs a local resolver that NXDOMAINs everything, so that
 PRE
 
 apply_rules <<EOF
-# Config 4 — ICMP is the only route out. DNS is redirected to the
-# local NXDOMAIN resolver so the DNS tunnel path fails cleanly.
+# Config 4 — the ICMP/UDP tunnel is the only route out. DNS is redirected
+# to a local NXDOMAIN resolver so the DNS tunnel path fails cleanly.
+#
+# Note the transport is icmp_udp: it rides UDP 4500, not the ICMP protocol.
+# An earlier version of this config passed "inet proto icmp" and blocked
+# UDP 4500, so it blocked the very path it was meant to force.
 block out on $UPLINK_IF all
 # Bootstrap API. In production this shares 443; see config.env.
 pass out on $UPLINK_IF proto tcp to $SERVER_IP port $API_PORT
-pass out on $UPLINK_IF inet proto icmp
+pass out on $UPLINK_IF proto udp to $SERVER_IP port $ICMP_UDP_PORT
 rdr pass on $UPLINK_IF proto udp to port 53 -> 127.0.0.1 port 5353
 EOF
 
