@@ -44,6 +44,18 @@ import (
 
 const tokenType uint16 = 0x0001
 
+// Exit code the client (TokenStore) maps to error-states-spec.md TRUST-4, "The
+// Privacy Pass issuer key changed since first use". It is a distinct code rather
+// than the generic exit 1 so the client can tell a trust failure -- a hard block
+// -- from an ordinary issuance failure, which falls through to a token-less
+// registration. Keep in sync with TokenStore.issuerKeyChangedExitCode.
+const exitIssuerKeyChanged = 3
+
+// errIssuerKeyChanged marks the one checkPin outcome that is a trust failure
+// (the pinned key no longer matches), as opposed to an I/O failure reading or
+// writing the pin file. Only this one becomes exitIssuerKeyChanged.
+var errIssuerKeyChanged = errors.New("issuer key changed since first use")
+
 func main() {
 	if len(os.Args) < 2 || os.Args[1] != "issue" {
 		fmt.Fprintln(os.Stderr, "usage: freewire-tokens issue --server <url> [--count n] [--insecure] [--issuer-pin path]")
@@ -81,6 +93,11 @@ func main() {
 	}
 	if err := checkPin(*pinFile, keyID); err != nil {
 		fmt.Fprintf(os.Stderr, "freewire-tokens: %v\n", err)
+		// A changed pin is a trust failure, reported with its own exit code so
+		// the client surfaces TRUST-4 rather than a generic issuance failure.
+		if errors.Is(err, errIssuerKeyChanged) {
+			os.Exit(exitIssuerKeyChanged)
+		}
 		os.Exit(1)
 	}
 
@@ -169,8 +186,9 @@ func checkPin(path string, keyID [32]byte) error {
 	case err == nil:
 		if got := strings.TrimSpace(string(seen)); got != want {
 			return fmt.Errorf(
-				"issuer key changed since first use; refusing to sign against it.\n"+
-					"If the server legitimately rotated its key, delete %s and retry", path)
+				"%w; refusing to sign against it.\n"+
+					"If the server legitimately rotated its key, delete %s and retry",
+				errIssuerKeyChanged, path)
 		}
 		return nil
 	case errors.Is(err, fs.ErrNotExist):

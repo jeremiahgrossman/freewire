@@ -2,6 +2,23 @@ import CryptoKit
 import Foundation
 import Security
 
+enum TokenError: Error, LocalizedError {
+    /// The Privacy Pass issuer key changed since first use. A hard block.
+    case issuerKeyChanged   // TRUST-4
+
+    var errorDescription: String? {
+        switch self {
+        // Exact copy from error-states-spec.md TRUST-4. It shares TRUST-2's
+        // string deliberately: to the user both are the same event -- the server
+        // is not the one this client trusts -- and the distinction between a
+        // WireGuard key and a token-issuer key is not one the message should ask
+        // them to hold. Do not paraphrase.
+        case .issuerKeyChanged:
+            return "This server's identity does not match the one Freewire trusts. Connection refused."
+        }
+    }
+}
+
 /// Holds unspent Privacy Pass tokens and requests more when they run low.
 ///
 /// Tokens are anonymous credentials, not secrets tied to this device, so they
@@ -29,6 +46,15 @@ final class TokenStore {
     private static let batchSize = 10
 
     private var tokens: [String] = []
+    /// Set once a refresh sees the issuer key change since first use (the
+    /// `freewire-tokens` helper exits with `issuerKeyChangedExitCode`). Once
+    /// true, `take()` hard-blocks instead of vending, per error-states-spec.md
+    /// TRUST-4: a changed issuer key is a trust failure, not a transient
+    /// issuance failure, and following it is exactly the tagging attack blind
+    /// signing exists to prevent. It stays set for the process lifetime; a
+    /// legitimate rotation requires deleting the pin file (see checkPin in the
+    /// helper), which is the intended cost.
+    private var issuerKeyChanged = false
     /// The in-flight refresh, so concurrent callers wait for the batch rather
     /// than returning empty-handed. A plain bool made the second caller give up
     /// and register without a token, which a token-issuing server refuses.
@@ -49,9 +75,20 @@ final class TokenStore {
     /// Returns nil when the server does not issue tokens (self-hosted) or
     /// issuance failed. The caller registers without one and lets the server
     /// decide, rather than refusing to connect over a rate-limiting mechanism.
-    func take() async -> String? {
+    ///
+    /// Throws `TokenError.issuerKeyChanged` (TRUST-4) when a refresh found the
+    /// issuer key changed since first use. That is a hard block, not a
+    /// fall-through to token-less registration: the caller surfaces it verbatim
+    /// and refuses to connect.
+    func take() async throws -> String? {
         if tokens.isEmpty {
             await refresh()
+        }
+        // TRUST-4: refuse before vending anything, even if a stockpile remains.
+        // Once we have seen the issuer key change, no token from this issuer is
+        // trustworthy to present.
+        if issuerKeyChanged {
+            throw TokenError.issuerKeyChanged
         }
         guard !tokens.isEmpty else { return nil }
 
@@ -95,14 +132,14 @@ final class TokenStore {
             args.append(contentsOf: ["--issuer-pin", pin.path])
         }
 
-        let out = await Task.detached { () -> String? in
+        let result = await Task.detached { () -> (out: String?, status: Int32) in
             let p = Process()
             p.executableURL = helper
             p.arguments = args
             let pipe = Pipe()
             p.standardOutput = pipe
             p.standardError = FileHandle.nullDevice
-            guard (try? p.run()) != nil else { return nil }
+            guard (try? p.run()) != nil else { return (nil, -1) }
 
             // Bound the wait. Issuance sits directly in front of a connect
             // attempt, so a helper that hangs — a server that accepts and never
@@ -116,11 +153,20 @@ final class TokenStore {
             p.waitUntilExit()
             killer.cancel()
 
-            guard p.terminationStatus == 0 else { return nil }
-            return String(data: data, encoding: .utf8)
+            let status = p.terminationStatus
+            guard status == 0 else { return (nil, status) }
+            return (String(data: data, encoding: .utf8), status)
         }.value
 
-        guard let out else { return }
+        // TRUST-4: the helper's dedicated exit code says the pinned issuer key
+        // changed since first use. Record it so take() hard-blocks; do not treat
+        // it as an ordinary issuance failure. Kept in sync with the helper's
+        // exitIssuerKeyChanged.
+        if result.status == Self.issuerKeyChangedExitCode {
+            issuerKeyChanged = true
+        }
+
+        guard let out = result.out else { return }
         // Trimmed of newlines as well as spaces. A token is placed verbatim in
         // an Authorization header, and a stray carriage return there ends the
         // header and begins whatever follows it.
@@ -144,6 +190,10 @@ final class TokenStore {
 
     /// Ceiling on one issuance run, inside the 10-second connect budget.
     private static let issueTimeout: DispatchTimeInterval = .seconds(8)
+
+    /// Exit code the `freewire-tokens` helper uses for a changed issuer key.
+    /// Kept in sync with the helper's `exitIssuerKeyChanged`. TRUST-4.
+    private static let issuerKeyChangedExitCode: Int32 = 3
 
     // MARK: - Storage
 

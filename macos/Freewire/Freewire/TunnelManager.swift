@@ -292,7 +292,24 @@ final class TunnelManager: ObservableObject {
                 dnsTunnelDomain: server.dnsTunnelDomain
             )
 
-            let (ifName, transport) = try await launchTunnel(config: cfg)
+            // CONN-5: the control plane answered above, so this is a normal
+            // (non-captive-portal) network. The tunnel must come up inside the
+            // 10s budget; a timeout is retried once automatically and then
+            // surfaced as CONN-5. This is distinct from allPathsFailed, which
+            // the helper reports explicitly and which propagates to CONN-2.
+            var launched = try await launchTunnelTimed(config: cfg, seconds: 10)
+            if launched == nil {
+                await killTunnel()
+                guard !Task.isCancelled else { await deregisterPeer(); return }
+                launched = try await launchTunnelTimed(config: cfg, seconds: 10)
+            }
+            guard let (ifName, transport) = launched else {
+                await killTunnel()
+                await deregisterPeer()
+                guard !Task.isCancelled else { return }
+                state = .failed(APIError.connectionTimedOut)   // CONN-5
+                return
+            }
             // The user may have cancelled while the helper was starting.
             guard !Task.isCancelled else {
                 await killTunnel()
@@ -405,9 +422,13 @@ final class TunnelManager: ObservableObject {
     /// and then never recover from a network change, a watchdog trip, or an
     /// upgrade. One funnel means a future path cannot forget again.
     private func registerPeer() async throws -> RegisteredPeer {
+        // `take()` throws TokenError.issuerKeyChanged (TRUST-4) when the issuer
+        // key changed since first use; that propagates to doConnect's generic
+        // catch, which surfaces it as a hard block, exactly like the TRUST-1/2/3
+        // APIErrors from fetchConfig.
         try await api.registerPeer(
             publicKeyBase64: identity.publicKeyBase64,
-            token: await tokens.take()
+            token: try await tokens.take()
         )
     }
 
@@ -821,6 +842,29 @@ final class TunnelManager: ObservableObject {
             return nil
         }
         return (ifName, transport)
+    }
+
+    /// Launches the tunnel with an open-network time budget (CONN-5).
+    ///
+    /// Returns the launched interface/transport, or nil if the launch did not
+    /// finish within `seconds`. A thrown failure -- `allPathsFailed`, a helper
+    /// error -- propagates unchanged, so only a genuine timeout returns nil; the
+    /// caller retries a nil once and then surfaces CONN-5. The launch that timed
+    /// out keeps running detached (its sudo helper watches stdin), so the caller
+    /// must `killTunnel()` before retrying or giving up.
+    private func launchTunnelTimed(config: TunnelConfig, seconds: Double) async throws -> (String, TunnelTransport)? {
+        try await withThrowingTaskGroup(of: Optional<(String, TunnelTransport)>.self) { group in
+            group.addTask { try await self.launchTunnel(config: config) }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return nil   // timer won the race
+            }
+            // First branch to finish decides it: the launch's value/throw, or the
+            // timer's nil. Cancel the loser either way.
+            let outcome = try await group.next() ?? nil
+            group.cancelAll()
+            return outcome
+        }
     }
 
     private func launchTunnel(config: TunnelConfig) async throws -> (String, TunnelTransport) {

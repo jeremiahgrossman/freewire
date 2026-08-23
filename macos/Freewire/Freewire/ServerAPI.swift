@@ -83,6 +83,7 @@ enum APIError: Error, LocalizedError {
     case serverUnreachable      // CONN-3
     case capacityFull           // CONN-4 (503 on peer registration)
     case serverAtCapacity       // CONN-4 (capacity_available=false in config)
+    case connectionTimedOut     // CONN-5 (open network, no tunnel within budget)
     case decodeFailed(Error)
     case noServerPin
     case serverKeyMismatch
@@ -96,6 +97,8 @@ enum APIError: Error, LocalizedError {
         case .serverUnreachable:   return "Freewire's servers are unreachable right now. Try again in a moment."
         case .capacityFull,
              .serverAtCapacity:    return "Freewire's servers are at capacity. Try again in a few minutes."
+        // Exact copy from error-states-spec.md CONN-5. Do not paraphrase.
+        case .connectionTimedOut:  return "Connection timed out. Check your network and try again."
         case .decodeFailed:        return "Unexpected server response."
         // Copy per error-states-spec.md, "Server identity (TRUST)":
         // TRUST-1, TRUST-2 and TRUST-3 respectively.
