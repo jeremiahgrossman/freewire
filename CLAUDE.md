@@ -18,13 +18,48 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 - **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
 - **In progress:** nothing
-- **Next action:** find why **routed WG-over-DNS carries no real traffic**, with
-  live server observation (SSH from home wifi for a stable IP + `tcpdump` on the
-  server during a routed DNS connect). Everything around it is now ruled out (see
-  "DNS routed failure — localized" below), so the break is the WireGuard layer
-  over the DNS carrier and/or downstream capacity/timing under real load. This
-  needs a coordinated routed test, not desk analysis alone.
+- **Next action (DNS routed — the field lever):** routed WG-over-DNS now WORKS
+  when the carrier reaches the authoritative server directly (2 of 3 curl samples
+  tunnelled, downstream 13–71 KB/s, ~372 q/s — see "DNS routed: SOLVED
+  server-direct" below). Through a public recursor it does NOT, because the
+  recursor rate-limits forwards of unique names to our auth server (~14/s on
+  1.1.1.1). On a real portal we're forced through the portal resolver, so the
+  next build is **spreading carrier queries across several recursors at once**
+  (1.1.1.1 + 8.8.8.8 + 9.9.9.9 …), each staying under its own per-auth-server
+  limit while the auth server sees the sum. Then field-test.
 - **Blocked on:** a Developer ID certificate, for `FreewireHelper` and for signed/notarized distribution.
+
+### DNS routed: SOLVED server-direct (2026-08-23)
+
+The months-long "routed DNS carries no traffic" failure is root-caused and fixed
+for the server-direct path. The break was never the WireGuard layer: it was a
+chain of send-path + carrier issues, fixed in order —
+1. send-path congestion collapse (drop-on-full) → bounded queue + worker pool;
+2. carrier resolver not pinned → `setupRouting` pins the carrier's actual
+   resolver, confirmed by `route-check` (0/1+128.0/1→utun, server+resolver→en0);
+3. downstream throttled to ~1 packet/response → server packs multiple packets per
+   DNS response (length-prefix framed, EDNS0-budgeted), client splits them;
+4. serial polling → concurrent poll pool with a per-poll nonce (defeats recursor
+   caching), AEAD decrypt moved off `rxMu`;
+5. pollers starving senders → separate send/poll concurrency budgets (24/8).
+
+**The last wall was the public recursor**, not our code: 1.1.1.1 rate-limits
+forwarding UNIQUE names to our auth server to ~14/s, so routed traffic saw ~75%
+loss (a single ICMP echo occasionally squeaked through — the tell). Server CPU
+sat at 0.5% during a routed run, proving the queries never arrived. Bypassing the
+recursor (carrier → auth server directly): ICMP loss 75%→25%, curl 2/3 tunnelled,
+downstream 13–71 KB/s (~568 Kbps), ~372 q/s. All tuning is env-overridable
+(`FREEWIRE_DNS_SEND_CONCURRENCY`/`_POLL_CONCURRENCY`/`_POLL`/`_WORKERS`/`_POOL`).
+
+**Autonomous routed testing now exists** (`testing/routed-test.sh`): forces one
+transport with routing, an ICMP round-trip probe + curl egress samples, snapshots
+pinned routes and send/downstream counters, and a **detached 45s hard-deadline
+watchdog** force-restores routing so a run can never strand the machine (it did
+once). Uses the passwordless-sudo rule + `--force-transport` + `--route-no-verify`
+(installs routing but skips the egress self-check and suspends the health
+watchdog, so a slow-but-working tunnel can be measured). `FREEWIRE_DNS_RESOLVER`
+picks the carrier resolver (unset = server-direct). Server redeploys with
+`deploy/launch-aws.sh` (idempotent; preserves the pinned key).
 
 ### Field findings (2026-08-22, Starbucks + desk)
 
