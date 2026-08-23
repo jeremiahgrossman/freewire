@@ -435,6 +435,11 @@ func establishTunnel(
 		fmt.Fprintf(os.Stderr, "freewire-tunnel: forced to transport %q; other rungs skipped\n", forced)
 		candidates = filtered
 	}
+	// One greppable record of what each rung did, logged as a summary when a
+	// transport is finally selected. The per-rung lines below say why each failed;
+	// this consolidates "what this network allowed and which we chose" into a
+	// single line for field diagnostics.
+	var attempts []string
 	for _, candidate := range candidates {
 		lp, tc, openErr := candidate.open(cfg)
 		if openErr != nil {
@@ -444,6 +449,7 @@ func establishTunnel(
 			// TLS when I asked for DNS" a matter of guessing.
 			fmt.Fprintf(os.Stderr, "freewire-tunnel: %s unavailable: %v\n",
 				candidate.name, openErr)
+			attempts = append(attempts, candidate.name+"=unavailable")
 			continue
 		}
 
@@ -494,6 +500,9 @@ func establishTunnel(
 		// after this transport was configured, not one left over from a
 		// previous rung of the chain.
 		if waitForHandshake(wgDev, handshakeBudgetFor(candidate.name), baseline) {
+			attempts = append(attempts, candidate.name+"=SELECTED")
+			fmt.Fprintf(os.Stderr, "freewire-tunnel: transport selected: %s [%s]\n",
+				candidate.name, strings.Join(attempts, " "))
 			return candidate.name, lp, tc, nil
 		}
 
@@ -502,6 +511,7 @@ func establishTunnel(
 		fmt.Fprintf(os.Stderr,
 			"freewire-tunnel: %s connected but no WireGuard handshake; trying the next path\n",
 			candidate.name)
+		attempts = append(attempts, candidate.name+"=no-handshake")
 		closeCandidate(lp, tc)
 		if bridgeDone != nil {
 			// Bounded. The sockets are already closed, so the bridge is
