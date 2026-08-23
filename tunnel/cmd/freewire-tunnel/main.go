@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -182,16 +183,19 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Verbose WireGuard logging in the skipRouting debug mode, so a diagnostic run
-	// shows whether the WG handshake actually completes over the chosen transport
-	// (e.g. the DNS carrier) -- the routed egress probe cannot distinguish "handshake
-	// never completed" from "handshake fine but data did not flow". Error-level
-	// otherwise, to keep normal runs quiet.
-	wgLevel := device.LogLevelError
-	if skipEgressCheck() {
-		wgLevel = device.LogLevelVerbose
+	// WireGuard logger, written to STDERR. device.NewLogger writes to os.Stdout,
+	// which the app redirects to the ready-file and then deletes -- so its output
+	// (including verbose handshake logs) was lost. Build the logger by hand so it
+	// lands in the captured stderr log. Verbose in the skipRouting debug mode, so a
+	// diagnostic run shows whether the WG handshake completes over the chosen
+	// transport (the DNS carrier in particular); error-level otherwise.
+	wgLogf := func(prefix string) func(string, ...any) {
+		return log.New(os.Stderr, prefix+": wg: ", log.Ldate|log.Ltime).Printf
 	}
-	logger := device.NewLogger(wgLevel, "wg: ")
+	logger := &device.Logger{Verbosef: device.DiscardLogf, Errorf: wgLogf("ERROR")}
+	if skipEgressCheck() {
+		logger.Verbosef = wgLogf("DEBUG")
+	}
 	wgDev := device.NewDevice(tunDev, conn.NewDefaultBind(), logger)
 
 	keepalive := cfg.Keepalive
