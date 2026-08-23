@@ -48,61 +48,28 @@ const (
 	// How long after real traffic to keep polling at the fast rate.
 	dnsPollBusyWindow   = 3 * time.Second
 	dnsHandshakeTimeout = 3 * time.Second
-	dnsWindowInit       = 8
-	dnsWindowMax        = 64
+
+	// Send-path concurrency and flow control.
+	//
+	// The old model kept a per-packet AIMD window and DROPPED packets when it was
+	// full. Under a WireGuard burst it filled at 8, dropped most packets, and
+	// WireGuard retransmitted the drops -- a congestion collapse (see the routed
+	// diagnosis in CLAUDE.md). Dropping is the trigger: a lost packet makes
+	// WireGuard resend, which pushes more into an already-full window.
+	//
+	// Instead: a bounded queue absorbs bursts (a burst is delayed, not dropped,
+	// which is what stops the retransmit storm), a fixed pool of senders drains
+	// it, and a single global semaphore caps concurrent DNS queries to what the
+	// carrier and the socket pool sustain without churn. Concurrency stays at the
+	// value measured safe (~8 gives ~400-500 q/s at 0% loss); the fix is the
+	// queue, not more parallelism. Only a sustained overload past the queue depth
+	// tail-drops, which is a real congestion signal the inner TCP backs off on.
+	dnsSendWorkers          = 8   // senders draining the queue
+	dnsSendQueue            = 256 // burst absorption before tail-drop
+	dnsMaxConcurrentQueries = 8   // global in-flight DNS query cap; matches udpPoolPerServer
 )
 
 var b32enc = base32.StdEncoding.WithPadding(base32.NoPadding)
-
-// dnsWindow is the sliding window over in-flight queries.
-//
-// Additive increase on a completed round trip, multiplicative decrease on a
-// failed one, bounded by dnsWindowInit and dnsWindowMax -- which is what this
-// file's header always claimed and what nothing implemented.
-type dnsWindow struct {
-	inFlight atomic.Int64
-	limit    atomic.Int64
-	// Increases are counted rather than applied one for one, so the window
-	// grows about one slot per full window of successes instead of once per
-	// packet. Growing per packet would reach the ceiling in a few round trips
-	// and turn the decrease into the only thing doing any work.
-	credit atomic.Int64
-}
-
-func (w *dnsWindow) acquire() bool {
-	if w.inFlight.Add(1) > w.limit.Load() {
-		w.inFlight.Add(-1)
-		return false
-	}
-	return true
-}
-
-func (w *dnsWindow) release() { w.inFlight.Add(-1) }
-
-func (w *dnsWindow) increase() {
-	limit := w.limit.Load()
-	if limit >= int64(dnsWindowMax) {
-		return
-	}
-	if w.credit.Add(1) >= limit {
-		w.credit.Store(0)
-		w.limit.CompareAndSwap(limit, limit+1)
-	}
-}
-
-func (w *dnsWindow) decrease() {
-	w.credit.Store(0)
-	for {
-		limit := w.limit.Load()
-		next := limit / 2
-		if next < int64(dnsWindowInit) {
-			next = int64(dnsWindowInit)
-		}
-		if next == limit || w.limit.CompareAndSwap(limit, next) {
-			return
-		}
-	}
-}
 
 // dnsClientSession holds the state for an active DNS tunnel session.
 type dnsClientSession struct {
@@ -117,7 +84,6 @@ type dnsClientSession struct {
 	aeadTx     cipher.AEAD // client → server
 	aeadRx     cipher.AEAD // server → client
 	txSeq      uint32      // next outbound sequence number (atomic add)
-	windowSize int         // current sliding window size (AIMD)
 	dnsServer  string      // resolved DNS server IP
 	// tunnelDomain is the authoritative zone every query name is suffixed with.
 	// Carried per session because it is server-supplied and can change between
@@ -304,7 +270,6 @@ func dnsHandshake(cfg Config, dnsServer string) (*dnsClientSession, error) {
 		sessionKey:   sessionKey,
 		keyC2S:       keyC2S,
 		keyS2C:       keyS2C,
-		windowSize:   dnsWindowInit,
 		dnsServer:    dnsServer,
 		tunnelDomain: domain,
 	}, nil
@@ -338,19 +303,33 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 
 	// WireGuard → DNS.
 	//
-	// Sends are gated by a semaphore sized to the sliding window. Previously a
-	// goroutine was spawned per packet, each holding a pooled socket attempt, a
-	// read buffer and an encoded copy of the packet for up to a 3s round trip,
-	// with nothing capping how many could exist at once.
-	// A resizable window, not a fixed-size semaphore.
-	//
-	// The semaphore was created once at s.windowSize and never changed, and
-	// nothing anywhere adjusted windowSize -- so the "sliding window, AIMD,
-	// max 64" in this file's header was a fixed 8, and dnsWindowMax was dead.
-	// Measured on a live tunnel, that dropped 2450 of 3139 packets for a full
-	// window: the transport could not carry a default route.
-	win := &dnsWindow{}
-	win.limit.Store(int64(dnsWindowInit))
+	// A bounded queue absorbs WireGuard's bursts, and a fixed pool of senders
+	// drains it. Bursts are delayed, not dropped -- which is the whole point: the
+	// previous code dropped whenever its window was full, and every drop made
+	// WireGuard retransmit, piling more onto a full window until the transport
+	// carried nothing (measured: 2450 of 3139 packets dropped). Concurrency is
+	// capped globally in dnsQuery (dnsMaxConcurrentQueries), so the number of
+	// senders here only needs to be enough to keep that many queries busy.
+	sendQ := make(chan []byte, dnsSendQueue)
+	for i := 0; i < dnsSendWorkers; i++ {
+		go func() {
+			for {
+				select {
+				case <-done:
+					return
+				case p := <-sendQ:
+					data, err := s.sendPacket(p)
+					if err != nil || len(data) == 0 {
+						continue
+					}
+					select {
+					case inboundCh <- data:
+					case <-done:
+					}
+				}
+			}
+		}()
+	}
 
 	go func() {
 		defer close(done)
@@ -366,28 +345,14 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 			peerOnce.Do(func() { peerCh <- peer })
 			pkt := make([]byte, n)
 			copy(pkt, buf[:n])
-			if !win.acquire() {
-				// Window full: drop rather than queue without bound.
-				continue
+			select {
+			case sendQ <- pkt:
+			default:
+				// Queue full: a sustained overload past what the carrier can
+				// drain. Tail-drop one packet, which the inner TCP reads as
+				// congestion and backs off on -- unlike the old per-packet drop,
+				// this only happens after 256 packets are already buffered.
 			}
-			go func(p []byte) {
-				defer win.release()
-				data, err := s.sendPacket(p)
-				if err != nil {
-					// Multiplicative decrease. A failed round trip is the only
-					// congestion signal this transport gets.
-					win.decrease()
-					return
-				}
-				win.increase()
-				if len(data) == 0 {
-					return
-				}
-				select {
-				case inboundCh <- data:
-				case <-done:
-				}
-			}(pkt)
 		}
 	}()
 
@@ -547,23 +512,19 @@ func (s *dnsClientSession) sendPacket(pkt []byte) ([]byte, error) {
 		names[i] = name
 	}
 
-	// Send a packet's fragments concurrently, bounded, rather than one round trip
-	// at a time. Sequential sending made a 12-fragment packet take ~12 round trips
-	// (~1.66s measured), so the machine's traffic rate swamped the carrier and
-	// packets drowned. The server reassembles by fragment index and already
-	// tolerates out-of-order arrival; the outer sliding window bounds how many
-	// packets are in flight, and fragConcurrency bounds fragments within a packet.
-	const fragConcurrency = 8
+	// Send a packet's fragments concurrently rather than one round trip at a time.
+	// Sequential sending made a 12-fragment packet take ~12 round trips (~1.66s
+	// measured). The server reassembles by fragment index and tolerates
+	// out-of-order arrival. No per-packet bound is needed here: every dnsQuery
+	// draws from the global dnsQuerySem, so total in-flight queries across all
+	// packets and fragments stay capped there.
 	type fragResult struct {
 		resp []byte
 		err  error
 	}
 	results := make(chan fragResult, len(names))
-	sem := make(chan struct{}, fragConcurrency)
 	for _, name := range names {
-		sem <- struct{}{}
 		go func(name string) {
-			defer func() { <-sem }()
 			resp, err := dnsQuery(s.dnsServer, name, time.Now().Add(3*time.Second))
 			results <- fragResult{resp, err}
 		}(name)
@@ -722,8 +683,19 @@ func chunkLabels(s string, maxLen int) []string {
 	return labels
 }
 
+// dnsQuerySem caps the number of DNS queries in flight at once across the whole
+// session -- fragment sends, polls, keepalives, the handshake. It is matched to
+// udpPoolPerServer so concurrent queries always find a pooled socket instead of
+// dialing and discarding one (churn), and held at a level the carrier serves at
+// 0% loss. This one bound replaces the old per-packet window and per-packet
+// fragment semaphore.
+var dnsQuerySem = make(chan struct{}, dnsMaxConcurrentQueries)
+
 // dnsQuery sends a DNS TXT query for name to server:53 and returns the raw response packet.
 func dnsQuery(server, name string, deadline time.Time) ([]byte, error) {
+	dnsQuerySem <- struct{}{}
+	defer func() { <-dnsQuerySem }()
+
 	c, err := dnsConnPool.get(server)
 	if err != nil {
 		return nil, fmt.Errorf("dns query: dial: %w", err)
