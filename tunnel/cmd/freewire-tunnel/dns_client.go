@@ -60,13 +60,23 @@ const (
 	//
 	// Instead: a bounded queue absorbs bursts (a burst is delayed, not dropped,
 	// which is what stops the retransmit storm), a fixed pool of senders drains
-	// it, and a single global semaphore caps concurrent DNS queries to what the
-	// carrier and the socket pool sustain without churn. Concurrency stays at the
-	// value measured safe (~8 gives ~400-500 q/s at 0% loss); the fix is the
-	// queue, not more parallelism. Only a sustained overload past the queue depth
-	// tail-drops, which is a real congestion signal the inner TCP backs off on.
-	dnsSendQueue = 256 // burst absorption before tail-drop
+	// it, and per-direction semaphores cap concurrent queries (see the vars).
+	//
+	// Queue SIZE is a latency budget, not just burst absorption. The queue holds
+	// ~depth/carrier-rate seconds of packets before it drops; at the recursor
+	// carrier's ~50 pkt/s a depth of 256 is ~5s of buffering (bufferbloat), which
+	// balloons the inner RTT past a TCP handshake's patience even though almost
+	// nothing is lost. A shallow queue signals congestion early and keeps the
+	// buffered RTT low, so TCP establishes and then paces itself -- the AQM
+	// principle. Kept a var so it can be tuned per carrier speed.
 )
+
+// dnsSendQueue bounds buffered upstream packets. Default 256, the depth proven on
+// the fast server-direct path (~71 KB/s). A shallow queue was tested as AQM for
+// the slow recursor path and did NOT help: through public recursors the upstream
+// is capped near ~50 pkt/s by their forward-rate limit, so the queue overflows at
+// any size and the depth is not the lever. Env-tunable for further sweeps.
+var dnsSendQueue = envInt("FREEWIRE_DNS_QUEUE", 256)
 
 // Send-path concurrency, socket pool, and worker count. Vars, not consts, so a
 // test run can sweep them via env (FREEWIRE_DNS_CONCURRENCY / _POOL / _WORKERS)

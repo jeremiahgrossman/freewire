@@ -18,16 +18,30 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 - **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
 - **In progress:** nothing
-- **Next action (DNS routed — the field lever):** routed WG-over-DNS now WORKS
-  when the carrier reaches the authoritative server directly (2 of 3 curl samples
-  tunnelled, downstream 13–71 KB/s, ~372 q/s — see "DNS routed: SOLVED
-  server-direct" below). Through a public recursor it does NOT, because the
-  recursor rate-limits forwards of unique names to our auth server (~14/s on
-  1.1.1.1). On a real portal we're forced through the portal resolver, so the
-  next build is **spreading carrier queries across several recursors at once**
-  (1.1.1.1 + 8.8.8.8 + 9.9.9.9 …), each staying under its own per-auth-server
-  limit while the auth server sees the sum. Then field-test.
+- **Next action:** field-test the server-direct DNS win when ready (user not ready
+  yet). The DNS transport is now fully characterized (see "DNS routed" below) —
+  server-direct carries HTTPS (~71 KB/s); the public-recursor path is a
+  minimal/last-resort carrier only. No further recursor-throughput work is
+  worthwhile without a field portal to test against.
 - **Blocked on:** a Developer ID certificate, for `FreewireHelper` and for signed/notarized distribution.
+
+### DNS routed: characterized (2026-08-23) — two carriers, one fast, one minimal
+
+| portal allows | carrier | result |
+|---|---|---|
+| outbound port 53 | server-direct (`dns_resolver` = server:53) | **HTTPS works, ~71 KB/s, ~372 q/s, 2/3 curl tunnelled** |
+| only its resolver | recursor / multi-recursor spread | packets flow (ICMP 0% loss spread) but **HTTPS won't establish** |
+
+The public-recursor ceiling is fundamental, not a bug: a recursor rate-limits
+forwarding UNIQUE (uncacheable) names to our auth server to ~14/s, so upstream
+caps near ~50 pkt/s even spread across four recursors (`Config.DNSResolvers`
+round-robins the carrier; every resolver is pinned outside the tunnel). Under
+whole-machine load the send queue then overflows and a TCP handshake can't
+survive. **Admission-control via queue depth was tested and does NOT help** — a
+shallow queue (AQM) drops sooner but the cap is the carrier rate, not bufferbloat;
+`FREEWIRE_DNS_QUEUE` left at 256 (proven for server-direct). Reaching HTTPS-viable
+throughput would need ~25+ recursors, impractical. So: **server-direct is the real
+DNS path; the recursor path is a minimal fallback** (tiny/interactive packets).
 
 ### DNS routed: SOLVED server-direct (2026-08-23)
 
