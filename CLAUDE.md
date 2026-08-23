@@ -18,24 +18,24 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 - **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
 - **In progress:** nothing
-- **Next desk work (two tasks, both from the 2026-08-23 field test):**
-  1. **Adaptive carrier-rate backpressure on the DNS send path.** NOT a fixed cap
-     — measure whatever rate the current path sustains at ~0 loss and pace WG's
-     offered load to it (AIMD: ramp while loss stays low, back off on loss). The
-     café throttled DNS to ~72 Kbps and our no-backpressure send path overflowed
-     and tore down; the value must be discovered per-path, not hardcoded.
-     Reproduce the café at the desk with an artificial carrier rate-cap knob, then
-     iterate against it with the harness (no portal needed).
-  2. **Fastest-transport selection ("check all, use best").** The establish chain
-     is ordered http_connect→tls443→dns→icmp→wireguard and stops at the first
-     success, so on an open network it settles on tls443 and never tries the
-     faster wireguard-direct. Change it to probe transports and pick the fastest
-     available (speed order: wireguard, http_connect, tls443, dns, icmp — or probe
-     all and choose). `testing/probe-transports.sh` already lists what a network
-     allows (non-routed, --select-only per transport); it's the basis for this and
-     for a per-session probe on any captive wifi. Verified 2026-08-23 on the
-     hotspot: wireguard/tls443/dns/icmp_udp all OK (WG-direct fastest ~327ms);
-     http_connect needs a gateway proxy.
+- **Done since the 2026-08-23 field test:**
+  1. **Fastest-transport selection** — the chain now tries carriers in speed order
+     (wireguard-direct first) and picks the fastest a network allows, instead of
+     stopping at the first in a fixed order. `testing/probe-transports.sh` lists
+     what any network allows (non-routed, --select-only per transport).
+  2. **Adaptive carrier-rate pacing (Stage 1 of backpressure)** — per-direction
+     AIMD limiters (`dns_ratelimit.go`) discover the path's sustainable rate at
+     ~0 loss and pace to it, no hardcoded cap. Desk repro of a throttled portal
+     exists (`FREEWIRE_DNS_CARRIER_CAP`); the limiter converges to the cap at 0%
+     loss.
+- **Deferred (deliberate, see `DECISIONS.md` DNS-CARRIER-BACKPRESSURE):** Stage 2,
+  true backpressure. Stage 1 keeps the carrier clean but a throttled pipe's queue
+  still overflows and starves the active flow. The fix is a custom wireguard-go
+  `Bind` that blocks WG's send — a core refactor. Deferred because fastest-
+  transport selection already routes around throttling wherever a faster carrier
+  exists, so the unfixed case (throttles DNS AND blocks every faster carrier) is
+  rare and field-unconfirmed. When picked up: DNS-only device + custom bind,
+  leave the fast paths untouched. Verifiable at the desk via the repro.
 - **Blocked on:** a Developer ID certificate, for `FreewireHelper` and for signed/notarized distribution.
 
 ### DNS routed: characterized (2026-08-23) — two carriers, one fast, one minimal

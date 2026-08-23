@@ -301,3 +301,71 @@ little and costs something the rest of the product is designed not to hold.
 either side. The preferences toggle described in §6.9 is not present and should
 not be added while this stands, since a toggle for a feature that does nothing
 is its own kind of false claim.
+
+---
+
+## DNS-CARRIER-BACKPRESSURE (Stage 2)
+
+**Deferred 2026-08-23 until the field shows the worst-case portal is common
+enough to justify a core refactor.**
+
+### What was decided
+
+The DNS send path gets adaptive rate pacing (Stage 1, shipped) but NOT true
+backpressure (Stage 2). When a portal throttles the DNS carrier below what the
+machine offers, the bounded queue still tail-drops the excess and can starve the
+active flow. That gap is recorded rather than closed.
+
+### What was shipped instead
+
+- **Stage 1 — adaptive carrier-rate pacing** (`dns_ratelimit.go`): per-direction
+  AIMD limiters discover the path's sustainable rate at ~0 loss and pace to it,
+  so the client no longer blasts a throttled portal into loss. Verified against a
+  desk repro of the café throttle (`FREEWIRE_DNS_CARRIER_CAP`): the limiter
+  converges to the cap at 0% carrier loss.
+- **Fastest-transport selection** (`transport.go`): the chain now picks the
+  fastest carrier a network allows (WireGuard-direct first), so a throttled DNS
+  tunnel is only ever reached when every faster carrier is also blocked.
+
+### What it costs
+
+On a portal that blocks HTTP CONNECT, TLS/443, WireGuard-direct AND ICMP, and
+also throttles DNS to the server, the tunnel comes up but the active connection
+is starved by queue overflow — effectively unusable, as seen at the café. Stage 2
+would make that case a slow-but-usable link.
+
+### Why defer
+
+The payoff is narrow and the risk is high and asymmetric:
+
+- **Narrow:** fastest-transport selection already routes around throttling wherever
+  a faster carrier exists. The unfixed case is the intersection "throttles DNS AND
+  blocks every faster carrier", seen at exactly one café so far — frequency in the
+  field is unknown.
+- **Marginal even when it hits:** perfect backpressure turns that rare portal from
+  unusable into a barely-usable ~72 Kbps.
+- **High risk:** WireGuard uses one shared `conn.Bind` (the default UDP bind),
+  created once before the carrier is chosen. Real backpressure means a custom Bind
+  that can block WG's `Send`; a clean version rewrites the send/receive path for
+  ALL transports, including the proven-working fast ones. Core changes of this
+  shape are what broke wifi earlier in this project.
+
+Trading a proven fast path against a marginal, rare, field-unconfirmed fallback
+improvement is the wrong risk/reward until the field says otherwise.
+
+### The fix when it is picked up
+
+Give ONLY the DNS transport its own WireGuard device with a custom `conn.Bind`
+whose `Send` blocks when the adaptive limiter is saturated — so WireGuard stops
+reading the tun, the tun buffer fills, and the apps' own TCP paces itself to the
+carrier instead of the queue tail-dropping. Keep the fast transports on the
+existing shared device + default bind, untouched, so they cannot regress. Do NOT
+do the full single-bind-for-all-transports refactor. The desk repro
+(`FREEWIRE_DNS_CARRIER_CAP`, `testing/routed-test.sh`) already reproduces the
+throttle, so the work is verifiable without a field trip.
+
+### What would reopen it
+
+Field evidence that portals which throttle DNS while blocking every faster
+carrier are common enough to matter — i.e., repeated real-world sessions where
+fastest-transport selection lands on DNS and the portal throttles it.
