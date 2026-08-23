@@ -528,7 +528,9 @@ func (s *dnsClientSession) sendPacket(pkt []byte) ([]byte, error) {
 
 	seqB32 := b32enc.EncodeToString(uint32BE(seq))
 
-	var last []byte
+	// Build every fragment's query name up front, so a name-too-long error fails
+	// before any query is sent.
+	names := make([]string, len(chunks))
 	for i, chunk := range chunks {
 		// frag carries index and total so the server knows when it is complete.
 		fragB32 := b32enc.EncodeToString([]byte{byte(i), byte(len(chunks))})
@@ -542,21 +544,55 @@ func (s *dnsClientSession) sendPacket(pkt []byte) ([]byte, error) {
 			return nil, fmt.Errorf("send packet: fragment %d/%d builds a %d-byte name, over the %d limit",
 				i+1, len(chunks), l, dnsMaxName)
 		}
+		names[i] = name
+	}
 
-		deadline := time.Now().Add(3 * time.Second)
-		resp, err := dnsQuery(s.dnsServer, name, deadline)
-		if err != nil {
-			return nil, fmt.Errorf("send packet: fragment %d/%d: %w", i+1, len(chunks), err)
+	// Send a packet's fragments concurrently, bounded, rather than one round trip
+	// at a time. Sequential sending made a 12-fragment packet take ~12 round trips
+	// (~1.66s measured), so the machine's traffic rate swamped the carrier and
+	// packets drowned. The server reassembles by fragment index and already
+	// tolerates out-of-order arrival; the outer sliding window bounds how many
+	// packets are in flight, and fragConcurrency bounds fragments within a packet.
+	const fragConcurrency = 8
+	type fragResult struct {
+		resp []byte
+		err  error
+	}
+	results := make(chan fragResult, len(names))
+	sem := make(chan struct{}, fragConcurrency)
+	for _, name := range names {
+		sem <- struct{}{}
+		go func(name string) {
+			defer func() { <-sem }()
+			resp, err := dnsQuery(s.dnsServer, name, time.Now().Add(3*time.Second))
+			results <- fragResult{resp, err}
+		}(name)
+	}
+
+	// A failed fragment means the packet never completed on the server (a lost
+	// fragment loses the whole packet), so report it -- the window backs off and
+	// the inner TCP retransmits, matching the old sequential behavior. The
+	// piggybacked downstream data rides on whichever fragment completed the packet
+	// server-side, which under concurrent arrival is not necessarily the last
+	// index, so scan every response; only the completing one carries data.
+	var firstErr error
+	var piggyback []byte
+	for range names {
+		r := <-results
+		if r.err != nil {
+			if firstErr == nil {
+				firstErr = r.err
+			}
+			continue
 		}
-		// Only the response to the final fragment can carry piggybacked data;
-		// the server has nothing to answer with until the packet is whole.
-		last = resp
+		if data, err := s.decodePiggyback(r.resp); err == nil && len(data) > 0 {
+			piggyback = data
+		}
 	}
-
-	if last == nil {
-		return nil, nil
+	if firstErr != nil {
+		return nil, fmt.Errorf("send packet seq %d (%d frags): %w", seq, len(names), firstErr)
 	}
-	return s.decodePiggyback(last)
+	return piggyback, nil
 }
 
 // dnsFragCipherBytes is how many ciphertext bytes fit in one query, worked out
