@@ -79,7 +79,10 @@ recover). **FIX (next, careful): redesign the DNS send path's congestion control
 — size the in-flight window to the carrier's proven capacity and/or add a real
 rate limiter, and damp WireGuard's retransmit storm; naively raising the window
 may worsen the collapse, so this needs RTT/throughput-based sizing and testing,
-not a constant bump. Everything else in the chain is proven working. Older notes
+not a constant bump. Note the UDP socket pool also caps reusable sockets at 8
+(`udpPoolPerServer`), matched to the window of 8 — raising the window alone would
+churn sockets (dial+discard) and likely worsen it, so window, pool, and the AIMD
+must move together. Everything else in the chain is proven working. Older notes
 below.
 
 **WG verbose over forced DNS (2026-08-22, config7 locked): the handshake
