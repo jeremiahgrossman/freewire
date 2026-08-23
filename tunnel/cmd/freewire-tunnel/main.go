@@ -182,7 +182,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	logger := device.NewLogger(device.LogLevelError, "wg: ")
+	// Verbose WireGuard logging in the skipRouting debug mode, so a diagnostic run
+	// shows whether the WG handshake actually completes over the chosen transport
+	// (e.g. the DNS carrier) -- the routed egress probe cannot distinguish "handshake
+	// never completed" from "handshake fine but data did not flow". Error-level
+	// otherwise, to keep normal runs quiet.
+	wgLevel := device.LogLevelError
+	if skipEgressCheck() {
+		wgLevel = device.LogLevelVerbose
+	}
+	logger := device.NewLogger(wgLevel, "wg: ")
 	wgDev := device.NewDevice(tunDev, conn.NewDefaultBind(), logger)
 
 	keepalive := cfg.Keepalive
