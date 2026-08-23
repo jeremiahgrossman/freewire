@@ -53,6 +53,21 @@ and the café diagnostic's 3s curl timeout mis-read a slow tunnel as dead (now
 the probes send garbage WG drops, so a real WG handshake over DNS is still
 unexercised at the desk. Needs live server `tcpdump`.
 
+**Live `tcpdump` result (2026-08-22, home wifi):** during a routed config7 DNS
+connect, the server's WG tun (`utun`) saw ZERO outbound client packets (only 7
+stray inbound RSTs from prior NAT state); ens5 egress to 1.1.1.1 was 0 packets.
+The client log: `egress did not sustain: best streak 0/2 to 1.1.1.1:53: context
+deadline exceeded` — the TLS-handshake probe completed none. So **WireGuard-over-
+DNS carries no routed traffic**: the carrier works (`--dns-datatest`), the server
+forwards (TLS/443 gives real egress), but nothing the app sends through WireGuard
+reaches the server's WG tun. The break is the WG↔DNS integration (client bridge
+`lp.ReadFrom → sendPacket`, or the WG handshake not completing over the carrier).
+Note transport *selection* only checks the carrier opened, not that WG works over
+it — so DNS is selected and then fails the real-traffic probe. NEXT: run
+wireguard-go at LogLevelVerbose on both ends during a routed DNS connect, and
+capture the server's WG UDP port (51820) + client's local proxy, to see whether
+the WG handshake completes over the carrier and where the data packets stop.
+
 Diagnostic tools built: `--dns-probe`, `--dns-throughput [--duration]`,
 `--dns-datatest`, `--icmp-probe`, `--select-only`, `testing/cafe-diagnostic.sh`.
 - **Two reliability bugs fixed and verified:** (1) the server's NAT MASQUERADE
