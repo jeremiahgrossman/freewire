@@ -43,6 +43,37 @@ shallow queue (AQM) drops sooner but the cap is the carrier rate, not bufferbloa
 throughput would need ~25+ recursors, impractical. So: **server-direct is the real
 DNS path; the recursor path is a minimal fallback** (tiny/interactive packets).
 
+### FIELD TEST (2026-08-23, café captive portal) — premise holds, next work is backpressure
+
+First real-portal run. What the café did, from the tunnel's own logs:
+
+- **Blocks HTTPS to our server:** `tls443: dial 52.203.246.145:443: connection
+  refused` (active reset, not a timeout) → chain fell to DNS. HTTP CONNECT n/a.
+- **Allows outbound 53 to our server:** the DNS transport selected **server-direct**
+  on its own (the new default strategy), route-check clean.
+- **But rate-limits DNS to our server to ~72 Kbps**, cleanly: a non-routed
+  `--dns-throughput` to `52.203.246.145:53` held 72 Kbps avg (48–88), **0% loss**
+  over 15s at concurrency 8. At the client's normal concurrency 32 it burst to
+  71 KB/s then the café throttled it → degrade → the egress self-check tore it
+  down.
+- **Lowering client concurrency to 8 did NOT rescue it:** carrier went 0% loss
+  (`err 0/s`) but the send queue still overflowed (`tail-drop 100+/s, queue
+  256/256`) — the whole machine (background + WG retransmits) offers far more than
+  a ~72 Kbps pipe, and with no backpressure across the UDP bridge the excess is
+  tail-dropped indiscriminately, including the egress probe's packets, so it tears
+  down. Concurrency is not the lever.
+
+**Verdict:** the architecture's premise holds — a real captive portal blocks 443
+and lets server-direct DNS through, and the fast carrier is reachable. The gap is
+that a portal-throttled carrier (~72 Kbps here) can't be made usable by the
+current send path, which has no way to pace WireGuard's offered load down to the
+measured carrier rate. **The next real work is carrier-rate congestion control /
+admission control on the DNS send path** (pace/rate-limit WG ingress to the
+carrier's proven sustainable rate so the queue stops overflowing), NOT more
+concurrency or queue tuning — both were tried in the field and neither is the
+lever. This is a substantial change, deferred to a focused session. Where a
+portal does NOT throttle (desk server-direct: 71 KB/s), it already works.
+
 ### DNS routed: SOLVED server-direct (2026-08-23)
 
 The months-long "routed DNS carries no traffic" failure is root-caused and fixed
