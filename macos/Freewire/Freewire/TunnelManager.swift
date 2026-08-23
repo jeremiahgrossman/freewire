@@ -287,7 +287,7 @@ final class TunnelManager: ObservableObject {
                 tlsPort:         server.tlsEndpointPort,
                 dnsTunnelPort:   server.dnsTunnelPort,
                 icmpUDPPort:     server.icmpUDPPort,
-                preferredTransport: nil,
+                preferredTransport: Preferences.shared.forceTransport,
                 dnsResolver: Preferences.shared.dnsResolverOverride,
                 dnsTunnelDomain: server.dnsTunnelDomain
             )
@@ -442,7 +442,7 @@ final class TunnelManager: ObservableObject {
                     dnsTunnelPort:   server.dnsTunnelPort,
                     icmpUDPPort:     server.icmpUDPPort,
                     // Try what was working before walking the whole chain again.
-                    preferredTransport: lastGoodTransport?.rawValue,
+                    preferredTransport: Preferences.shared.forceTransport ?? lastGoodTransport?.rawValue,
                     dnsResolver: Preferences.shared.dnsResolverOverride,
                     dnsTunnelDomain: server.dnsTunnelDomain
                 )
@@ -476,6 +476,10 @@ final class TunnelManager: ObservableObject {
 
     private func startUpgradeManager(serverHost: String, transport: TunnelTransport) {
         guard transport != .wireguard else { return }
+        // When a transport is pinned for testing, don't let the upgrade manager
+        // switch away from it -- otherwise a forced DNS field test would drift to
+        // TLS/443 the moment a probe found it reachable.
+        if Preferences.shared.forceTransport != nil { return }
         let mgr = PathUpgradeManager(serverHost: serverHost, currentTransport: transport)
         mgr.onUpgradeAvailable = { [weak self] faster in
             guard let self else { return }
@@ -763,7 +767,7 @@ final class TunnelManager: ObservableObject {
             tlsPort:         cached.tlsPort,
             dnsTunnelPort:   cached.dnsTunnelPort,
             icmpUDPPort:     cached.icmpUDPPort,
-            preferredTransport: nil,
+            preferredTransport: Preferences.shared.forceTransport,
             dnsResolver:     Preferences.shared.dnsResolverOverride,
             dnsTunnelDomain: cached.dnsTunnelDomain
         )

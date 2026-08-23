@@ -8,6 +8,7 @@ final class Preferences {
     private enum Key {
         static let killSwitch = "killSwitch"
         static let dnsResolverOverride = "dnsResolverOverride"
+        static let forceTransport = "forceTransport"
         static let skipRouting = "skipRouting"
         static let pinnedServerKey = "pinnedServerKey"
         static let autoConnect = "autoConnect"
@@ -24,6 +25,22 @@ final class Preferences {
     /// `defaults write com.freewire.vpn.Freewire dnsResolverOverride <ip>`.
     var dnsResolverOverride: String? {
         let v = UserDefaults.standard.string(forKey: Key.dnsResolverOverride)
+        return (v?.isEmpty ?? true) ? nil : v
+    }
+
+    /// Pins the fallback chain to one transport for a connect, via the tunnel's
+    /// preferred_transport (tried first; on success the others are skipped).
+    ///
+    /// Testing aid, no UI. A field test's main question -- does this portal let
+    /// Freewire online -- is answered whichever transport wins, but validating a
+    /// specific path (e.g. the DNS server-direct carrier) needs that path to be
+    /// the one selected, and a portal that allows HTTPS would otherwise settle on
+    /// TLS/443 and never exercise DNS. Set with
+    /// `defaults write com.freewire.vpn.Freewire forceTransport dns` (values:
+    /// wireguard, http_connect, tls443, dns, icmp_udp); clear with `delete` to
+    /// restore normal selection.
+    var forceTransport: String? {
+        let v = UserDefaults.standard.string(forKey: Key.forceTransport)
         return (v?.isEmpty ?? true) ? nil : v
     }
 
