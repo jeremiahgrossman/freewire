@@ -65,6 +65,23 @@ reaches the server's WG tun. The break is the WG↔DNS integration (client bridg
 Note transport *selection* only checks the carrier opened, not that WG works over
 it — so DNS is selected and then fails the real-traffic probe.
 
+**ROOT CAUSE FOUND (2026-08-22): send-window congestion collapse.** A client-side
+run-loop trace (routed, forced DNS, machine quiet) shows: WG handshake completes,
+then wireguard-go hands data packets to the DNS sender (`wg->dns: read 96/112
+bytes`), but the send window (`dnsWindowInit=8`, grows only on success) fills
+instantly and drops the vast majority (`WINDOW FULL, dropped`); only a trickle
+gets through (`sent, downstream=80`), and WireGuard retransmits the dropped ones,
+flooding the window further. The handshake survives only because it is the first
+packet, before the window fills. The carrier itself has capacity (400–500 q/s in
+`--dns-throughput`) and fragment sends are now pipelined, so the bottleneck is the
+packet-rate window + its AIMD (drops don't grow it, so under a burst it can't
+recover). **FIX (next, careful): redesign the DNS send path's congestion control**
+— size the in-flight window to the carrier's proven capacity and/or add a real
+rate limiter, and damp WireGuard's retransmit storm; naively raising the window
+may worsen the collapse, so this needs RTT/throughput-based sizing and testing,
+not a constant bump. Everything else in the chain is proven working. Older notes
+below.
+
 **WG verbose over forced DNS (2026-08-22, config7 locked): the handshake
 COMPLETES.** `Sending handshake initiation` → `Received handshake response` in
 ~1s over the DNS carrier (verified with `--skip-egress-check` now routing WG's
