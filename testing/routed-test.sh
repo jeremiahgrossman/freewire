@@ -85,6 +85,15 @@ fi
   netstat -rn -f inet | grep -E "1\.1\.1\.1|192\.168\.0\.1" | sed 's/^/  resolver? /'
 } >> "$LOG"
 
+# --- minimal round-trip: one ICMP echo each, no handshake. 8.8.8.8 is not pinned
+# so it routes through the tunnel. If echoes return, the packet path works both
+# ways and the curl failure is handshake/MTU-specific; if not, packet delivery
+# itself is broken. This isolates "packets don't flow" from "TCP never opens". ---
+{
+  echo "---- ICMP round-trip through the tunnel (ping 8.8.8.8, no handshake) ----"
+  ping -c 4 -t 8 8.8.8.8 2>&1 | tail -5 | sed 's/^/  /'
+} >> "$LOG"
+
 # --- sample egress through the live routes ---
 {
   echo "---- egress samples (want: egress == $SERVER == tunnelled) ----"

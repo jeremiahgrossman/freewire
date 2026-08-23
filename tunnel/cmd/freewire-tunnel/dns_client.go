@@ -76,15 +76,18 @@ const (
 // query past the pool churns a dial, and workers must be at least concurrency or
 // the query slots sit idle.
 var (
-	dnsMaxConcurrentQueries = envInt("FREEWIRE_DNS_CONCURRENCY", 32)
-	udpPoolPerServer        = envInt("FREEWIRE_DNS_POOL", dnsMaxConcurrentQueries)
-	dnsSendWorkers          = envInt("FREEWIRE_DNS_WORKERS", dnsMaxConcurrentQueries)
-	// Pollers keep return-path queries in flight. Downstream on a transfer is
-	// (responses/s x packet), and a response only comes back on a query, so a
-	// single serial poll capped downstream near one packet per poll interval. A
-	// pool that re-polls immediately whenever it got data keeps the carrier full
-	// of return queries (still bounded globally by dnsQuerySem).
-	dnsPollWorkers = envInt("FREEWIRE_DNS_POLLERS", 24)
+	// Upstream (send) and downstream (poll) get SEPARATE concurrency budgets, not
+	// one shared pool. Sharing let the pollers -- which re-poll continuously -- hog
+	// the slots and starve the send workers, so the send queue overflowed and
+	// tail-dropped ~75% of upstream (measured: a routed ping saw 75% loss with the
+	// send queue pinned at 256/256). Upstream loss breaks TCP handshakes outright,
+	// so sends get the larger budget; downstream still gets enough to carry a
+	// handshake's return path. Total = send + poll, which the socket pool matches.
+	dnsSendConcurrency = envInt("FREEWIRE_DNS_SEND_CONCURRENCY", 24)
+	dnsPollConcurrency = envInt("FREEWIRE_DNS_POLL_CONCURRENCY", 8)
+	udpPoolPerServer   = envInt("FREEWIRE_DNS_POOL", dnsSendConcurrency+dnsPollConcurrency)
+	dnsSendWorkers     = envInt("FREEWIRE_DNS_WORKERS", dnsSendConcurrency)
+	dnsPollWorkers     = envInt("FREEWIRE_DNS_POLLERS", dnsPollConcurrency)
 )
 
 // envInt reads a positive integer from env, or returns def.
@@ -226,7 +229,7 @@ func dnsHandshake(cfg Config, dnsServer string) (*dnsClientSession, error) {
 	clientPubB32 := b32enc.EncodeToString(clientPub)
 	helloName := "h.1." + clientPubB32 + "." + domain + "."
 
-	resp, err := dnsQuery(dnsServer, helloName, deadline)
+	resp, err := dnsQuery(dnsServer, helloName, deadline, dnsSendSem)
 	if err != nil {
 		return nil, fmt.Errorf("client hello: %w", err)
 	}
@@ -279,7 +282,7 @@ func dnsHandshake(cfg Config, dnsServer string) (*dnsClientSession, error) {
 
 	// Step 3: ClientConfirm
 	confirmName := "h.3." + macB32 + "." + tokenB32 + "." + domain + "."
-	resp2, err := dnsQuery(dnsServer, confirmName, deadline)
+	resp2, err := dnsQuery(dnsServer, confirmName, deadline, dnsSendSem)
 	if err != nil {
 		return nil, fmt.Errorf("client confirm: %w", err)
 	}
@@ -507,7 +510,7 @@ func (s *dnsClientSession) poll() ([][]byte, error) {
 	binary.BigEndian.PutUint64(nb[:], s.pollNonce.Add(1))
 	nonce := b32enc.EncodeToString(nb[:])
 	name := "k." + s.tokenB32 + "." + nonce + "." + s.tunnelDomain + "."
-	resp, err := dnsQuery(s.dnsServer, name, time.Now().Add(2*time.Second))
+	resp, err := dnsQuery(s.dnsServer, name, time.Now().Add(2*time.Second), dnsPollSem)
 	if err != nil {
 		return nil, err
 	}
@@ -607,7 +610,7 @@ func (s *dnsClientSession) sendPacket(pkt []byte) ([][]byte, error) {
 	results := make(chan fragResult, len(names))
 	for _, name := range names {
 		go func(name string) {
-			resp, err := dnsQuery(s.dnsServer, name, time.Now().Add(3*time.Second))
+			resp, err := dnsQuery(s.dnsServer, name, time.Now().Add(3*time.Second), dnsSendSem)
 			results <- fragResult{resp, err}
 		}(name)
 	}
@@ -771,7 +774,7 @@ func (s *dnsClientSession) sendKeepalive() error {
 	tokenB32 := b32enc.EncodeToString(s.token)
 	name := "k." + tokenB32 + "." + s.tunnelDomain + "."
 	deadline := time.Now().Add(3 * time.Second)
-	_, err := dnsQuery(s.dnsServer, name, deadline)
+	_, err := dnsQuery(s.dnsServer, name, deadline, dnsSendSem)
 	return err
 }
 
@@ -803,13 +806,14 @@ func chunkLabels(s string, maxLen int) []string {
 	return labels
 }
 
-// dnsQuerySem caps the number of DNS queries in flight at once across the whole
-// session -- fragment sends, polls, keepalives, the handshake. It is matched to
-// udpPoolPerServer so concurrent queries always find a pooled socket instead of
-// dialing and discarding one (churn), and held at a level the carrier serves at
-// 0% loss. This one bound replaces the old per-packet window and per-packet
-// fragment semaphore.
-var dnsQuerySem = make(chan struct{}, dnsMaxConcurrentQueries)
+// Separate in-flight caps for upstream sends and downstream polls, so pollers
+// cannot starve senders (see the concurrency vars above). Their sum is matched
+// to udpPoolPerServer so a query always finds a pooled socket instead of dialing
+// and discarding one. dnsSendSem also covers the handshake and keepalives.
+var (
+	dnsSendSem = make(chan struct{}, dnsSendConcurrency)
+	dnsPollSem = make(chan struct{}, dnsPollConcurrency)
+)
 
 // Query outcome counters, logged periodically by the run loop. They separate a
 // slow carrier (queries timing out -- dnsQueryErr climbing) from a stalled send
@@ -817,10 +821,11 @@ var dnsQuerySem = make(chan struct{}, dnsMaxConcurrentQueries)
 // across every caller.
 var dnsQueryOK, dnsQueryErr atomic.Uint64
 
-// dnsQuery sends a DNS TXT query for name to server:53 and returns the raw response packet.
-func dnsQuery(server, name string, deadline time.Time) (_ []byte, retErr error) {
-	dnsQuerySem <- struct{}{}
-	defer func() { <-dnsQuerySem }()
+// dnsQuery sends a DNS TXT query for name to server:53 and returns the raw
+// response packet. sem is the in-flight budget to draw from (send or poll).
+func dnsQuery(server, name string, deadline time.Time, sem chan struct{}) (_ []byte, retErr error) {
+	sem <- struct{}{}
+	defer func() { <-sem }()
 	defer func() {
 		if retErr != nil {
 			dnsQueryErr.Add(1)
