@@ -27,7 +27,8 @@ import (
 // All payload is Base32-encoded (RFC 4648, no padding, uppercase).
 // Session key: X25519 → HKDF-SHA256(ikm=shared, salt=token, info="freewire-dns-tunnel-v1", len=32)
 // Encryption:  ChaCha20-Poly1305, nonce = seq(4B big-endian) || 0x00000000(8B)
-// Sliding window: initial 8, AIMD, max 64
+// Flow control: bounded send queue + fixed worker pool, with separate send/poll
+//   concurrency budgets (see the vars below). Not the old AIMD sliding window.
 // Domain: *.<tunnel zone>, taken from the server config; see defaultDNSTunnelDomain.
 
 const (
@@ -60,7 +61,8 @@ const (
 	//
 	// Instead: a bounded queue absorbs bursts (a burst is delayed, not dropped,
 	// which is what stops the retransmit storm), a fixed pool of senders drains
-	// it, and per-direction semaphores cap concurrent queries (see the vars).
+	// it, and separate send/poll semaphores cap concurrent queries so continuous
+	// pollers cannot starve the senders (see the vars below).
 	//
 	// Queue SIZE is a latency budget, not just burst absorption. The queue holds
 	// ~depth/carrier-rate seconds of packets before it drops; at the recursor
@@ -122,9 +124,9 @@ type dnsClientSession struct {
 	keyS2C   [32]byte // server → client: client opens with this
 	tokenB32 string   // base32(token), cached: it is constant for the session
 	// AEADs built once at handshake rather than per packet, matching the server.
-	aeadTx     cipher.AEAD // client → server
-	aeadRx     cipher.AEAD // server → client
-	txSeq      uint32      // next outbound sequence number (atomic add)
+	aeadTx cipher.AEAD // client → server
+	aeadRx cipher.AEAD // server → client
+	txSeq  uint32      // next outbound sequence number (atomic add)
 	// dnsServers is the carrier resolver set, fanned across round-robin by rr so
 	// no single recursor's per-auth-server forward limit caps throughput. The
 	// server keys sessions by token, not source, so queries for one session may
@@ -164,23 +166,26 @@ func effectiveDNSTunnelDomain(cfg Config) string {
 // PacketConn that bridges wireguard-go UDP ↔ DNS tunnel.
 // Returns an error if the handshake fails within dnsHandshakeTimeout.
 func runDNSTunnel(cfg Config) (net.PacketConn, error) {
-	// Build the resolver set. A list (DNSResolvers) spreads the carrier across
-	// several recursors so no single one's per-auth-server forward limit caps
-	// throughput; a single DNSResolver still wins for the server-direct/dev path;
-	// otherwise fall back to the system resolver. Production relies on a resolver
-	// forwarding the delegated tunnel zone.
-	resolvers := carrierResolvers(cfg)
-	if len(resolvers) == 0 {
-		r, err := resolveLocalDNSServer()
+	// Try each resolver strategy in order; the first whose handshake completes
+	// wins. The default order prefers the authoritative server directly (the fast
+	// path, ~71 KB/s where the portal allows outbound 53) and falls back to the
+	// system resolver (the minimal path where only the portal's resolver is
+	// allowed). An explicit config collapses to a single strategy.
+	var sess *dnsClientSession
+	var lastErr error
+	for _, st := range dnsResolverStrategies(cfg) {
+		s, err := dnsHandshake(cfg, st.resolvers, st.timeout)
 		if err != nil {
-			return nil, fmt.Errorf("dns tunnel: resolve dns server: %w", err)
+			lastErr = err
+			fmt.Fprintf(os.Stderr, "freewire-tunnel: dns %s handshake failed: %v\n", st.name, err)
+			continue
 		}
-		resolvers = []string{r}
+		fmt.Fprintf(os.Stderr, "freewire-tunnel: dns carrier: %s (%v)\n", st.name, st.resolvers)
+		sess = s
+		break
 	}
-
-	sess, err := dnsHandshake(cfg, resolvers)
-	if err != nil {
-		return nil, fmt.Errorf("dns tunnel: handshake: %w", err)
+	if sess == nil {
+		return nil, fmt.Errorf("dns tunnel: handshake: %w", lastErr)
 	}
 
 	// Local UDP proxy: WireGuard sends packets here, we encode and query DNS.
@@ -191,6 +196,41 @@ func runDNSTunnel(cfg Config) (net.PacketConn, error) {
 
 	go sess.run(lp)
 	return lp, nil
+}
+
+// dnsStrategy is one resolver set to attempt, with a handshake budget.
+type dnsStrategy struct {
+	name      string
+	resolvers []string
+	timeout   time.Duration
+}
+
+// dnsResolverStrategies orders the carrier resolver attempts.
+//
+// An explicit resolver set from config (DNSResolvers/DNSResolver, used by tests,
+// the dev server, and the harness) is honored as the single strategy. Otherwise
+// the default is server-direct first, then the system resolver: server-direct is
+// the only path that carries HTTPS at usable speed, so it is worth a short probe
+// before falling back to the recursor path, which moves packets but cannot carry
+// a TCP handshake (see the DNS characterization in CLAUDE.md). Server-direct gets
+// a shorter budget so a portal that blocks outbound 53 falls back quickly.
+func dnsResolverStrategies(cfg Config) []dnsStrategy {
+	if explicit := carrierResolvers(cfg); len(explicit) > 0 {
+		return []dnsStrategy{{name: "configured", resolvers: explicit, timeout: dnsHandshakeTimeout}}
+	}
+	var out []dnsStrategy
+	if cfg.ServerHost != "" {
+		port := cfg.DNSTunnelPort
+		if port == 0 {
+			port = 53
+		}
+		serverDirect := net.JoinHostPort(cfg.ServerHost, strconv.Itoa(port))
+		out = append(out, dnsStrategy{name: "server-direct", resolvers: []string{serverDirect}, timeout: 2 * time.Second})
+	}
+	if r, err := resolveLocalDNSServer(); err == nil {
+		out = append(out, dnsStrategy{name: "system-resolver", resolvers: []string{r}, timeout: dnsHandshakeTimeout})
+	}
+	return out
 }
 
 // carrierResolvers returns the explicit resolver set from config: the list if
@@ -253,8 +293,8 @@ func (s *dnsClientSession) nextResolver() string {
 // Step 1: ClientHello — query h.1.<b32(clientPub)>.<zone> TXT
 // Step 2: ServerHello — parse TXT: <b32(serverPub)>.<b32(token)>
 // Step 3: ClientConfirm — query h.3.<b32(mac)>.<b32(token)>.<zone> TXT
-func dnsHandshake(cfg Config, dnsServers []string) (*dnsClientSession, error) {
-	deadline := time.Now().Add(dnsHandshakeTimeout)
+func dnsHandshake(cfg Config, dnsServers []string, timeout time.Duration) (*dnsClientSession, error) {
+	deadline := time.Now().Add(timeout)
 	domain := effectiveDNSTunnelDomain(cfg)
 	// The handshake runs over the first resolver; data and polls fan across all.
 	dnsServer := dnsServers[0]

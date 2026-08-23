@@ -101,11 +101,14 @@ if [[ -n "$TRANSPORT" ]]; then
   # the tunnel zone is delegated and the system resolver forwards; nowhere else
   # is, so without this the DNS path cannot be exercised at all.
   if [[ "$TRANSPORT" == "dns" ]]; then
-    # Which resolver(s) the carrier queries. FREEWIRE_DNS_RESOLVERS (comma-
-    # separated) spreads across several recursors to beat any single one's
-    # per-auth-server forward limit; FREEWIRE_DNS_RESOLVER sets a single one;
-    # default is the authoritative server directly (isolates the data plane).
-    if [[ -n "${FREEWIRE_DNS_RESOLVERS:-}" ]]; then
+    # Which resolver(s) the carrier queries. FREEWIRE_DNS_DEFAULT=1 sets NONE, so
+    # the client runs its own default strategy (server-direct first, then the
+    # system resolver) -- the real product path. FREEWIRE_DNS_RESOLVERS (comma-
+    # separated) spreads across several recursors; FREEWIRE_DNS_RESOLVER sets one;
+    # otherwise default here is the authoritative server directly.
+    if [[ -n "${FREEWIRE_DNS_DEFAULT:-}" ]]; then
+      echo "    dns resolver: <client default strategy>"
+    elif [[ -n "${FREEWIRE_DNS_RESOLVERS:-}" ]]; then
       ARR=""
       IFS=',' read -ra RS <<< "$FREEWIRE_DNS_RESOLVERS"
       for r in "${RS[@]}"; do
