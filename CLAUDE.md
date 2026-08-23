@@ -63,10 +63,24 @@ forwards (TLS/443 gives real egress), but nothing the app sends through WireGuar
 reaches the server's WG tun. The break is the WG↔DNS integration (client bridge
 `lp.ReadFrom → sendPacket`, or the WG handshake not completing over the carrier).
 Note transport *selection* only checks the carrier opened, not that WG works over
-it — so DNS is selected and then fails the real-traffic probe. NEXT: run
-wireguard-go at LogLevelVerbose on both ends during a routed DNS connect, and
-capture the server's WG UDP port (51820) + client's local proxy, to see whether
-the WG handshake completes over the carrier and where the data packets stop.
+it — so DNS is selected and then fails the real-traffic probe.
+
+**WG verbose over forced DNS (2026-08-22, config7 locked): the handshake
+COMPLETES.** `Sending handshake initiation` → `Received handshake response` in
+~1s over the DNS carrier (verified with `--skip-egress-check` now routing WG's
+log to stderr; config7 confirmed blocking direct-to-server so DNS was forced). So
+the handshake is not the bug. Full picture: the DNS carrier works packet-by-packet
+in isolation (handshake both directions; single packets up to 1400B via
+`--dns-datatest`) but **collapses under real concurrent routed load** — the routed
+test moved 0 packets to the server tun. This is a **congestion/throughput
+problem, not a correctness bug**. Prime suspect: `sendPacket` ships a packet's
+fragments SEQUENTIALLY (one DNS round trip each; a 1400B packet = ~1.66s), so the
+machine's traffic rate swamps the carrier and packets drown. NEXT: (a) pipeline
+fragment sends within a packet (concurrent, bounded by the window; handle the
+piggyback coming on whichever fragment completes the packet, and loss) — the
+clear perf fix, but a careful core change; and (b) a routed test with background
+apps quit, to confirm a single request works when the carrier isn't swamped
+(isolating congestion from any residual data-plane bug).
 
 Diagnostic tools built: `--dns-probe`, `--dns-throughput [--duration]`,
 `--dns-datatest`, `--icmp-probe`, `--select-only`, `testing/cafe-diagnostic.sh`.
