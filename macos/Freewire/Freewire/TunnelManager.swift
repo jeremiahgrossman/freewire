@@ -422,8 +422,36 @@ final class TunnelManager: ObservableObject {
             state = .reconnecting(attempt: attempt)
 
             await killTunnel()
-            await deregisterPeer()
 
+            // Prefer the cached connection, exactly as the initial connect does.
+            // Reconnect used to deregister the peer and re-register through the
+            // API on every attempt, which (1) needs the control plane reachable --
+            // and a captive portal blocks it, which is the very situation a
+            // dropped tunnel reconnects into, so reconnect failed on the networks
+            // it matters on -- and (2) spent a Privacy Pass token each time, so a
+            // flurry of reconnects or a contended token budget failed outright
+            // (caught by the regression suite). The peer is persistent, so reuse
+            // it: no control-plane calls, no token, works behind a portal.
+            if let cached = CachedConnection.load(host: api.serverHost),
+               let result = await connectFromCache(cached) {
+                lastGoodTransport = result.transport
+                peerToken = cached.peerToken
+                state = .connected(
+                    tunnelIP: cached.tunnelIP,
+                    interfaceName: result.ifName,
+                    connectedAt: Date(),
+                    transport: result.transport
+                )
+                startNetworkMonitor()
+                startWatchdog()
+                startUpgradeManager(serverHost: api.serverHost, transport: result.transport)
+                return
+            }
+
+            // No usable cache (first-ever connect lost, or the cache is stale and
+            // carried nothing): fall back to a full re-register via the API. This
+            // needs the control plane, so it only works off a portal -- acceptable
+            // as the last resort once the cache path has been tried.
             do {
                 let server = try await api.fetchConfig()
                 let peer  = try await registerPeer()
