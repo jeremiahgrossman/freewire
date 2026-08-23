@@ -129,6 +129,13 @@ if [[ -n "$TRANSPORT" ]]; then
   fi
   echo "==> forcing transport: $TRANSPORT"
 fi
+# TEST ONLY: simulate a portal that rate-limits DNS to N q/s (reproduces a
+# throttled café at the desk). Rides in the config, so it survives sudo.
+if [[ -n "${FREEWIRE_DNS_CARRIER_CAP:-}" ]]; then
+  PREFERRED="$PREFERRED,
+  \"dns_test_carrier_cap\": ${FREEWIRE_DNS_CARRIER_CAP}"
+  echo "    TEST carrier cap: ${FREEWIRE_DNS_CARRIER_CAP} q/s"
+fi
 
 cat > "$STATE/config.json" <<JSON
 {

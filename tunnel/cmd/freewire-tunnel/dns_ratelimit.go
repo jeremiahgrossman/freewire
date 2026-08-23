@@ -3,6 +3,7 @@ package main
 import (
 	"math"
 	"sync"
+	"time"
 )
 
 // adaptiveLimiter paces concurrent DNS carrier queries to whatever rate the
@@ -83,3 +84,36 @@ func (a *adaptiveLimiter) currentLimit() float64 {
 }
 
 const aimdDecrease = 0.7 // multiplicative back-off factor on loss
+
+// testCarrierThrottle simulates a portal that rate-limits DNS to the server: a
+// token bucket at N queries/sec; a query that finds no token is "dropped" (the
+// caller returns a timeout, which the adaptive limiter reads as loss). TEST ONLY,
+// set from Config.DNSTestCarrierCap to reproduce a throttled café at the desk.
+// nil when unset, so it costs nothing in production.
+type testThrottle struct {
+	mu     sync.Mutex
+	rate   float64
+	burst  float64
+	tokens float64
+	last   time.Time
+}
+
+var testCarrierThrottle *testThrottle
+
+func newTestThrottle(qps int) *testThrottle {
+	return &testThrottle{rate: float64(qps), burst: float64(qps), tokens: float64(qps), last: time.Now()}
+}
+
+// allow reports whether a query may proceed under the simulated cap.
+func (t *testThrottle) allow() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := time.Now()
+	t.tokens = math.Min(t.burst, t.tokens+now.Sub(t.last).Seconds()*t.rate)
+	t.last = now
+	if t.tokens >= 1 {
+		t.tokens--
+		return true
+	}
+	return false
+}

@@ -62,6 +62,13 @@ type Config struct {
 	// Overrides DNSResolver when non-empty. Each entry is "host" or "host:port"
 	// (port defaults to 53). Unreachable entries are dropped at startup.
 	DNSResolvers []string `json:"dns_resolvers,omitempty"`
+	// DNSTestCarrierCap simulates a portal that rate-limits DNS to the server at N
+	// queries/sec, by dropping carrier queries above that rate (a "loss" the
+	// adaptive limiter must discover and pace under). TEST ONLY -- it reproduces a
+	// throttled café at the desk so the backpressure work can be verified without a
+	// field trip. 0 = off. Set only by the test harness; a real server never sends
+	// it.
+	DNSTestCarrierCap int `json:"dns_test_carrier_cap,omitempty"`
 	// HTTPProxy is an explicit "host:port" to attempt before probing the
 	// gateway.
 	//

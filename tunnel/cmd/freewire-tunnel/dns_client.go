@@ -171,6 +171,10 @@ func effectiveDNSTunnelDomain(cfg Config) string {
 // PacketConn that bridges wireguard-go UDP ↔ DNS tunnel.
 // Returns an error if the handshake fails within dnsHandshakeTimeout.
 func runDNSTunnel(cfg Config) (net.PacketConn, error) {
+	if cfg.DNSTestCarrierCap > 0 && testCarrierThrottle == nil {
+		testCarrierThrottle = newTestThrottle(cfg.DNSTestCarrierCap)
+		fmt.Fprintf(os.Stderr, "freewire-tunnel: TEST carrier throttle active: %d q/s\n", cfg.DNSTestCarrierCap)
+	}
 	// Try each resolver strategy in order; the first whose handshake completes
 	// wins. The default order prefers the authoritative server directly (the fast
 	// path, ~71 KB/s where the portal allows outbound 53) and falls back to the
@@ -930,6 +934,12 @@ var dnsQueryOK, dnsQueryErr atomic.Uint64
 func dnsQuery(server, name string, timeout time.Duration, lim *adaptiveLimiter) (_ []byte, retErr error) {
 	lim.acquire()
 	defer func() { lim.release(retErr == nil) }()
+	// TEST ONLY: simulate a portal that rate-limits DNS to the server. A dropped
+	// query returns a timeout-shaped error, exactly what a real throttle produces,
+	// so the adaptive limiter paces under it. No-op in production (throttle nil).
+	if testCarrierThrottle != nil && !testCarrierThrottle.allow() {
+		return nil, fmt.Errorf("dns query: simulated carrier throttle drop")
+	}
 	deadline := time.Now().Add(timeout)
 	defer func() {
 		if retErr != nil {
