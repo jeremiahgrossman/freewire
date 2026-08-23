@@ -18,11 +18,24 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 - **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
 - **In progress:** nothing
-- **Next action:** field-test the server-direct DNS win when ready (user not ready
-  yet). The DNS transport is now fully characterized (see "DNS routed" below) —
-  server-direct carries HTTPS (~71 KB/s); the public-recursor path is a
-  minimal/last-resort carrier only. No further recursor-throughput work is
-  worthwhile without a field portal to test against.
+- **Next desk work (two tasks, both from the 2026-08-23 field test):**
+  1. **Adaptive carrier-rate backpressure on the DNS send path.** NOT a fixed cap
+     — measure whatever rate the current path sustains at ~0 loss and pace WG's
+     offered load to it (AIMD: ramp while loss stays low, back off on loss). The
+     café throttled DNS to ~72 Kbps and our no-backpressure send path overflowed
+     and tore down; the value must be discovered per-path, not hardcoded.
+     Reproduce the café at the desk with an artificial carrier rate-cap knob, then
+     iterate against it with the harness (no portal needed).
+  2. **Fastest-transport selection ("check all, use best").** The establish chain
+     is ordered http_connect→tls443→dns→icmp→wireguard and stops at the first
+     success, so on an open network it settles on tls443 and never tries the
+     faster wireguard-direct. Change it to probe transports and pick the fastest
+     available (speed order: wireguard, http_connect, tls443, dns, icmp — or probe
+     all and choose). `testing/probe-transports.sh` already lists what a network
+     allows (non-routed, --select-only per transport); it's the basis for this and
+     for a per-session probe on any captive wifi. Verified 2026-08-23 on the
+     hotspot: wireguard/tls443/dns/icmp_udp all OK (WG-direct fastest ~327ms);
+     http_connect needs a gateway proxy.
 - **Blocked on:** a Developer ID certificate, for `FreewireHelper` and for signed/notarized distribution.
 
 ### DNS routed: characterized (2026-08-23) — two carriers, one fast, one minimal
