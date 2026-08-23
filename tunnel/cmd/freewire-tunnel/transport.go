@@ -407,7 +407,21 @@ func establishTunnel(
 ) (name string, localProxy net.PacketConn, transport net.Conn, err error) {
 	upped := false
 
-	for _, candidate := range orderCandidates(defaultCandidates(), cfg.PreferredTransport) {
+	candidates := orderCandidates(defaultCandidates(), cfg.PreferredTransport)
+	if forced := forcedTransport(); forced != "" {
+		filtered := candidates[:0:0]
+		for _, c := range candidates {
+			if c.name == forced {
+				filtered = append(filtered, c)
+			}
+		}
+		if len(filtered) == 0 {
+			return "", nil, nil, fmt.Errorf("--force-transport %q matches no known transport", forced)
+		}
+		fmt.Fprintf(os.Stderr, "freewire-tunnel: forced to transport %q; other rungs skipped\n", forced)
+		candidates = filtered
+	}
+	for _, candidate := range candidates {
 		lp, tc, openErr := candidate.open(cfg)
 		if openErr != nil {
 			// Say why. A candidate that failed to open was skipped in silence,

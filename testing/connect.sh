@@ -101,8 +101,14 @@ if [[ -n "$TRANSPORT" ]]; then
   # the tunnel zone is delegated and the system resolver forwards; nowhere else
   # is, so without this the DNS path cannot be exercised at all.
   if [[ "$TRANSPORT" == "dns" ]]; then
+    # Which resolver the carrier queries. Default: the authoritative server
+    # directly, which isolates the WG-over-DNS data plane from any recursive
+    # resolver. Override with FREEWIRE_DNS_RESOLVER (e.g. "1.1.1.1:53" or the
+    # router) to test the real delegated path and any resolver throttling.
+    DNSR="${FREEWIRE_DNS_RESOLVER:-$SERVER:$DNS_PORT}"
     PREFERRED="$PREFERRED,
-  \"dns_resolver\": \"$SERVER:$DNS_PORT\""
+  \"dns_resolver\": \"$DNSR\""
+    echo "    dns resolver: $DNSR"
   fi
   echo "==> forcing transport: $TRANSPORT"
 fi
@@ -124,7 +130,12 @@ cat > "$STATE/config.json" <<JSON
 JSON
 
 echo "==> starting tunnel"
-sudo -n "$TUNNEL_BIN" < "$STATE/config.json" > "$STATE/tunnel.out" 2> "$STATE/tunnel.err" &
+# --force-transport hard-pins the chain to the one transport (preferred_transport
+# only reorders and still falls through, which would silently mask a DNS failure
+# by succeeding on TLS). For a DNS diagnostic we want the failure, not a fallback.
+FORCE=()
+[[ -n "$TRANSPORT" ]] && FORCE=(--force-transport "$TRANSPORT")
+sudo -n "$TUNNEL_BIN" "${FORCE[@]}" < "$STATE/config.json" > "$STATE/tunnel.out" 2> "$STATE/tunnel.err" &
 echo $! > "$STATE/launcher.pid"
 
 for _ in $(seq 1 40); do

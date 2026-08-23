@@ -311,6 +311,12 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 	// capped globally in dnsQuery (dnsMaxConcurrentQueries), so the number of
 	// senders here only needs to be enough to keep that many queries busy.
 	sendQ := make(chan []byte, dnsSendQueue)
+	// Diagnostic counters: sent = packets a worker handed to the carrier, dropped
+	// = tail-drops when the queue was full. A healthy session shows sent climbing
+	// with dropped at or near zero; sustained drops mean the carrier can't drain
+	// as fast as WireGuard offers, and the queue/rate needs tuning. Logged
+	// periodically below so a routed test captures the shape without a code change.
+	var sentCount, dropCount atomic.Uint64
 	for i := 0; i < dnsSendWorkers; i++ {
 		go func() {
 			for {
@@ -319,6 +325,9 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 					return
 				case p := <-sendQ:
 					data, err := s.sendPacket(p)
+					if err == nil {
+						sentCount.Add(1)
+					}
 					if err != nil || len(data) == 0 {
 						continue
 					}
@@ -330,6 +339,24 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 			}
 		}()
 	}
+
+	go func() {
+		t := time.NewTicker(5 * time.Second)
+		defer t.Stop()
+		var lastSent, lastDrop uint64
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				s, d := sentCount.Load(), dropCount.Load()
+				ds, dd := s-lastSent, d-lastDrop
+				lastSent, lastDrop = s, d
+				fmt.Fprintf(os.Stderr, "freewire-tunnel: dns send %d/s, tail-drop %d/s (queue %d/%d)\n",
+					ds/5, dd/5, len(sendQ), dnsSendQueue)
+			}
+		}
+	}()
 
 	go func() {
 		defer close(done)
@@ -352,6 +379,7 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 				// drain. Tail-drop one packet, which the inner TCP reads as
 				// congestion and backs off on -- unlike the old per-packet drop,
 				// this only happens after 256 packets are already buffered.
+				dropCount.Add(1)
 			}
 		}
 	}()

@@ -500,6 +500,26 @@ func selectOnly() bool {
 	return false
 }
 
+// forceTransportFlag pins the chain to a single transport, skipping the others
+// entirely (unlike PreferredTransport, which only reorders and still falls
+// through). It exists for testing: forcing DNS from the command line reproduces
+// a locked-portal connect without needing a pf config to block the server, and
+// without the sudo/auto-revert flakiness that made that setup unreliable. Like
+// the other test flags it is an argument, never a config field -- nothing the
+// server sends can pin the client to a slow transport.
+const forceTransportFlag = "--force-transport"
+
+// forcedTransport returns the transport name after --force-transport, or "".
+func forcedTransport() string {
+	args := os.Args[1:]
+	for i, a := range args {
+		if a == forceTransportFlag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
 // Absolute paths for every external binary.
 //
 // This process runs as root. Invoking "route" or "ifconfig" by bare name
