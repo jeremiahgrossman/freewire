@@ -115,7 +115,12 @@ type dnsClientSession struct {
 	aeadTx     cipher.AEAD // client → server
 	aeadRx     cipher.AEAD // server → client
 	txSeq      uint32      // next outbound sequence number (atomic add)
-	dnsServer  string      // resolved DNS server IP
+	// dnsServers is the carrier resolver set, fanned across round-robin by rr so
+	// no single recursor's per-auth-server forward limit caps throughput. The
+	// server keys sessions by token, not source, so queries for one session may
+	// arrive via any resolver. rr is an atomic cursor into dnsServers.
+	dnsServers []string
+	rr         atomic.Uint64
 	// tunnelDomain is the authoritative zone every query name is suffixed with.
 	// Carried per session because it is server-supplied and can change between
 	// connections, and because the per-query payload budget depends on its
@@ -149,20 +154,21 @@ func effectiveDNSTunnelDomain(cfg Config) string {
 // PacketConn that bridges wireguard-go UDP ↔ DNS tunnel.
 // Returns an error if the handshake fails within dnsHandshakeTimeout.
 func runDNSTunnel(cfg Config) (net.PacketConn, error) {
-	// An explicit resolver wins. Production relies on the system resolver
-	// forwarding the tunnel zone, which needs the zone delegated; pointing
-	// straight at the authoritative server is what makes the transport testable
-	// against a server that is not.
-	dnsServer := cfg.DNSResolver
-	if dnsServer == "" {
-		var err error
-		dnsServer, err = resolveLocalDNSServer()
+	// Build the resolver set. A list (DNSResolvers) spreads the carrier across
+	// several recursors so no single one's per-auth-server forward limit caps
+	// throughput; a single DNSResolver still wins for the server-direct/dev path;
+	// otherwise fall back to the system resolver. Production relies on a resolver
+	// forwarding the delegated tunnel zone.
+	resolvers := carrierResolvers(cfg)
+	if len(resolvers) == 0 {
+		r, err := resolveLocalDNSServer()
 		if err != nil {
 			return nil, fmt.Errorf("dns tunnel: resolve dns server: %w", err)
 		}
+		resolvers = []string{r}
 	}
 
-	sess, err := dnsHandshake(cfg, dnsServer)
+	sess, err := dnsHandshake(cfg, resolvers)
 	if err != nil {
 		return nil, fmt.Errorf("dns tunnel: handshake: %w", err)
 	}
@@ -175,6 +181,25 @@ func runDNSTunnel(cfg Config) (net.PacketConn, error) {
 
 	go sess.run(lp)
 	return lp, nil
+}
+
+// carrierResolvers returns the explicit resolver set from config: the list if
+// given, else the single resolver if given, else empty (caller falls back to the
+// system resolver). Order is preserved; the first is used for the handshake.
+func carrierResolvers(cfg Config) []string {
+	if len(cfg.DNSResolvers) > 0 {
+		out := make([]string, 0, len(cfg.DNSResolvers))
+		for _, r := range cfg.DNSResolvers {
+			if r = strings.TrimSpace(r); r != "" {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+	if cfg.DNSResolver != "" {
+		return []string{cfg.DNSResolver}
+	}
+	return nil
 }
 
 // resolveLocalDNSServer returns the first DNS server from /etc/resolv.conf,
@@ -203,14 +228,26 @@ func resolveLocalDNSServer() (string, error) {
 	return "8.8.8.8", nil
 }
 
+// nextResolver returns the next carrier resolver round-robin, spreading queries
+// so no single recursor's forward rate-limit caps throughput.
+func (s *dnsClientSession) nextResolver() string {
+	if len(s.dnsServers) == 1 {
+		return s.dnsServers[0]
+	}
+	i := s.rr.Add(1) - 1
+	return s.dnsServers[i%uint64(len(s.dnsServers))]
+}
+
 // dnsHandshake performs the 3-step handshake and returns an initialized session.
 //
 // Step 1: ClientHello — query h.1.<b32(clientPub)>.<zone> TXT
 // Step 2: ServerHello — parse TXT: <b32(serverPub)>.<b32(token)>
 // Step 3: ClientConfirm — query h.3.<b32(mac)>.<b32(token)>.<zone> TXT
-func dnsHandshake(cfg Config, dnsServer string) (*dnsClientSession, error) {
+func dnsHandshake(cfg Config, dnsServers []string) (*dnsClientSession, error) {
 	deadline := time.Now().Add(dnsHandshakeTimeout)
 	domain := effectiveDNSTunnelDomain(cfg)
+	// The handshake runs over the first resolver; data and polls fan across all.
+	dnsServer := dnsServers[0]
 
 	// Generate ephemeral Curve25519 keypair for DH.
 	var clientPriv [32]byte
@@ -308,7 +345,7 @@ func dnsHandshake(cfg Config, dnsServer string) (*dnsClientSession, error) {
 		sessionKey:   sessionKey,
 		keyC2S:       keyC2S,
 		keyS2C:       keyS2C,
-		dnsServer:    dnsServer,
+		dnsServers:   dnsServers,
 		tunnelDomain: domain,
 	}, nil
 }
@@ -510,7 +547,7 @@ func (s *dnsClientSession) poll() ([][]byte, error) {
 	binary.BigEndian.PutUint64(nb[:], s.pollNonce.Add(1))
 	nonce := b32enc.EncodeToString(nb[:])
 	name := "k." + s.tokenB32 + "." + nonce + "." + s.tunnelDomain + "."
-	resp, err := dnsQuery(s.dnsServer, name, time.Now().Add(2*time.Second), dnsPollSem)
+	resp, err := dnsQuery(s.nextResolver(), name, time.Now().Add(2*time.Second), dnsPollSem)
 	if err != nil {
 		return nil, err
 	}
@@ -610,7 +647,7 @@ func (s *dnsClientSession) sendPacket(pkt []byte) ([][]byte, error) {
 	results := make(chan fragResult, len(names))
 	for _, name := range names {
 		go func(name string) {
-			resp, err := dnsQuery(s.dnsServer, name, time.Now().Add(3*time.Second), dnsSendSem)
+			resp, err := dnsQuery(s.nextResolver(), name, time.Now().Add(3*time.Second), dnsSendSem)
 			results <- fragResult{resp, err}
 		}(name)
 	}
@@ -774,7 +811,7 @@ func (s *dnsClientSession) sendKeepalive() error {
 	tokenB32 := b32enc.EncodeToString(s.token)
 	name := "k." + tokenB32 + "." + s.tunnelDomain + "."
 	deadline := time.Now().Add(3 * time.Second)
-	_, err := dnsQuery(s.dnsServer, name, deadline, dnsSendSem)
+	_, err := dnsQuery(s.nextResolver(), name, deadline, dnsSendSem)
 	return err
 }
 

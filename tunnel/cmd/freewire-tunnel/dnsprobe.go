@@ -51,7 +51,7 @@ func dnsProbe(args []string) int {
 	fmt.Fprintf(os.Stderr, "dns-probe: handshake for zone %q via resolver %s\n", zone, resolver)
 
 	start := time.Now()
-	sess, err := dnsHandshake(cfg, resolver)
+	sess, err := dnsHandshake(cfg, []string{resolver})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dns-probe: FAIL handshake: %v\n", err)
 		return 1
@@ -168,7 +168,7 @@ func dnsDataTest(args []string) int {
 	perFrag := dnsFragCipherBytes(zone)
 	fmt.Fprintf(os.Stderr, "dns-datatest: zone %q via %s (%d ciphertext bytes/fragment)\n", zone, resolver, perFrag)
 
-	sess, err := dnsHandshake(cfg, resolver)
+	sess, err := dnsHandshake(cfg, []string{resolver})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dns-datatest: FAIL handshake: %v\n", err)
 		return 1
@@ -270,7 +270,7 @@ func dnsThroughput(args []string) int {
 	fmt.Fprintf(os.Stderr, "dns-throughput: zone %q via %s, %d queries at concurrency %d (%d ciphertext bytes/query)\n",
 		zone, resolver, count, concurrency, perQuery)
 
-	sess, err := dnsHandshake(cfg, resolver)
+	sess, err := dnsHandshake(cfg, []string{resolver})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dns-throughput: FAIL handshake: %v\n", err)
 		return 1
@@ -319,7 +319,7 @@ func dnsThroughputSustained(domain, resolver string, duration time.Duration, con
 	fmt.Fprintf(os.Stderr, "dns-throughput: zone %q via %s, sustained %s at concurrency %d (%d bytes/query)\n",
 		zone, resolver, duration, concurrency, perQuery)
 
-	sess, err := dnsHandshake(cfg, resolver)
+	sess, err := dnsHandshake(cfg, []string{resolver})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dns-throughput: FAIL handshake: %v\n", err)
 		return 1

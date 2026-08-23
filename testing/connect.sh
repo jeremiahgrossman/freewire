@@ -101,14 +101,28 @@ if [[ -n "$TRANSPORT" ]]; then
   # the tunnel zone is delegated and the system resolver forwards; nowhere else
   # is, so without this the DNS path cannot be exercised at all.
   if [[ "$TRANSPORT" == "dns" ]]; then
-    # Which resolver the carrier queries. Default: the authoritative server
-    # directly, which isolates the WG-over-DNS data plane from any recursive
-    # resolver. Override with FREEWIRE_DNS_RESOLVER (e.g. "1.1.1.1:53" or the
-    # router) to test the real delegated path and any resolver throttling.
-    DNSR="${FREEWIRE_DNS_RESOLVER:-$SERVER:$DNS_PORT}"
-    PREFERRED="$PREFERRED,
+    # Which resolver(s) the carrier queries. FREEWIRE_DNS_RESOLVERS (comma-
+    # separated) spreads across several recursors to beat any single one's
+    # per-auth-server forward limit; FREEWIRE_DNS_RESOLVER sets a single one;
+    # default is the authoritative server directly (isolates the data plane).
+    if [[ -n "${FREEWIRE_DNS_RESOLVERS:-}" ]]; then
+      ARR=""
+      IFS=',' read -ra RS <<< "$FREEWIRE_DNS_RESOLVERS"
+      for r in "${RS[@]}"; do
+        r="$(echo "$r" | tr -d ' ')"
+        [[ -z "$r" ]] && continue
+        [[ -n "$ARR" ]] && ARR="$ARR, "
+        ARR="$ARR\"$r\""
+      done
+      PREFERRED="$PREFERRED,
+  \"dns_resolvers\": [$ARR]"
+      echo "    dns resolvers: $FREEWIRE_DNS_RESOLVERS"
+    else
+      DNSR="${FREEWIRE_DNS_RESOLVER:-$SERVER:$DNS_PORT}"
+      PREFERRED="$PREFERRED,
   \"dns_resolver\": \"$DNSR\""
-    echo "    dns resolver: $DNSR"
+      echo "    dns resolver: $DNSR"
+    fi
   fi
   echo "==> forcing transport: $TRANSPORT"
 fi

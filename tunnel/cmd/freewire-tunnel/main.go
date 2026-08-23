@@ -54,6 +54,14 @@ type Config struct {
 	// without this the DNS transport cannot be exercised against a development
 	// server at all. Empty means use the system resolver.
 	DNSResolver string `json:"dns_resolver,omitempty"`
+	// DNSResolvers spreads the DNS carrier across several resolvers at once. A
+	// public recursor rate-limits how fast it forwards UNIQUE (uncacheable) names
+	// to our authoritative server, which caps routed throughput and drives loss;
+	// fanning queries across N resolvers keeps each under its own per-auth-server
+	// limit while the server (keyed by session token, not source) sees the sum.
+	// Overrides DNSResolver when non-empty. Each entry is "host" or "host:port"
+	// (port defaults to 53). Unreachable entries are dropped at startup.
+	DNSResolvers []string `json:"dns_resolvers,omitempty"`
 	// HTTPProxy is an explicit "host:port" to attempt before probing the
 	// gateway.
 	//
@@ -260,7 +268,7 @@ func main() {
 		fmt.Fprintf(os.Stderr,
 			"freewire-tunnel: %s — tunnel is up but routing is NOT installed; traffic still uses the normal path\n",
 			skipEgressCheckFlag)
-	} else if err := setupRouting(tunName, bypassHost, cfg.DNSResolver, cfg.DoHEndpoints); err != nil {
+	} else if err := setupRouting(tunName, bypassHost, carrierResolvers(cfg), cfg.DoHEndpoints); err != nil {
 		// Fatal. A tunnel that carries nothing is worse than no tunnel: the
 		// client reports "Protected" off the ready line, so a silent routing
 		// failure means the user believes they are covered while every packet
@@ -695,7 +703,7 @@ func recordPins() {
 // an arbitrary entry (a bridge's, say, not the physical link's) and the add then
 // fails with "file exists" while the original default survives. Traffic kept
 // flowing outside the tunnel while the client reported "Protected".
-func setupRouting(tunName, bypassHost, carrierResolver string, dohEndpoints []string) error {
+func setupRouting(tunName, bypassHost string, carrierResolvers []string, dohEndpoints []string) error {
 	// Already repaired at process start; nothing to redo here.
 
 	// Resolve bypass host to an IP if needed.
@@ -739,7 +747,9 @@ func setupRouting(tunName, bypassHost, carrierResolver string, dohEndpoints []st
 			fmt.Fprintf(os.Stderr, "freewire-tunnel: pin resolver route %s: %v\n", ip, err)
 		}
 	}
-	pinResolver(carrierResolver)
+	for _, r := range carrierResolvers {
+		pinResolver(r)
+	}
 	if resolver, err := resolveLocalDNSServer(); err == nil {
 		pinResolver(resolver)
 	}
@@ -782,13 +792,15 @@ func setupRouting(tunName, bypassHost, carrierResolver string, dohEndpoints []st
 		fmt.Fprintf(os.Stderr, "freewire-tunnel: route-check: server %s -> %s (want physical, NOT %s)\n",
 			bypassIP, bypassIface, tunName)
 	}
-	checkResolver := carrierResolver
-	if checkResolver == "" {
-		checkResolver, _ = resolveLocalDNSServer()
+	checkResolvers := carrierResolvers
+	if len(checkResolvers) == 0 {
+		if r, e := resolveLocalDNSServer(); e == nil {
+			checkResolvers = []string{r}
+		}
 	}
-	if checkResolver != "" {
-		ip := checkResolver
-		if h, _, e := net.SplitHostPort(checkResolver); e == nil {
+	for _, cr := range checkResolvers {
+		ip := cr
+		if h, _, e := net.SplitHostPort(cr); e == nil {
 			ip = h
 		}
 		if ri, e := interfaceForDest(ip); e == nil {
@@ -798,15 +810,19 @@ func setupRouting(tunName, bypassHost, carrierResolver string, dohEndpoints []st
 	}
 
 	// Verify rather than assume. A silent routing failure means the client
-	// reports "Protected" while every packet leaves in the clear.
-	// Verify against an address that is not pinned, or the check passes on the
-	// bypass route rather than on the tunnel.
-	verifyHost, _, _ := net.SplitHostPort(probeAddr())
-	if iface, err := interfaceForDest(verifyHost); err != nil {
+	// reports "Protected" while every packet leaves in the clear. This is only a
+	// route lookup (does this destination resolve to the tun?), so use a fixed
+	// TEST-NET-1 address (RFC 5737, never routed to a real host and never a
+	// carrier resolver) rather than a live probe candidate: when the carrier
+	// spreads across the public recursors, those are all pinned outside the
+	// tunnel, and probing one of them would read the bypass route and wrongly
+	// report that routing did not take effect.
+	const routeCheckHost = "192.0.2.1"
+	if iface, err := interfaceForDest(routeCheckHost); err != nil {
 		return fmt.Errorf("verify tunnel route: %w", err)
 	} else if iface != tunName {
 		return fmt.Errorf("tunnel routes did not take effect: traffic to %s still uses %s, not %s",
-			verifyHost, iface, tunName)
+			routeCheckHost, iface, tunName)
 	}
 
 	// Installing the routes is not the same as traffic surviving them. If the
