@@ -11,7 +11,7 @@ STATE="/tmp/freewire-test"
 SERVER="${FREEWIRE_SERVER:-52.203.246.145}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-if pgrep -f "freewire-tunnel$" >/dev/null 2>&1; then
+if pgrep -f "/tunnel/freewire-tunnel" >/dev/null 2>&1; then
   echo "==> stopping tunnel"
   # `--stop` sends SIGTERM to the recorded pid and waits for the process to
   # finish restoring routes, resolvers and IPv6. SIGKILL would leave exactly the
@@ -23,12 +23,12 @@ if pgrep -f "freewire-tunnel$" >/dev/null 2>&1; then
   # machine as root.
   sudo -n "$ROOT/tunnel/freewire-tunnel" --stop 2>/dev/null
   for _ in $(seq 1 20); do
-    pgrep -f "freewire-tunnel$" >/dev/null 2>&1 || break
+    pgrep -f "/tunnel/freewire-tunnel" >/dev/null 2>&1 || break
     sleep 0.5
   done
 fi
 
-if pgrep -f "freewire-tunnel$" >/dev/null 2>&1; then
+if pgrep -f "/tunnel/freewire-tunnel" >/dev/null 2>&1; then
   echo "tunnel did not exit on SIGTERM" >&2
   exit 1
 fi

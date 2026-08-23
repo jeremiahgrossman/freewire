@@ -260,7 +260,7 @@ func main() {
 		fmt.Fprintf(os.Stderr,
 			"freewire-tunnel: %s — tunnel is up but routing is NOT installed; traffic still uses the normal path\n",
 			skipEgressCheckFlag)
-	} else if err := setupRouting(tunName, bypassHost, cfg.DoHEndpoints); err != nil {
+	} else if err := setupRouting(tunName, bypassHost, cfg.DNSResolver, cfg.DoHEndpoints); err != nil {
 		// Fatal. A tunnel that carries nothing is worse than no tunnel: the
 		// client reports "Protected" off the ready line, so a silent routing
 		// failure means the user believes they are covered while every packet
@@ -291,7 +291,17 @@ func main() {
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, syscall.SIGTERM, syscall.SIGINT)
 
-	unhealthy := superviseRouting()
+	// The health watchdog releases routes when traffic stops surviving them. Under
+	// --route-no-verify (diagnostic) that would tear the routes down within a
+	// second or two of a slow tunnel, before egress can be measured -- the very
+	// thing the flag exists to observe. Suspend it in that mode; a nil channel
+	// never fires in the select below.
+	var unhealthy <-chan struct{}
+	if routeNoVerify() {
+		fmt.Fprintln(os.Stderr, "freewire-tunnel: --route-no-verify — health watchdog suspended")
+	} else {
+		unhealthy = superviseRouting()
+	}
 
 	// The app keeps our stdin open for as long as it wants the tunnel up, and
 	// closes it on disconnect. If the app crashes or quits, the OS closes it for
@@ -509,6 +519,20 @@ func selectOnly() bool {
 // server sends can pin the client to a slow transport.
 const forceTransportFlag = "--force-transport"
 
+// routeNoVerifyFlag installs routing but skips the egress self-check and its
+// route-release, so a slow-but-working transport stays up long enough to measure
+// real egress. Diagnostic only; see the use site in setupRouting.
+const routeNoVerifyFlag = "--route-no-verify"
+
+func routeNoVerify() bool {
+	for _, a := range os.Args[1:] {
+		if a == routeNoVerifyFlag {
+			return true
+		}
+	}
+	return false
+}
+
 // forcedTransport returns the transport name after --force-transport, or "".
 func forcedTransport() string {
 	args := os.Args[1:]
@@ -671,7 +695,7 @@ func recordPins() {
 // an arbitrary entry (a bridge's, say, not the physical link's) and the add then
 // fails with "file exists" while the original default survives. Traffic kept
 // flowing outside the tunnel while the client reported "Protected".
-func setupRouting(tunName, bypassHost string, dohEndpoints []string) error {
+func setupRouting(tunName, bypassHost, carrierResolver string, dohEndpoints []string) error {
 	// Already repaired at process start; nothing to redo here.
 
 	// Resolve bypass host to an IP if needed.
@@ -693,13 +717,31 @@ func setupRouting(tunName, bypassHost string, dohEndpoints []string) error {
 		return fmt.Errorf("pin server route: %w", err)
 	}
 
-	// The DNS tunnel talks to the local resolver, which must stay reachable for
-	// the same reason.
-	if resolver, err := resolveLocalDNSServer(); err == nil && resolver != bypassIP {
-		if err := pinOutsideTunnel(resolver); err != nil {
-			// Not fatal: only the DNS transport depends on it.
-			fmt.Fprintf(os.Stderr, "freewire-tunnel: pin resolver route: %v\n", err)
+	// The DNS carrier must keep talking to whatever resolver it actually queries,
+	// or its own packets get captured by the split-default route below and loop
+	// back into the tunnel -- which looks exactly like a slow carrier and stalls
+	// the whole transport. Pin the carrier's resolver explicitly (it may not be
+	// the system resolver: a config can point the DNS transport at a fast public
+	// recursor), and also the system resolver so ordinary lookups survive.
+	pinResolver := func(hostport string) {
+		if hostport == "" {
+			return
 		}
+		ip := hostport
+		if h, _, e := net.SplitHostPort(hostport); e == nil {
+			ip = h
+		}
+		if ip == "" || ip == bypassIP {
+			return
+		}
+		if err := pinOutsideTunnel(ip); err != nil {
+			// Not fatal: only the DNS transport depends on it.
+			fmt.Fprintf(os.Stderr, "freewire-tunnel: pin resolver route %s: %v\n", ip, err)
+		}
+	}
+	pinResolver(carrierResolver)
+	if resolver, err := resolveLocalDNSServer(); err == nil {
+		pinResolver(resolver)
 	}
 
 	// IPv6 must not survive the tunnel coming up.
@@ -731,6 +773,30 @@ func setupRouting(tunName, bypassHost string, dohEndpoints []string) error {
 		}
 	}
 
+	// Diagnostic: confirm the carrier's own traffic actually bypasses the tunnel.
+	// If the server (and, for the DNS transport, the resolver it queries) resolve
+	// to the tun interface here, every carrier packet loops back into the tunnel
+	// and times out -- which looks exactly like a slow carrier. This records the
+	// truth in tunnel.err on every routed run, tun vs physical.
+	if bypassIface, e := interfaceForDest(bypassIP); e == nil {
+		fmt.Fprintf(os.Stderr, "freewire-tunnel: route-check: server %s -> %s (want physical, NOT %s)\n",
+			bypassIP, bypassIface, tunName)
+	}
+	checkResolver := carrierResolver
+	if checkResolver == "" {
+		checkResolver, _ = resolveLocalDNSServer()
+	}
+	if checkResolver != "" {
+		ip := checkResolver
+		if h, _, e := net.SplitHostPort(checkResolver); e == nil {
+			ip = h
+		}
+		if ri, e := interfaceForDest(ip); e == nil {
+			fmt.Fprintf(os.Stderr, "freewire-tunnel: route-check: carrier resolver %s -> %s (want physical, NOT %s)\n",
+				ip, ri, tunName)
+		}
+	}
+
 	// Verify rather than assume. A silent routing failure means the client
 	// reports "Protected" while every packet leaves in the clear.
 	// Verify against an address that is not pinned, or the check passes on the
@@ -755,7 +821,17 @@ func setupRouting(tunName, bypassHost string, dohEndpoints []string) error {
 	// the packets. It is deliberately an environment variable rather than a
 	// config field: nothing the server sends can turn this off, and a release
 	// build has no path to it unless someone sets it in the launching shell.
-	if err := verifyTunnelCarriesTraffic(); err != nil {
+	if routeNoVerify() {
+		// Diagnostic mode: install routing but do NOT gate on the egress self-
+		// check, and do NOT release the routes if it would have failed. This
+		// exists to answer "does this transport carry ANY real traffic, however
+		// slowly" separately from "does it pass the strict probe deadline" -- the
+		// probe releasing routes on a slow-but-working tunnel hid that difference.
+		// Like the other test flags it is an argument, never a config field, so a
+		// release build cannot leave the machine routed through a dead tunnel.
+		fmt.Fprintln(os.Stderr,
+			"freewire-tunnel: --route-no-verify — routes installed, egress self-check SKIPPED (diagnostic)")
+	} else if err := verifyTunnelCarriesTraffic(); err != nil {
 		return fmt.Errorf("tunnel routes installed but carry no traffic: %w", err)
 	}
 

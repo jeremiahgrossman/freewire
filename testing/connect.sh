@@ -34,7 +34,7 @@ mkdir -p "$STATE"
 command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 [[ -x "$TUNNEL_BIN" ]] || { echo "build first: (cd tunnel && go build -o freewire-tunnel ./cmd/freewire-tunnel)" >&2; exit 1; }
 
-if pgrep -f "freewire-tunnel$" >/dev/null 2>&1; then
+if pgrep -f "/tunnel/freewire-tunnel" >/dev/null 2>&1; then
   echo "a tunnel is already running; run testing/disconnect.sh first" >&2
   exit 1
 fi
@@ -135,15 +135,34 @@ echo "==> starting tunnel"
 # by succeeding on TLS). For a DNS diagnostic we want the failure, not a fallback.
 FORCE=()
 [[ -n "$TRANSPORT" ]] && FORCE=(--force-transport "$TRANSPORT")
-sudo -n "$TUNNEL_BIN" "${FORCE[@]}" < "$STATE/config.json" > "$STATE/tunnel.out" 2> "$STATE/tunnel.err" &
+# Diagnostic: install routing but skip the egress self-check, so a slow-but-
+# working transport stays up long enough to measure real egress. Flags ride as
+# args (the passwordless rule matches "binary *"), unlike env, which sudo scrubs.
+[[ -n "${FREEWIRE_ROUTE_NO_VERIFY:-}" ]] && FORCE+=(--route-no-verify)
+# NOTE: sudo scrubs the environment AND the passwordless rule only matches the
+# bare binary, so FREEWIRE_DNS_* env knobs cannot be forwarded here (any `env`/
+# `--preserve-env` wrapper trips the password prompt). To sweep concurrency under
+# routing, change the default in dns_client.go and rebuild. The env knobs still
+# work for the non-sudo standalone --dns-throughput sweeps.
+# Feed the config over a FIFO and hold the write end open for the tunnel's whole
+# life. The tunnel treats stdin-EOF as "the controlling app disconnected" and
+# tears down -- correct for the real app (a pipe it holds and closes), but a
+# plain `< config.json` EOFs the instant the JSON is read, tearing the tunnel
+# down the moment it becomes ready. The holder writes the config, then blocks
+# until the tunnel process is gone, so stdin only EOFs on real teardown.
+FIFO="$STATE/stdin.fifo"
+rm -f "$FIFO"; mkfifo "$FIFO"
+sudo -n "$TUNNEL_BIN" "${FORCE[@]}" < "$FIFO" > "$STATE/tunnel.out" 2> "$STATE/tunnel.err" &
 echo $! > "$STATE/launcher.pid"
+{ cat "$STATE/config.json"; while pgrep -f "/tunnel/freewire-tunnel" >/dev/null 2>&1; do sleep 1; done; } > "$FIFO" &
+echo $! > "$STATE/holder.pid"
 
 for _ in $(seq 1 40); do
   if grep -q "^ready" "$STATE/tunnel.out" 2>/dev/null; then
     echo "    $(cat "$STATE/tunnel.out")"
     exit 0
   fi
-  if ! pgrep -f "freewire-tunnel$" >/dev/null 2>&1; then
+  if ! pgrep -f "/tunnel/freewire-tunnel" >/dev/null 2>&1; then
     echo "tunnel exited before becoming ready:" >&2
     tail -20 "$STATE/tunnel.err" >&2
     exit 1

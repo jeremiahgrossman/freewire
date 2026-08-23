@@ -84,7 +84,7 @@ done
 {
   echo "  → $tun tunnelled / $dir direct / $blk blocked (of $SAMPLES)"
   echo "---- send-path counters (from tunnel.err) ----"
-  grep -E "dns send|tail-drop|forced to transport|routing:|carry no traffic" "$STATE/tunnel.err" 2>/dev/null | tail -12 | sed 's/^/  /'
+  grep -E "dns send|tail-drop|forced to transport|routing:|carry no traffic|route-check|queries ok" "$STATE/tunnel.err" 2>/dev/null | tail -16 | sed 's/^/  /'
 } >> "$LOG"
 
 # trap runs cleanup (disconnect + restore verification)

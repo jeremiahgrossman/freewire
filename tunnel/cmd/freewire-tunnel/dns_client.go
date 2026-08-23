@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -64,10 +65,31 @@ const (
 	// value measured safe (~8 gives ~400-500 q/s at 0% loss); the fix is the
 	// queue, not more parallelism. Only a sustained overload past the queue depth
 	// tail-drops, which is a real congestion signal the inner TCP backs off on.
-	dnsSendWorkers          = 8   // senders draining the queue
-	dnsSendQueue            = 256 // burst absorption before tail-drop
-	dnsMaxConcurrentQueries = 8   // global in-flight DNS query cap; matches udpPoolPerServer
+	dnsSendQueue = 256 // burst absorption before tail-drop
 )
+
+// Send-path concurrency, socket pool, and worker count. Vars, not consts, so a
+// test run can sweep them via env (FREEWIRE_DNS_CONCURRENCY / _POOL / _WORKERS)
+// to find the routed bottleneck without a rebuild. Defaults match the measured-
+// safe standalone value. Pool and workers track concurrency by default: the pool
+// must hold at least as many sockets as there are in-flight queries or every
+// query past the pool churns a dial, and workers must be at least concurrency or
+// the query slots sit idle.
+var (
+	dnsMaxConcurrentQueries = envInt("FREEWIRE_DNS_CONCURRENCY", 32)
+	udpPoolPerServer        = envInt("FREEWIRE_DNS_POOL", dnsMaxConcurrentQueries)
+	dnsSendWorkers          = envInt("FREEWIRE_DNS_WORKERS", dnsMaxConcurrentQueries)
+)
+
+// envInt reads a positive integer from env, or returns def.
+func envInt(name string, def int) int {
+	if v := os.Getenv(name); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return def
+}
 
 var b32enc = base32.StdEncoding.WithPadding(base32.NoPadding)
 
@@ -316,7 +338,7 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 	// with dropped at or near zero; sustained drops mean the carrier can't drain
 	// as fast as WireGuard offers, and the queue/rate needs tuning. Logged
 	// periodically below so a routed test captures the shape without a code change.
-	var sentCount, dropCount atomic.Uint64
+	var sentCount, dropCount, dsBytes, pollBytes atomic.Uint64
 	for i := 0; i < dnsSendWorkers; i++ {
 		go func() {
 			for {
@@ -343,17 +365,22 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 	go func() {
 		t := time.NewTicker(5 * time.Second)
 		defer t.Stop()
-		var lastSent, lastDrop uint64
+		var lastSent, lastDrop, lastQOK, lastQErr, lastDS, lastPoll uint64
 		for {
 			select {
 			case <-done:
 				return
 			case <-t.C:
 				s, d := sentCount.Load(), dropCount.Load()
+				qok, qerr := dnsQueryOK.Load(), dnsQueryErr.Load()
+				dsb, pb := dsBytes.Load(), pollBytes.Load()
 				ds, dd := s-lastSent, d-lastDrop
-				lastSent, lastDrop = s, d
-				fmt.Fprintf(os.Stderr, "freewire-tunnel: dns send %d/s, tail-drop %d/s (queue %d/%d)\n",
-					ds/5, dd/5, len(sendQ), dnsSendQueue)
+				dqok, dqerr := qok-lastQOK, qerr-lastQErr
+				dsRate, pollRate := (dsb-lastDS)/5, (pb-lastPoll)/5
+				lastSent, lastDrop, lastQOK, lastQErr, lastDS, lastPoll = s, d, qok, qerr, dsb, pb
+				fmt.Fprintf(os.Stderr,
+					"freewire-tunnel: dns send %d/s, tail-drop %d/s (queue %d/%d); queries ok %d/s err %d/s; downstream %d B/s (poll %d B/s)\n",
+					ds/5, dd/5, len(sendQ), dnsSendQueue, dqok/5, dqerr/5, dsRate, pollRate)
 			}
 		}
 	}()
@@ -396,6 +423,7 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 				peerMu.Unlock()
 				if peer != nil {
 					lp.WriteTo(data, peer) //nolint:errcheck
+					dsBytes.Add(uint64(len(data)))
 				}
 			}
 		}
@@ -427,6 +455,7 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 			if err != nil || len(data) == 0 {
 				continue
 			}
+			pollBytes.Add(uint64(len(data)))
 			lastActivity = time.Now()
 			select {
 			case inboundCh <- data:
@@ -719,10 +748,23 @@ func chunkLabels(s string, maxLen int) []string {
 // fragment semaphore.
 var dnsQuerySem = make(chan struct{}, dnsMaxConcurrentQueries)
 
+// Query outcome counters, logged periodically by the run loop. They separate a
+// slow carrier (queries timing out -- dnsQueryErr climbing) from a stalled send
+// path (queries succeeding but the drain still low). Cheap atomics, tallied
+// across every caller.
+var dnsQueryOK, dnsQueryErr atomic.Uint64
+
 // dnsQuery sends a DNS TXT query for name to server:53 and returns the raw response packet.
-func dnsQuery(server, name string, deadline time.Time) ([]byte, error) {
+func dnsQuery(server, name string, deadline time.Time) (_ []byte, retErr error) {
 	dnsQuerySem <- struct{}{}
 	defer func() { <-dnsQuerySem }()
+	defer func() {
+		if retErr != nil {
+			dnsQueryErr.Add(1)
+		} else {
+			dnsQueryOK.Add(1)
+		}
+	}()
 
 	c, err := dnsConnPool.get(server)
 	if err != nil {
@@ -776,7 +818,7 @@ type udpConnPool struct {
 	conns map[string][]net.Conn
 }
 
-const udpPoolPerServer = 8
+// udpPoolPerServer is defined as a var above (env-tunable for test sweeps).
 
 func (p *udpConnPool) get(server string) (net.Conn, error) {
 	p.mu.Lock()
