@@ -464,7 +464,7 @@ func (s *DNSServer) handleClientHello(conn *net.UDPConn, srcAddr *net.UDPAddr, r
 		confirmMAC: mac,
 		activated:  false,
 		lastSeen:   time.Now(),
-		wgInbound:  make(chan []byte, 32),
+		wgInbound:  make(chan []byte, 256),
 		frags:      make(map[uint32]*dnsFragAssembly),
 	}
 	key := srvB32enc.EncodeToString(token[:])
@@ -589,6 +589,47 @@ func (s *DNSServer) handleClientConfirm(conn *net.UDPConn, srcAddr *net.UDPAddr,
 	s.log.Info("dns: session activated")
 	resp := buildDNSTXTResponse(req, "OK")
 	conn.WriteToUDP(resp, srcAddr) //nolint:errcheck
+}
+
+const (
+	// downstreamDrainThresh bounds the packed plaintext so the base32 TXT
+	// response stays under the client's advertised EDNS0 size (4096). base32
+	// inflates 8/5, plus the AEAD tag, the seq label, and DNS overhead. One more
+	// full packet can land after the check, so the threshold reserves room for it:
+	// threshold + one max tun packet (~1500) stays under the ~2400-byte plaintext
+	// ceiling that keeps the response under 4096.
+	downstreamDrainThresh = 900
+)
+
+// drainDownstream pulls queued inbound WG packets (starting with first, if any)
+// up to the response budget and length-prefix-frames them: [2-byte BE len][pkt]
+// repeated. Packing many packets into one response uses the DNS response size
+// instead of wasting all but one packet's worth of it, which is what held
+// downstream throughput to roughly one packet per query. Returns nil when
+// nothing is queued. A single packet is just the one-frame case, so the wire
+// format is uniform.
+func drainDownstream(sess *dnsSession, first []byte) []byte {
+	var plain []byte
+	appendFrame := func(p []byte) {
+		if len(p) == 0 {
+			return
+		}
+		var l [2]byte
+		binary.BigEndian.PutUint16(l[:], uint16(len(p)))
+		plain = append(plain, l[:]...)
+		plain = append(plain, p...)
+	}
+	appendFrame(first)
+drain:
+	for len(plain) < downstreamDrainThresh {
+		select {
+		case p := <-sess.wgInbound:
+			appendFrame(p)
+		default:
+			break drain
+		}
+	}
+	return plain
 }
 
 // handleData processes a data query: decrypt, forward to WG, piggyback response.
@@ -767,30 +808,26 @@ func (s *DNSServer) handleData(conn *net.UDPConn, srcAddr *net.UDPAddr, req []by
 	// Forward plaintext to WireGuard.
 	localConn.Write(plain) //nolint:errcheck
 
-	// Piggyback any pending WG inbound response.
-	var wgPkt []byte
+	// Piggyback pending WG inbound responses, packing as many as fit.
+	var first []byte
 	select {
-	case wgPkt = <-sess.wgInbound:
+	case first = <-sess.wgInbound:
 	default:
 	}
-
-	if len(wgPkt) == 0 {
+	framed := drainDownstream(sess, first)
+	if len(framed) == 0 {
 		// Nothing to piggyback — send empty ACK.
-		resp := buildDNSTXTResponse(req, "")
-		conn.WriteToUDP(resp, srcAddr) //nolint:errcheck
+		conn.WriteToUDP(buildDNSTXTResponse(req, ""), srcAddr) //nolint:errcheck
 		return
 	}
 
 	var txNonce [12]byte
 	srvDNSNonceInto(txSeq, &txNonce)
-	encrypted := txAEAD.Seal(nil, txNonce[:], wgPkt, nil)
+	encrypted := txAEAD.Seal(nil, txNonce[:], framed, nil)
 
 	// Encode response: <b32(txSeq)>.<b32(encrypted)>
-	txSeqB32 := srvB32enc.EncodeToString(uint32BESrv(txSeq))
-	encB32 := srvB32enc.EncodeToString(encrypted)
-	txt := txSeqB32 + "." + encB32
-	resp := buildDNSTXTResponse(req, txt)
-	conn.WriteToUDP(resp, srcAddr) //nolint:errcheck
+	txt := srvB32enc.EncodeToString(uint32BESrv(txSeq)) + "." + srvB32enc.EncodeToString(encrypted)
+	conn.WriteToUDP(buildDNSTXTResponse(req, txt), srcAddr) //nolint:errcheck
 }
 
 // handleKeepalive updates the session lastSeen timestamp and responds with "K".
@@ -826,19 +863,15 @@ func (s *DNSServer) handleKeepalive(conn *net.UDPConn, srcAddr *net.UDPAddr, req
 	sess.txSeq++
 	sess.mu.Unlock()
 
-	var wgPkt []byte
-	select {
-	case wgPkt = <-sess.wgInbound:
-	default:
-	}
-	if len(wgPkt) == 0 {
+	framed := drainDownstream(sess, nil)
+	if len(framed) == 0 {
 		conn.WriteToUDP(buildDNSTXTResponse(req, "K"), srcAddr) //nolint:errcheck
 		return
 	}
 
 	var txNonce [12]byte
 	srvDNSNonceInto(txSeq, &txNonce)
-	encrypted := txAEAD.Seal(nil, txNonce[:], wgPkt, nil)
+	encrypted := txAEAD.Seal(nil, txNonce[:], framed, nil)
 	txt := srvB32enc.EncodeToString(uint32BESrv(txSeq)) + "." + srvB32enc.EncodeToString(encrypted)
 	conn.WriteToUDP(buildDNSTXTResponse(req, txt), srcAddr) //nolint:errcheck
 }

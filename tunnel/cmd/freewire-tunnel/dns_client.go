@@ -79,6 +79,12 @@ var (
 	dnsMaxConcurrentQueries = envInt("FREEWIRE_DNS_CONCURRENCY", 32)
 	udpPoolPerServer        = envInt("FREEWIRE_DNS_POOL", dnsMaxConcurrentQueries)
 	dnsSendWorkers          = envInt("FREEWIRE_DNS_WORKERS", dnsMaxConcurrentQueries)
+	// Pollers keep return-path queries in flight. Downstream on a transfer is
+	// (responses/s x packet), and a response only comes back on a query, so a
+	// single serial poll capped downstream near one packet per poll interval. A
+	// pool that re-polls immediately whenever it got data keeps the carrier full
+	// of return queries (still bounded globally by dnsQuerySem).
+	dnsPollWorkers = envInt("FREEWIRE_DNS_POLLERS", 24)
 )
 
 // envInt reads a positive integer from env, or returns def.
@@ -118,6 +124,13 @@ type dnsClientSession struct {
 	// check/open/commit so the window only advances for an authenticated packet.
 	rx   replayWindow
 	rxMu sync.Mutex
+	// pollNonce makes each poll query name unique. Concurrent pollers all query
+	// the same k.<token> name, so a recursive resolver would dedupe or cache them
+	// and answer most from one upstream query -- collapsing the return path to a
+	// single poll's worth of data. A per-poll nonce label (which the server
+	// ignores) forces every poll to miss the cache and reach the authoritative
+	// server.
+	pollNonce atomic.Uint64
 }
 
 // effectiveDNSTunnelDomain is the zone the client queries: whatever the server
@@ -346,16 +359,16 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 				case <-done:
 					return
 				case p := <-sendQ:
-					data, err := s.sendPacket(p)
+					pkts, err := s.sendPacket(p)
 					if err == nil {
 						sentCount.Add(1)
 					}
-					if err != nil || len(data) == 0 {
-						continue
-					}
-					select {
-					case inboundCh <- data:
-					case <-done:
+					for _, data := range pkts {
+						select {
+						case inboundCh <- data:
+						case <-done:
+							return
+						}
 					}
 				}
 			}
@@ -429,41 +442,48 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 		}
 	}()
 
-	// Poll loop: keeps a query in flight so the server can return data.
-	go func() {
-		var lastActivity time.Time
-		for {
-			select {
-			case <-done:
-				return
-			default:
+	// Poll pool: several return-path queries in flight at once, not one at a
+	// time. A worker that got data re-polls immediately (draining a burst as fast
+	// as the carrier allows); a worker that got nothing backs off -- fast while a
+	// transfer was recently active so the pool re-saturates the instant data
+	// resumes, idle otherwise so a quiet tunnel is not a query flood. lastActivity
+	// is shared across the pool, refreshed by any downstream receipt (poll or the
+	// data-send piggyback path).
+	var lastActivityNano atomic.Int64
+	lastActivityNano.Store(time.Now().UnixNano())
+	for i := 0; i < dnsPollWorkers; i++ {
+		go func() {
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				pkts, err := s.poll()
+				if err != nil || len(pkts) == 0 {
+					interval := dnsPollIdle
+					if time.Since(time.Unix(0, lastActivityNano.Load())) < dnsPollBusyWindow {
+						interval = dnsPollFast
+					}
+					select {
+					case <-time.After(interval):
+					case <-done:
+						return
+					}
+					continue
+				}
+				lastActivityNano.Store(time.Now().UnixNano())
+				for _, data := range pkts {
+					pollBytes.Add(uint64(len(data)))
+					select {
+					case inboundCh <- data:
+					case <-done:
+						return
+					}
+				}
 			}
-
-			interval := dnsPollIdle
-			if time.Since(lastActivity) < dnsPollBusyWindow {
-				interval = dnsPollFast
-			}
-			time.Sleep(interval)
-
-			select {
-			case <-done:
-				return
-			default:
-			}
-
-			data, err := s.poll()
-			if err != nil || len(data) == 0 {
-				continue
-			}
-			pollBytes.Add(uint64(len(data)))
-			lastActivity = time.Now()
-			select {
-			case inboundCh <- data:
-			case <-done:
-				return
-			}
-		}
-	}()
+		}()
+	}
 
 	for {
 		select {
@@ -480,8 +500,13 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 }
 
 // poll asks the server whether it has anything queued, and decrypts it if so.
-func (s *dnsClientSession) poll() ([]byte, error) {
-	name := "k." + s.tokenB32 + "." + s.tunnelDomain + "."
+func (s *dnsClientSession) poll() ([][]byte, error) {
+	// Unique nonce label after the token so a recursive resolver treats every
+	// poll as a distinct name (no dedup/cache); the server ignores extra labels.
+	var nb [8]byte
+	binary.BigEndian.PutUint64(nb[:], s.pollNonce.Add(1))
+	nonce := b32enc.EncodeToString(nb[:])
+	name := "k." + s.tokenB32 + "." + nonce + "." + s.tunnelDomain + "."
 	resp, err := dnsQuery(s.dnsServer, name, time.Now().Add(2*time.Second))
 	if err != nil {
 		return nil, err
@@ -528,7 +553,7 @@ func dnsNameWireLen(name string) int {
 // The ciphertext is produced once for the whole packet and then fragmented, so
 // the server reassembles before it decrypts and the sequence number covers the
 // whole packet rather than each piece.
-func (s *dnsClientSession) sendPacket(pkt []byte) ([]byte, error) {
+func (s *dnsClientSession) sendPacket(pkt []byte) ([][]byte, error) {
 	seq := atomic.AddUint32(&s.txSeq, 1) - 1
 	// Same construction as the ICMP transport, same hazard: the nonce is
 	// derived from the sequence number, so a wrap repeats a (key, nonce) pair
@@ -594,7 +619,7 @@ func (s *dnsClientSession) sendPacket(pkt []byte) ([]byte, error) {
 	// server-side, which under concurrent arrival is not necessarily the last
 	// index, so scan every response; only the completing one carries data.
 	var firstErr error
-	var piggyback []byte
+	var piggyback [][]byte
 	for range names {
 		r := <-results
 		if r.err != nil {
@@ -603,8 +628,8 @@ func (s *dnsClientSession) sendPacket(pkt []byte) ([]byte, error) {
 			}
 			continue
 		}
-		if data, err := s.decodePiggyback(r.resp); err == nil && len(data) > 0 {
-			piggyback = data
+		if pkts, err := s.decodePiggyback(r.resp); err == nil && len(pkts) > 0 {
+			piggyback = append(piggyback, pkts...)
 		}
 	}
 	if firstErr != nil {
@@ -656,8 +681,30 @@ func splitCiphertext(b []byte, size int) [][]byte {
 	return out
 }
 
+// splitDownstreamFrames splits a decrypted downstream plaintext into the WG
+// packets it carries. The server packs multiple packets into one response to use
+// the DNS response size (up to the client's advertised EDNS0 budget) instead of
+// wasting all but one packet's worth of it: framing is [2-byte BE length][packet]
+// repeated. A single packet is just the one-frame case, so the wire format is
+// uniform. A malformed length (past the buffer) ends the scan rather than
+// erroring: a truncated response yields the whole packets it did carry.
+func splitDownstreamFrames(plain []byte) [][]byte {
+	var pkts [][]byte
+	for len(plain) >= 2 {
+		n := int(binary.BigEndian.Uint16(plain[:2]))
+		if n == 0 || 2+n > len(plain) {
+			break
+		}
+		pkt := make([]byte, n)
+		copy(pkt, plain[2:2+n])
+		pkts = append(pkts, pkt)
+		plain = plain[2+n:]
+	}
+	return pkts
+}
+
 // decodePiggyback decrypts a payload the server attached to a data response.
-func (s *dnsClientSession) decodePiggyback(resp []byte) ([]byte, error) {
+func (s *dnsClientSession) decodePiggyback(resp []byte) ([][]byte, error) {
 	txt, err := parseTXTResponse(resp)
 	if err != nil || txt == "" {
 		return nil, nil
@@ -665,8 +712,9 @@ func (s *dnsClientSession) decodePiggyback(resp []byte) ([]byte, error) {
 	return s.decodePiggybackTXT(txt)
 }
 
-// decodePiggybackTXT decrypts a TXT payload of the form <b32(seq)>.<b32(data)>.
-func (s *dnsClientSession) decodePiggybackTXT(txt string) ([]byte, error) {
+// decodePiggybackTXT decrypts a TXT payload of the form <b32(seq)>.<b32(data)>
+// and returns the WG packets it framed.
+func (s *dnsClientSession) decodePiggybackTXT(txt string) ([][]byte, error) {
 	// Response TXT format: <b32(rxSeq)>.<b32(ciphertext)>
 	rparts := strings.SplitN(txt, ".", 2)
 	if len(rparts) != 2 {
@@ -686,12 +734,19 @@ func (s *dnsClientSession) decodePiggybackTXT(txt string) ([]byte, error) {
 	var rxNonce [12]byte
 	dnsNonceInto(rxSeq, &rxNonce)
 
-	// Serialize check -> open -> commit so the window advances only for a packet
-	// that authenticated. The rxSeq is attacker-visible in the response, so a
-	// forged one must not be able to move the window and lock out real packets.
+	// check -> open -> re-check+commit, with the AEAD open OUTSIDE the lock. The
+	// pollers run this concurrently; holding rxMu across the decrypt serialized
+	// every downstream packet through one mutex and its crypto, which throttled
+	// the return path just as concurrent polling was meant to widen it. The
+	// window still only advances for a packet that authenticated: the fast
+	// check/commit stay locked, and the re-check under the lock drops a duplicate
+	// that another goroutine committed while this one was decrypting. rxSeq is
+	// attacker-visible, so a forged seq must not move the window -- the commit is
+	// gated on a successful open, exactly as before.
 	s.rxMu.Lock()
-	defer s.rxMu.Unlock()
-	if !s.rx.check(rxSeq) {
+	fresh := s.rx.check(rxSeq)
+	s.rxMu.Unlock()
+	if !fresh {
 		// Already accepted, or too old to prove fresh: a replayed response. Drop.
 		return nil, nil
 	}
@@ -699,8 +754,16 @@ func (s *dnsClientSession) decodePiggybackTXT(txt string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("decrypt response: %w", err)
 	}
-	s.rx.commit(rxSeq)
-	return plain, nil
+	s.rxMu.Lock()
+	stillFresh := s.rx.check(rxSeq)
+	if stillFresh {
+		s.rx.commit(rxSeq)
+	}
+	s.rxMu.Unlock()
+	if !stillFresh {
+		return nil, nil
+	}
+	return splitDownstreamFrames(plain), nil
 }
 
 // sendKeepalive sends a DNS keepalive query k.<b32(token)>.<zone>.

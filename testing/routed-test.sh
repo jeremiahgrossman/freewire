@@ -39,6 +39,24 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# HARD DEADLINE. route-no-verify keeps routes up with the health watchdog off, so
+# a tunnel that carries almost nothing strands the whole machine for the entire
+# sample window -- long enough to lose an SSH/remote session. This detached
+# watchdog force-restores after HARD_DEADLINE no matter what the main script is
+# doing (even if it wedged), so the machine is never captured longer than that.
+# It kills by binary path, stops via the passwordless rule, and restores twice.
+HARD_DEADLINE="${HARD_DEADLINE:-45}"
+(
+  sleep "$HARD_DEADLINE"
+  echo "---- HARD DEADLINE ${HARD_DEADLINE}s hit: force-restoring ----" >> "$LOG"
+  sudo -n "$TUNNEL_BIN" --stop >/dev/null 2>&1
+  pkill -f "/tunnel/freewire-tunnel" >/dev/null 2>&1
+  sudo -n "$TUNNEL_BIN" --restore >/dev/null 2>&1
+) &
+WATCHDOG=$!
+# Cancel the watchdog if we finish cleanly first.
+trap 'kill "$WATCHDOG" 2>/dev/null; cleanup' EXIT
+
 {
   echo "════════════════════════════════════════════════════════════════"
   echo "routed-test: transport=$TRANSPORT resolver=${FREEWIRE_DNS_RESOLVER:-<server-direct>} @ $(date '+%Y-%m-%d %H:%M:%S')"
