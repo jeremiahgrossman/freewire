@@ -540,8 +540,40 @@ final class TunnelManager: ObservableObject {
         state = .upgrading
 
         await killTunnel()
-        await deregisterPeer()
 
+        // Upgrade via the cached connection, fastest-first. A probe told us a
+        // faster path is reachable; rebuild reusing the persistent peer (no
+        // control-plane call, no Privacy Pass token -- same reasons as reconnect)
+        // and let the fastest-first chain choose. It aims at WireGuard-direct and
+        // falls through to whatever is fastest-available, so a portal-login that
+        // opens the network upgrades DNS all the way to WireGuard, not just to the
+        // one path the probe happened to confirm. (forceTransport is nil here --
+        // the upgrade manager is suppressed while it is set -- so connectFromCache
+        // runs the fastest-first chain.)
+        if let cached = CachedConnection.load(host: api.serverHost),
+           let result = await connectFromCache(cached) {
+            guard !Task.isCancelled else { await killTunnel(); return }
+            lastGoodTransport = result.transport
+            peerToken = cached.peerToken
+            // connectedAt preserved: an upgrade should not reset the session clock.
+            state = .connected(
+                tunnelIP: cached.tunnelIP,
+                interfaceName: result.ifName,
+                connectedAt: at,
+                transport: result.transport
+            )
+            startWatchdog()
+            // Only resume probing if we actually moved faster; otherwise a
+            // no-progress rebuild would schedule the identical upgrade forever.
+            if result.transport.priority < old.priority {
+                startUpgradeManager(serverHost: api.serverHost, transport: result.transport)
+            }
+            return
+        }
+
+        // No usable cache: fall back to a full re-register via the API (needs the
+        // control plane, so only off a portal). Still fastest-first: no preferred
+        // transport, so the chain reaches WireGuard-direct when available.
         do {
             guard !Task.isCancelled else { return }
             let server = try await api.fetchConfig()
@@ -560,29 +592,18 @@ final class TunnelManager: ObservableObject {
                 tlsPort:         server.tlsEndpointPort,
                 dnsTunnelPort:   server.dnsTunnelPort,
                 icmpUDPPort:     server.icmpUDPPort,
-                // Name the path we are upgrading to. Without this the relaunched
-                // tunnel restarts the chain from the top and reselects whatever
-                // it had before, so the upgrade rebuilt the same tunnel and then
-                // upgraded again, forever.
-                preferredTransport: transport.rawValue,
+                preferredTransport: nil, // fastest-first chain, up to WireGuard-direct
                 dnsResolver: Preferences.shared.dnsResolverOverride,
                 dnsTunnelDomain: server.dnsTunnelDomain
             )
             let (ifName, newTransport) = try await launchTunnel(config: cfg)
 
-            // A disconnect during the rebuild must not be undone by it. Without
-            // this the upgrade finished, set .connected and left a live tunnel
-            // running behind a panel that said "Not protected".
             guard !Task.isCancelled else {
                 await killTunnel()
                 await deregisterPeer()
                 return
             }
 
-            // UX-003: the server issued a fresh address during re-registration.
-            // Reporting the old one left the panel showing an address the tunnel
-            // no longer used. connectedAt is deliberately preserved: an upgrade
-            // should not reset the session clock.
             lastGoodTransport = newTransport
             state = .connected(
                 tunnelIP: peer.tunnelIP,
@@ -591,10 +612,6 @@ final class TunnelManager: ObservableObject {
                 transport: newTransport
             )
             startWatchdog()
-
-            // Only resume probing if the upgrade actually moved us. If the chain
-            // handed back the same path -- or a slower one -- restarting the
-            // manager on it would schedule the identical upgrade again.
             if newTransport.priority < old.priority {
                 startUpgradeManager(serverHost: api.serverHost, transport: newTransport)
             }
