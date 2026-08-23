@@ -69,8 +69,21 @@ func orderCandidates(all []transportCandidate, preferred string) []transportCand
 	return out
 }
 
+// defaultCandidates lists transports in speed order, fastest first, so the chain
+// selects the best carrier a network allows rather than the first in an arbitrary
+// order. Direct WireGuard (no tunnel overhead) leads; the encapsulated paths
+// follow; the slow DNS/ICMP tunnels are last resorts. On a captive portal the
+// fast paths fail quickly (short handshake budgets) and it falls through to
+// whatever carries; on an open network it lands on WireGuard-direct immediately.
 func defaultCandidates() []transportCandidate {
 	return []transportCandidate{
+		{
+			// Direct WireGuard UDP: no proxy, no bridge. Fastest when the network
+			// allows UDP 51820 to the server; tried first so an open network never
+			// settles for a slower encapsulation.
+			name: "wireguard",
+			open: func(Config) (net.PacketConn, net.Conn, error) { return nil, nil, nil },
+		},
 		{
 			name: "http_connect",
 			open: func(cfg Config) (net.PacketConn, net.Conn, error) {
@@ -114,11 +127,6 @@ func defaultCandidates() []transportCandidate {
 				lp, err := runICMPUDPTunnel(cfg)
 				return lp, nil, err
 			},
-		},
-		{
-			// Direct WireGuard UDP: no proxy, no bridge.
-			name: "wireguard",
-			open: func(Config) (net.PacketConn, net.Conn, error) { return nil, nil, nil },
 		},
 	}
 }
@@ -387,6 +395,12 @@ func handshakeBudgetFor(name string) time.Duration {
 		return 8 * time.Second
 	case "icmp_udp":
 		return 5 * time.Second
+	case "wireguard":
+		// Tried first now. A WireGuard handshake over a working network is one
+		// round trip (well under a second), so a short budget still succeeds on an
+		// open network while falling through fast on a portal that blocks UDP
+		// 51820 -- the common captive case -- instead of stalling the whole chain.
+		return 2 * time.Second
 	default:
 		return 3 * time.Second
 	}

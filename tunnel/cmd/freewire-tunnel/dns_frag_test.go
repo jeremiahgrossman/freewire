@@ -147,8 +147,10 @@ func TestUnknownPreferredTransportIsIgnored(t *testing.T) {
 	}
 }
 
-func TestNoPreferenceKeepsSpecOrder(t *testing.T) {
-	want := []string{"http_connect", "tls443", "dns", "icmp_udp", "wireguard"}
+func TestNoPreferenceKeepsSpeedOrder(t *testing.T) {
+	// Speed order, fastest first: direct WireGuard leads so an open network never
+	// settles for a slower encapsulation; the slow tunnels are last resorts.
+	want := []string{"wireguard", "http_connect", "tls443", "dns", "icmp_udp"}
 	got := orderCandidates(defaultCandidates(), "")
 	for i, name := range want {
 		if got[i].name != name {
