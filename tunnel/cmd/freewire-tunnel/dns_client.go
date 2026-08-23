@@ -27,8 +27,11 @@ import (
 // All payload is Base32-encoded (RFC 4648, no padding, uppercase).
 // Session key: X25519 → HKDF-SHA256(ikm=shared, salt=token, info="freewire-dns-tunnel-v1", len=32)
 // Encryption:  ChaCha20-Poly1305, nonce = seq(4B big-endian) || 0x00000000(8B)
-// Flow control: bounded send queue + fixed worker pool, with separate send/poll
-//   concurrency budgets (see the vars below). Not the old AIMD sliding window.
+// Flow control: bounded send queue + worker pool, paced by separate adaptive
+//   AIMD limiters per direction that discover the path's sustainable rate (see
+//   dns_ratelimit.go). Unlike the old sliding window, the limiter never drops a
+//   packet -- it only makes a worker wait -- so it cannot trigger a retransmit
+//   storm.
 // Domain: *.<tunnel zone>, taken from the server config; see defaultDNSTunnelDomain.
 
 const (
@@ -60,9 +63,11 @@ const (
 	// WireGuard resend, which pushes more into an already-full window.
 	//
 	// Instead: a bounded queue absorbs bursts (a burst is delayed, not dropped,
-	// which is what stops the retransmit storm), a fixed pool of senders drains
-	// it, and separate send/poll semaphores cap concurrent queries so continuous
-	// pollers cannot starve the senders (see the vars below).
+	// which is what stops the retransmit storm), a pool of senders drains it, and
+	// separate per-direction ADAPTIVE limiters (dns_ratelimit.go) pace concurrent
+	// queries to the rate the path sustains -- learned at runtime, not fixed -- so
+	// continuous pollers cannot starve senders and neither direction blasts a
+	// throttled portal into loss.
 	//
 	// Queue SIZE is a latency budget, not just burst absorption. The queue holds
 	// ~depth/carrier-rate seconds of packets before it drops; at the recursor
@@ -316,7 +321,7 @@ func dnsHandshake(cfg Config, dnsServers []string, timeout time.Duration) (*dnsC
 	clientPubB32 := b32enc.EncodeToString(clientPub)
 	helloName := "h.1." + clientPubB32 + "." + domain + "."
 
-	resp, err := dnsQuery(dnsServer, helloName, deadline, dnsSendSem)
+	resp, err := dnsQuery(dnsServer, helloName, time.Until(deadline), dnsSendLimiter)
 	if err != nil {
 		return nil, fmt.Errorf("client hello: %w", err)
 	}
@@ -369,7 +374,7 @@ func dnsHandshake(cfg Config, dnsServers []string, timeout time.Duration) (*dnsC
 
 	// Step 3: ClientConfirm
 	confirmName := "h.3." + macB32 + "." + tokenB32 + "." + domain + "."
-	resp2, err := dnsQuery(dnsServer, confirmName, deadline, dnsSendSem)
+	resp2, err := dnsQuery(dnsServer, confirmName, time.Until(deadline), dnsSendLimiter)
 	if err != nil {
 		return nil, fmt.Errorf("client confirm: %w", err)
 	}
@@ -482,8 +487,9 @@ func (s *dnsClientSession) run(lp net.PacketConn) {
 				dsRate, pollRate := (dsb-lastDS)/5, (pb-lastPoll)/5
 				lastSent, lastDrop, lastQOK, lastQErr, lastDS, lastPoll = s, d, qok, qerr, dsb, pb
 				fmt.Fprintf(os.Stderr,
-					"freewire-tunnel: dns send %d/s, tail-drop %d/s (queue %d/%d); queries ok %d/s err %d/s; downstream %d B/s (poll %d B/s)\n",
-					ds/5, dd/5, len(sendQ), dnsSendQueue, dqok/5, dqerr/5, dsRate, pollRate)
+					"freewire-tunnel: dns send %d/s, tail-drop %d/s (queue %d/%d); queries ok %d/s err %d/s; downstream %d B/s (poll %d B/s); limit send=%.1f poll=%.1f\n",
+					ds/5, dd/5, len(sendQ), dnsSendQueue, dqok/5, dqerr/5, dsRate, pollRate,
+					dnsSendLimiter.currentLimit(), dnsPollLimiter.currentLimit())
 			}
 		}
 	}()
@@ -597,7 +603,7 @@ func (s *dnsClientSession) poll() ([][]byte, error) {
 	binary.BigEndian.PutUint64(nb[:], s.pollNonce.Add(1))
 	nonce := b32enc.EncodeToString(nb[:])
 	name := "k." + s.tokenB32 + "." + nonce + "." + s.tunnelDomain + "."
-	resp, err := dnsQuery(s.nextResolver(), name, time.Now().Add(2*time.Second), dnsPollSem)
+	resp, err := dnsQuery(s.nextResolver(), name, 2*time.Second, dnsPollLimiter)
 	if err != nil {
 		return nil, err
 	}
@@ -697,7 +703,7 @@ func (s *dnsClientSession) sendPacket(pkt []byte) ([][]byte, error) {
 	results := make(chan fragResult, len(names))
 	for _, name := range names {
 		go func(name string) {
-			resp, err := dnsQuery(s.nextResolver(), name, time.Now().Add(3*time.Second), dnsSendSem)
+			resp, err := dnsQuery(s.nextResolver(), name, 3*time.Second, dnsSendLimiter)
 			results <- fragResult{resp, err}
 		}(name)
 	}
@@ -860,8 +866,7 @@ func (s *dnsClientSession) decodePiggybackTXT(txt string) ([][]byte, error) {
 func (s *dnsClientSession) sendKeepalive() error {
 	tokenB32 := b32enc.EncodeToString(s.token)
 	name := "k." + tokenB32 + "." + s.tunnelDomain + "."
-	deadline := time.Now().Add(3 * time.Second)
-	_, err := dnsQuery(s.nextResolver(), name, deadline, dnsSendSem)
+	_, err := dnsQuery(s.nextResolver(), name, 3*time.Second, dnsSendLimiter)
 	return err
 }
 
@@ -893,13 +898,17 @@ func chunkLabels(s string, maxLen int) []string {
 	return labels
 }
 
-// Separate in-flight caps for upstream sends and downstream polls, so pollers
-// cannot starve senders (see the concurrency vars above). Their sum is matched
-// to udpPoolPerServer so a query always finds a pooled socket instead of dialing
-// and discarding one. dnsSendSem also covers the handshake and keepalives.
+// Separate ADAPTIVE limiters for upstream sends and downstream polls. Each
+// discovers the rate its direction sustains on the current path (AIMD: grow while
+// clean, back off on a failed query) instead of a fixed cap -- the field showed a
+// fixed value is right on one network and wrong on the next. Kept separate so
+// continuous pollers cannot starve senders. The configured concurrency values are
+// now the MAX each limiter may grow to; their sum stays matched to
+// udpPoolPerServer so an in-flight query always finds a pooled socket.
+// dnsSendLimiter also covers the handshake and keepalives.
 var (
-	dnsSendSem = make(chan struct{}, dnsSendConcurrency)
-	dnsPollSem = make(chan struct{}, dnsPollConcurrency)
+	dnsSendLimiter = newAdaptiveLimiter(min(8, dnsSendConcurrency), 2, dnsSendConcurrency)
+	dnsPollLimiter = newAdaptiveLimiter(min(4, dnsPollConcurrency), 2, dnsPollConcurrency)
 )
 
 // Query outcome counters, logged periodically by the run loop. They separate a
@@ -909,10 +918,19 @@ var (
 var dnsQueryOK, dnsQueryErr atomic.Uint64
 
 // dnsQuery sends a DNS TXT query for name to server:53 and returns the raw
-// response packet. sem is the in-flight budget to draw from (send or poll).
-func dnsQuery(server, name string, deadline time.Time, sem chan struct{}) (_ []byte, retErr error) {
-	sem <- struct{}{}
-	defer func() { <-sem }()
+// response packet. lim is the adaptive limiter for this direction (send or poll):
+// it gates in-flight concurrency and learns the path's rate from the outcome --
+// a returned error (mostly a timeout) is the loss signal it backs off on.
+//
+// timeout bounds the network exchange and starts AFTER a limiter slot is
+// acquired, not before: otherwise, under contention, a query could burn its whole
+// budget waiting for a slot and then "time out" the instant it ran -- which the
+// limiter would read as carrier loss and back off on, causing more waiting and a
+// collapse to the floor. Waiting for a slot is not loss; only the wire is.
+func dnsQuery(server, name string, timeout time.Duration, lim *adaptiveLimiter) (_ []byte, retErr error) {
+	lim.acquire()
+	defer func() { lim.release(retErr == nil) }()
+	deadline := time.Now().Add(timeout)
 	defer func() {
 		if retErr != nil {
 			dnsQueryErr.Add(1)
