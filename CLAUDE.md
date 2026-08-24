@@ -28,6 +28,29 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
      ~0 loss and pace to it, no hardcoded cap. Desk repro of a throttled portal
      exists (`FREEWIRE_DNS_CARRIER_CAP`); the limiter converges to the cap at 0%
      loss.
+  3. **Reconnect + path-upgrade reuse the cached peer** — both used to deregister
+     and re-register via the API on every attempt, so they failed behind a portal
+     (API blocked) and burned a Privacy Pass token each time. Now they try
+     `connectFromCache` first (persistent peer, no control-plane call, fastest-
+     first chain reaches wireguard-direct). Verified: killing the live tunnel
+     auto-reconnects (`testing/verify-reconnect.sh`).
+  4. **Error states CONN-5 + TRUST-4 wired** (from a background task, reviewed and
+     cherry-picked to main; the same task's unrequested Stage-2 attempt was NOT
+     merged — see below). CONN-5 = open-network timeout (retry once → verbatim
+     copy); TRUST-4 = issuer-key-changed, fail-closed. TRUST-4 detection verified
+     live (changed pin → freewire-tokens exit 3 → TokenStore hard-block).
+  5. **Test + release tooling:** `testing/regression.sh` (one-command core gate:
+     build, -race tests, app build, live transport probe), `testing/verify-
+     reconnect.sh`, and `scripts/release-macos.sh` (cert-ready: Release archive →
+     **embed the Go helpers into the .app** → sign+notarize when a Developer ID
+     exists, else unsigned dry run). The dry run caught that the Release bundle
+     was missing freewire-tunnel/freewire-tokens (the app has no repo-path
+     fallback when distributed); now fixed and DMG verified (12M, mounts).
+- **Stage 2 candidate exists but is NOT merged:** branch `claude/vibrant-bassi-823b06`
+  has a delegating-`conn.Bind` implementation (well-engineered, fast paths
+  untouched) from the over-scoped background task. Its "HTTPS works through a
+  throttle" claim did NOT reproduce (0/3 in two independent runs vs its claimed
+  2/2), so it was parked, not merged; the deferral below stands.
 - **Deferred (deliberate, see `DECISIONS.md` DNS-CARRIER-BACKPRESSURE):** Stage 2,
   true backpressure. Stage 1 keeps the carrier clean but a throttled pipe's queue
   still overflows and starves the active flow. The fix is a custom wireguard-go
