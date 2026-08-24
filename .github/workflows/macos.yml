@@ -1,0 +1,65 @@
+name: macOS build
+
+# Builds the macOS app, embeds the universal Go helpers, and packages a DMG on
+# every push. Signs + notarizes ONLY when the Developer ID secrets are present;
+# until they are, it still produces an (unsigned) DMG so the build + universal
+# embedding is exercised on every change -- Gatekeeper will reject that DMG, which
+# is expected. This wraps scripts/release-macos.sh (one source of truth for the
+# release build) rather than duplicating its logic.
+
+on:
+  push:
+    branches: [main, 'release/*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build, embed helpers, package DMG
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tunnel/go.mod
+
+      # Import the Developer ID cert into a temporary keychain when the secret is
+      # configured. Self-gates on the env (GitHub Actions forbids `secrets` in an
+      # `if:` condition), so it no-ops cleanly until the cert exists. The release
+      # script then detects the identity via `security find-identity` and signs;
+      # with no cert it builds unsigned.
+      - name: Import signing certificate (if configured)
+        env:
+          CERT_P12: ${{ secrets.DEVELOPER_ID_CERT_P12 }}          # base64 of the .p12
+          CERT_PASSWORD: ${{ secrets.DEVELOPER_ID_CERT_PASSWORD }}
+        run: |
+          if [ -z "$CERT_P12" ]; then
+            echo "No DEVELOPER_ID_CERT_P12 secret set; building UNSIGNED."
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/build.keychain"
+          security create-keychain -p "" "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          security unlock-keychain -p "" "$KEYCHAIN"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" "$KEYCHAIN"
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      # Signs + notarizes when the cert (above) and notary creds are present;
+      # otherwise an unsigned dry run. Same script the operator runs locally.
+      - name: Build, embed helpers, package DMG
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          NOTARIZATION_APP_PASSWORD: ${{ secrets.NOTARIZATION_APP_PASSWORD }}
+        run: bash scripts/release-macos.sh
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: Freewire-macOS-dmg
+          path: build/*.dmg
+          if-no-files-found: error

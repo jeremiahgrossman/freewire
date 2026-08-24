@@ -50,22 +50,31 @@ APP="$BUILD_DIR/$APP_NAME"
 # inside-out), so letting xcodebuild sign the app during archive -- before the
 # helpers are embedded -- would produce a bundle whose signature breaks the moment
 # the helpers are added. Manual signing gives the correct nested order.
-echo "==> archiving (Release, unsigned; signing driven manually)"
+echo "==> archiving (Release, universal arm64+x86_64, unsigned; signing driven manually)"
 xcodebuild archive -project "$PROJ" -scheme "$SCHEME" -configuration Release \
-  -archivePath "$ARCHIVE" CODE_SIGNING_ALLOWED=NO >/dev/null
+  -archivePath "$ARCHIVE" ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
+  CODE_SIGNING_ALLOWED=NO >/dev/null
 cp -R "$ARCHIVE/Products/Applications/$APP_NAME" "$APP"
 [[ -d "$APP" ]] || { echo "ERROR: app bundle not produced at $APP" >&2; exit 1; }
 
 # Embed the Go helper binaries. The app finds them next to its own executable
 # (Contents/MacOS/, see TunnelManager.helperPath); a distributed release has no
 # repo-path fallback, so an un-embedded release cannot run the tunnel at all.
-# Built natively for THIS host arch. DISTRIBUTION to other Macs needs universal
-# binaries (lipo arm64 + amd64) -- out of the single-user scope; noted.
-echo "==> building + embedding helper binaries (freewire-tunnel, freewire-tokens)"
-( cd "$ROOT/tunnel" \
-    && go build -o "$APP/Contents/MacOS/freewire-tunnel" ./cmd/freewire-tunnel \
-    && go build -o "$APP/Contents/MacOS/freewire-tokens" ./cmd/freewire-tokens )
+# Built UNIVERSAL (arm64 + x86_64, lipo'd) so one DMG runs on Apple Silicon and
+# Intel Macs alike -- matching the universal Swift app above.
+echo "==> building + embedding universal helper binaries (freewire-tunnel, freewire-tokens)"
+build_universal() { # $1 = ./cmd path (relative to tunnel/), $2 = output path
+  ( cd "$ROOT/tunnel" \
+    && GOOS=darwin GOARCH=arm64 go build -o "$2.arm64" "$1" \
+    && GOOS=darwin GOARCH=amd64 go build -o "$2.amd64" "$1" )
+  lipo -create "$2.arm64" "$2.amd64" -output "$2"
+  rm -f "$2.arm64" "$2.amd64"
+}
+build_universal ./cmd/freewire-tunnel "$APP/Contents/MacOS/freewire-tunnel"
+build_universal ./cmd/freewire-tokens "$APP/Contents/MacOS/freewire-tokens"
 [[ -x "$APP/Contents/MacOS/freewire-tunnel" ]] || { echo "ERROR: helper embed failed" >&2; exit 1; }
+echo "    app arch:    $(lipo -archs "$APP/Contents/MacOS/$SCHEME" 2>/dev/null)"
+echo "    helper arch: $(lipo -archs "$APP/Contents/MacOS/freewire-tunnel" 2>/dev/null)"
 
 if [[ $SIGN == 1 ]]; then
   echo "==> signing (hardened runtime; nested helpers first, then the app)"
