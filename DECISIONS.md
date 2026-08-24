@@ -306,8 +306,35 @@ is its own kind of false claim.
 
 ## DNS-CARRIER-BACKPRESSURE (Stage 2)
 
-**Deferred 2026-08-23 until the field shows the worst-case portal is common
-enough to justify a core refactor.**
+**Deferred 2026-08-23. FIELD-TESTED 2026-08-24: the deferral holds, now for a
+stronger reason — Stage 2 does not fix the real café, so it is not worth merging.**
+
+### Field result (2026-08-24, second café — the parked branch tested on-site)
+
+The worst-case pattern is NOT rare: 2 of 2 cafés tested block WireGuard-direct
+(UDP 51820) and TLS/443 to the server and leave only DNS. So "rare and
+field-unconfirmed" (the original defer reason) is wrong. BUT the parked Stage-2
+branch (`claude/vibrant-bassi-823b06`, delegating `conn.Bind`) was built and run
+at the café against its cached peer, and its backpressure did NOT make the café
+usable:
+
+- Backpressure engaged for real (`backpressure 7→25/s`, `queue 256/256`, no
+  tail-drop) — the mechanism is sound.
+- On server-direct (forced, apples-to-apples with main) it reached ~15–30 KB/s
+  downstream — comparable to main — then the egress self-check failed to sustain
+  and the tunnel tore down: **HTTPS BLOCKED, 0/10**, same user-visible outcome as
+  main. The branch's "2/2 TUNNELLED through a throttle" claim did not reproduce
+  in the field (matching the desk result, 0/3).
+
+So the bottleneck is the café's DNS-to-server rate itself, which no client-side
+change (pacing or backpressure) can raise. Stage 2 changes the failure mechanism
+(block vs tail-drop) but not the outcome. **Do not merge the branch.** An open
+sub-question worth a look before any further DNS-throughput work: the app's egress
+self-check tears a slow-but-moving tunnel down before it can be judged — whether
+relaxing it for slow transports would let ~15 KB/s carry light traffic is untested
+(but 15 KB/s shared across the machine is marginal for real use regardless).
+
+### Original decision
 
 ### What was decided
 

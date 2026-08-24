@@ -46,11 +46,15 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
      exists, else unsigned dry run). The dry run caught that the Release bundle
      was missing freewire-tunnel/freewire-tokens (the app has no repo-path
      fallback when distributed); now fixed and DMG verified (12M, mounts).
-- **Stage 2 candidate exists but is NOT merged:** branch `claude/vibrant-bassi-823b06`
-  has a delegating-`conn.Bind` implementation (well-engineered, fast paths
-  untouched) from the over-scoped background task. Its "HTTPS works through a
-  throttle" claim did NOT reproduce (0/3 in two independent runs vs its claimed
-  2/2), so it was parked, not merged; the deferral below stands.
+- **Stage 2 candidate exists but is NOT merged, and FIELD-TESTED as ineffective:**
+  branch `claude/vibrant-bassi-823b06` has a delegating-`conn.Bind` backpressure
+  implementation (well-engineered, fast paths untouched). Run at a real café
+  (2026-08-24): backpressure engaged for real (block, no tail-drop) but HTTPS
+  still BLOCKED 0/10 on server-direct — same outcome as main. Its "2/2 TUNNELLED"
+  claim did not reproduce (desk 0/3, field 0/10). **Do not merge.** Two of two
+  cafés block every faster carrier and leave only DNS, but the café's DNS-to-
+  server rate is the real ceiling and no client-side change raises it. See
+  `DECISIONS.md` DNS-CARRIER-BACKPRESSURE for the full field result.
 - **Deferred (deliberate, see `DECISIONS.md` DNS-CARRIER-BACKPRESSURE):** Stage 2,
   true backpressure. Stage 1 keeps the carrier clean but a throttled pipe's queue
   still overflows and starves the active flow. The fix is a custom wireguard-go
