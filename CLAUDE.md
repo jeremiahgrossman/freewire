@@ -28,9 +28,20 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   ```
   It reports which carriers that portal passes **to our server** and names the
   decision. The probe battery needs no registered peer, so it works cold.
-- **The CloudFront distribution EXISTS** (created 2026-08-24): id `EFJL255K0RTR`,
-  hostname **`d29cubp361kpm8.cloudfront.net`**, logging verified off. So the café
-  probe tests address-gating directly:
+- **The CloudFront distribution EXISTS and the fronted path is VERIFIED WORKING**
+  (2026-08-24): id `EFJL255K0RTR`, hostname **`d29cubp361kpm8.cloudfront.net`**,
+  logging off. `--cdn` probe reaches the origin through CloudFront and completes a
+  WebSocket end to end (`CDN WebSocket/443 OK via edge …`). Three bugs were found
+  and fixed getting there, all desk-caught before the café: (a) the tls443
+  listener advertised `h2` via autocert's ALPN → CloudFront spoke HTTP/2 and the
+  preface was misread as a raw frame (fixed: `NewTLS443Server` forces http/1.1
+  ALPN); (b) CloudFront sends its DISTRIBUTION hostname as the origin SNI, so the
+  cert handler served the self-signed cert → CloudFront rejected the origin
+  (fixed: unrecognized SNI now serves the real ACME cert for our domain, since a
+  CDN validates against the origin domain it is configured with, not the SNI it
+  sent); (c) our uTLS client offered `h2` to CloudFront's viewer side (fixed at
+  the distribution: HttpVersion=http1.1, since this distribution exists only to
+  carry our WebSocket). So the café probe tests address-gating directly:
   ```
   tunnel/freewire-tunnel --probe-battery --server 52.203.246.145 --insecure --cdn d29cubp361kpm8.cloudfront.net
   ```
