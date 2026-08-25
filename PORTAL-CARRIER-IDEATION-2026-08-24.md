@@ -169,6 +169,116 @@ The rule of thumb: if the kill is enforced by addressing/hardware/information
 theory, trust it. If it's enforced by *portal configuration*, turn it into a
 probe line and let the café answer.
 
+## Gap sweep round 2 (2026-08-24): is the published field exhausted?
+
+A second wave of ~10 agents swept the academic venues systematically (FOCI/PETS
+2023–2025, USENIX Sec 23–25, NDSS 23–26, IMC/CCS, anonbib, net4people) and tore
+down the operational tooling (sing-box, Xray/REALITY, ShadowTLS, Hysteria2, TUIC,
+Cloak, Shadowsocks-2022, zapret, GoodbyeDPI, Geneva, Outline, AmneziaWG, wstunnel,
+chisel). **Honest conclusion: for a single operator on one server against
+destination-based allow-listing, the published field is now substantively
+exhausted.** The entire modern circumvention corpus is written against a
+*different* adversary — nation-state DPI that classifies protocol/content on a
+route it otherwise permits. A café doesn't classify your protocol; it won't route
+you to an IP you haven't paid for. So almost every famous technique (REALITY,
+ShadowTLS, Hysteria, TUIC, obfs4, Shadowsocks-2022, Phantun) is *content/SNI/
+active-probe evasion that still terminates on our server's IP* — it dies at the
+same destination drop as raw WireGuard. Against destination allow-listing there
+are exactly **two** structural answers, and the sweep confirms it from many
+angles:
+
+### NEW HIGH-VALUE CLASS — reach a permitted destination (CDN-front our own server)
+
+The one thing that structurally beats destination allow-listing and is
+self-hostable by one operator: make our server reachable *as* an allow-listed
+cloud destination, so the portal sees a CDN edge IP + CDN hostname instead of our
+bare EC2 IP. Not domain fronting (that's dead) — we genuinely terminate behind the
+CDN's own first-party endpoint.
+
+- **Headline: CloudFront WebSocket in front of our own EC2.** AWS shipped
+  WebSocket support for CloudFront VPC/custom origins (May 2026). Run the WSS-443
+  carrier we just built behind a CloudFront distribution; the portal sees
+  `*.cloudfront.net` on a CloudFront edge IP. No relay code, uses our existing
+  AWS, and CloudFront→origin can preserve WS framing (no forced TCP-over-TCP on
+  that leg). Self-hostable, one operator.
+- **Alternatives / edge-IP diversity:** a Cloudflare Worker WSS relay (proven at
+  scale for vless-over-Workers, but `connect()` is TCP-only → TCP-over-TCP, and
+  ToS-gray), a Lambda function-URL relay (CensorLess, PoPETs 2026 — first-party
+  function hostname, *not* dead fronting), Deno Deploy. Each is a different CDN =
+  different edge IPs = another portal class beaten.
+- **The catch, and the probe that settles it:** this beats **FQDN→frozen-IP**
+  portals (the portal snoops allowed DNS names, freezes the resolved IPs into an
+  ipset, then filters by IP — openNDS/pfSense/UniFi/basic gear, the common café
+  class). It does **not** beat **live-SNI** enterprise portals that re-check the
+  SNI continuously. Which mode a portal is in is a one-line pre-auth probe:
+  `openssl s_client -connect <cloudfront-edge-ip>:443 -servername d123.cloudfront.net`
+  from behind the portal. If the TLS completes to the edge IP pre-auth, the whole
+  CDN-front class is live there. The café that gated our IP and passed DNS is a
+  strong candidate for the winnable mode.
+- **Cost caveat:** CloudFront egress ~$0.085/GB — fine for one user, in the
+  `deploy/COSTS.md` "ruinous at scale" bucket. Fits single-user scope.
+
+**This is arguably higher-value than raw WSS-443 for the café**, because WSS-443
+to our *own* IP still gets IP-gated; CDN-fronted WSS is what reaches a
+destination-gated portal. Roadmap: WSS-443 direct (done, beats "blocks non-web
+443") → CDN-fronted WSS (beats "blocks our IP"). The fall-through selection
+already discovers whichever works.
+
+### The other structural answer — desync a stateful portal (conditional)
+
+**Geneva-class client-side DPI desync** (Geneva, zapret, GoodbyeDPI): craft
+your own outbound packets (segment splitting, low-TTL/bad-checksum decoy packets,
+RST injection) to desync a *stateful inline* portal's tracking so a flow to a
+blocked destination survives. This is the only *client-only* way to create
+reachability to a blocked destination — but ONLY if the portal enforces with a
+stateful inline redirect box, NOT a hard L3 walled-garden ACL (a low-TTL decoy to
+a blocked IP is still a packet to a blocked IP). The café's `443 connection
+refused` was an *active reset* from an inline box, which is encouraging for
+desyncability. macOS needs a pf/divert packet-mangler (root). Cheap probe: send a
+real ClientHello to a blocked destination preceded by a low-TTL fake segment; if
+the handshake completes, the portal is desyncable. Gated on that one probe.
+
+### Cheaper self-hostable add-ons the sweep surfaced
+
+- **AmneziaWG** junk-packet + magic-header obfuscation on wireguard-direct: a
+  drop-in WG fork on both ends, for networks that *DPI-fingerprint and drop plain
+  WireGuard* (distinct from destination/port blocking). Content-only; doesn't beat
+  allow-listing. Cheap flag, self-hostable.
+- **Outline SDK `disorder` / TCP-reorder**: a named fragmentation-family
+  obfuscation we didn't have; client-side, cheap, for the TLS/WSS carriers.
+- **Build constraint for WSS-443 (USENIX '24 encapsulated-TLS fingerprinting):**
+  do NOT nest an inner TLS handshake inside WSS — run WireGuard's Noise directly
+  inside the WSS binary frames. **We already do this** (WG packets ride WSS frames,
+  no inner TLS), so the carrier is built the fingerprint-resistant way. Keep it so.
+- **Congestion control (FOCI '25 Xue/Ensafi):** BBR ≈ aggressive custom CC below
+  ~20% loss, and a bespoke sender adds a fingerprint. Independently validates the
+  Stage-2 backpressure deferral and the Stage-1 AIMD — if Stage 2 is ever picked
+  up, mirror standard TCP/BBR dynamics, don't hand-roll an aggressive window.
+
+### KILLED — IP-source-spoofing / reflection ("echo") carriers (physics)
+
+Sending packets pre-auth with a **spoofed source = our server** so replies land
+on our server does not work as a carrier, for a stack of independent reasons, any
+one of which is fatal:
+
+1. **The café gateway NATs.** Every outbound packet has its source rewritten to
+   the gateway's public IP:port. A spoofed source is *overwritten* before it
+   leaves the building, so the reflector replies to the gateway (which NATs it
+   back to us), never to our server. Spoofing upstream of a NAT is pointless.
+2. **Anti-spoofing (BCP 38 / uRPF)** where there is no NAT: access networks widely
+   drop packets whose source isn't in the local subnet (CAIDA's Spoofer project
+   measures this as broadly deployed and growing). The spoofed packet dies at the
+   first hop.
+3. **It's blind and unidirectional.** Even if a reply reached our server, the
+   client receives *nothing* back on that path — and a VPN needs a bidirectional
+   handshake (WireGuard is a round trip). There is no downlink to the client:
+   inbound to an unauthenticated client is exactly what the portal blocks.
+
+Reflection/triangular-routing is a real technique class for covert *signaling*
+(ultra-low-bandwidth, e.g. idle-scan style), not for carrying a tunnel. Killed on
+physics (NAT + anti-spoofing) and on the unidirectional-blind property, not on
+portal policy.
+
 ## The honest meta-point
 
 Prevalence on the specific venues we visit is **unmeasured for every idea**, and
