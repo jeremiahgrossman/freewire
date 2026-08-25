@@ -18,49 +18,90 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 - **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
 - **In progress:** nothing
-- **WebSocket-over-TLS-443 carrier DONE (`5db4bec`), not yet field-tested.** New
-  `wss443` rung: WireGuard inside WSS binary frames on the existing 443 port, one
-  cert, one listener; server discriminates raw-vs-WS by peeking one byte inside
-  TLS. Answers the café's "tls443: connection refused" = likely "blocks non-web
-  443, not 443." `--wss-probe` tests both carriers side by side (no root) and
-  names the network's behavior; wired into probe-transports.sh + regression.sh.
-  Both RFC-6455 codecs tested against the RFC's own vectors; real client-binary-
-  vs-server-listener interop test (bidirectional). Desk-verified (gofmt/vet/-race
-  both modules, app build). Needs a field/probe run to confirm a real portal
-  passes web-443 where it refuses raw 443. Sits after tls443 in speed order, so
-  the fall-through selection reaches it only when raw 443 was refused.
-- **Carrier ideation DONE (`PORTAL-CARRIER-IDEATION-2026-08-24.md`).** Six-agent
-  survey of novel carriers. Key reframe: mainstream portals allow-list by
-  DESTINATION (IP/FQDN), not port — so "port open" means "open to the vendor's
-  server," and the only test that matters is whether the portal passes arbitrary
-  bytes to OUR server on port N (venue-specific; probe it). Recommended next,
-  in order: (1) a cheap non-routed **probe battery** (UDP/443, NTP/123, UDP/4500,
-  IPv6 egress, multi-IP TLS/443) run at real portals BEFORE building; (2) **UDP/443
-  QUIC-shaped** carrier — near line-rate, no TCP-over-TCP, block-QUIC is off by
-  default on most portals, Mullvad ships WG-over-QUIC; (3) **IPv6 egress** where a
-  v4-only portal leaks v6 (full speed, trivial). Structural lead: **multi-IP
-  destination diversity** (server IPs in clean ranges). Folklore killed with
-  reasons: link-local protos (mDNS/SSDP/LLMNR/NetBIOS/DHCP), IPsec/IKE pre-auth,
-  APNs, SIP/RADIUS/syslog/SMTP/SSH, covert header/timing channels.
-- **Done since the 2026-08-23 field test:**
+- **NEXT ACTION IS A FIELD RUN, and everything for it is deployed.** At a café:
+  ```
+  tunnel/freewire-tunnel --probe-battery --server 52.203.246.145 --insecure
+  ```
+  It reports which carriers that portal passes **to our server** and names the
+  decision. Add `--cdn <dist>.cloudfront.net` once a distribution exists to also
+  test the address-gating hypothesis. Everything below is desk-verified; the
+  open questions are all "what does a real portal do", which only this answers.
+
+### Session 2026-08-24 (carriers + measurement)
+
+The through-line: the café blocked us by **destination**, so the work was (a) a
+selection loop that keeps trying until something actually carries traffic, (b) a
+carrier that looks like the web, and (c) instrumentation to measure a portal
+instead of guessing.
+
+1. **Traffic-verified fall-through selection** (`3bae110`) — selection judged each
+   rung by whether WireGuard *handshaked*, committed to the first that did, and
+   gave up if routing then found the tunnel carried nothing. That is why the café
+   stopped at DNS and never tried ICMP. Now establish→route is a fall-through
+   loop: establish over the fastest carrier that handshakes, route, verify egress;
+   if it carries no traffic, restore the machine, exclude that carrier, fall
+   through to the next-fastest. "First to handshake" → "fastest that actually
+   carries traffic." Fires ONLY when egress verify fails, so a normal network
+   behaves exactly as before. `establishTunnel` takes an `excluded` set. Observed
+   working live during routed testing (it handled a transient egress failure
+   gracefully instead of stranding the machine).
+2. **WebSocket-over-TLS-443 carrier** (`5db4bec`) — new `wss443` rung: WireGuard
+   inside WSS binary frames on the **existing** 443 port, one cert, one listener.
+   The server discriminates raw-vs-WebSocket by peeking ONE byte inside TLS (a raw
+   frame starts with a small uint16 length byte; an upgrade starts `G`). wsConn is
+   a transparent `net.Conn`, so `runLocalProxy`/`bridgeToWireGuard` are unchanged.
+   Hand-rolled RFC 6455 subset, no new dependency; both codecs tested against the
+   **RFC's own published vectors** (not against each other). Client verifies
+   `Sec-WebSocket-Accept`, so a portal answering with its login page fails at the
+   handshake and the chain falls through. **Verified live against the deployed
+   server: real WireGuard handshake over wss443 (495ms).**
+3. **Probe battery** (`3a032f6`, `--cdn` line `08627d5`) — `--probe-battery`
+   surveys every carrier plus the UDP/443, UDP/123 and IPv6 candidates, each
+   against OUR server, rootless and non-routed. Backed by a server-side
+   **ProbeResponder** (`internal/transport/probe.go`): magic-gated, rate-limited,
+   and **non-amplifying** (reply is smaller than the accepted request floor), so
+   the open ports are not an NTP or QUIC service. `--cdn` adds the direct-vs-CDN
+   comparison that isolates *address* gating from *port* gating.
+4. **Carrier peer pinning** (`01d9780`) — `setupRouting` pinned only the
+   *configured* server address; with anything in front (a CDN edge IP) the
+   carrier's real peer went unpinned, so the split-default route would swallow the
+   carrier's own connection and loop it into the tunnel — the "connected but
+   carries nothing" failure this project already lost weeks to. Now pins
+   `transportConn.RemoteAddr()` too: correct for every carrier, a no-op for direct
+   ones. Verified with four routed runs (3× 6/6 TUNNELLED) plus an A/B against the
+   pre-change binary rather than assuming it was a no-op.
+5. **Server redeployed** (`bad6930`) — the live server now runs the WSS carrier and
+   the probe responder. **Pinned key unchanged** (`4MZT9TPG…S2DA=`), so existing
+   client pins hold. Fixed a latent deploy bug: security-group port rules lived
+   inside the "group does not exist yet" branch, so a group that already existed
+   never gained rules added later — a new listener would deploy, bind, and be
+   silently unreachable, which the client reports as "blocked" and is
+   indistinguishable from a portal blocking it. Rules are now idempotent per run;
+   added udp/443 + udp/123.
+
+**Research (two rounds, ~16 agents): the published field is substantively
+exhausted for a single operator vs destination allow-listing.** See
+`TRANSPORT-RESEARCH-2026-08-24.md` and `PORTAL-CARRIER-IDEATION-2026-08-24.md`.
+The modern circumvention corpus targets *content/DPI* evasion on an
+already-routable path, so REALITY/ShadowTLS/Hysteria/obfs4/Shadowsocks all still
+terminate on our IP and die at the same drop. Against destination gating there
+are two structural answers: **reach a permitted destination** (CDN-front our own
+server — specced in `CDN-FRONTED-CARRIER-SPEC.md`, items #1 and #2 built) or
+**desync a stateful portal** (Geneva-class, only if the portal is inline-stateful
+rather than a hard L3 ACL). Killed with reasons: link-local protocols (cannot
+egress — physics), IPsec pre-auth ("passthrough" is NAT-correctness, not
+authorization), APNs (Apple's netblock), covert header/timing channels (below the
+DNS floor), and **IP-source-spoofing/reflection** (the gateway NATs over the
+spoofed source, BCP38 drops it otherwise, and it is blind/unidirectional).
+Ranked next builds if the field supports them: **UDP/443 QUIC-shaped** (near
+line-rate, no TCP-over-TCP, block-QUIC is off by default, Mullvad ships it), then
+**IPv6 egress**, then **CDN-fronted WSS**.
+
+- **Earlier work (2026-08-23 field test onward):**
   1. **Fastest-transport selection** — the chain now tries carriers in speed order
      (wireguard-direct first) and picks the fastest a network allows, instead of
      stopping at the first in a fixed order. `testing/probe-transports.sh` lists
      what any network allows (non-routed, --select-only per transport).
-  0. **Traffic-verified fall-through selection** (`3bae110`) — selection judged
-     each rung by whether WireGuard *handshaked*, committed to the first that
-     did, and gave up if routing then found the tunnel carried nothing. That is
-     why the café stopped at DNS and never tried ICMP. Now the establish→route
-     step is a fall-through loop: establish over the fastest carrier that
-     handshakes, route, verify egress; if it carries no traffic, restore the
-     machine, exclude that carrier, and fall through to the next-fastest. "First
-     to handshake" → "fastest that actually carries traffic." Reuses the exact
-     setupRouting/cleanupRouting the old fatal path used; new behavior fires ONLY
-     when egress verify fails (a normal net verifies the first carrier and breaks
-     as before). `establishTunnel` takes an `excluded` set; probe-transports.sh
-     now registers-or-reuses a cached peer so it probes all five carriers behind
-     a portal. Desk-verified (build/vet/-race); the routed fall-through itself
-     still needs a guarded routed/field run to confirm it reaches ICMP.
   2. **Adaptive carrier-rate pacing (Stage 1 of backpressure)** — per-direction
      AIMD limiters (`dns_ratelimit.go`) discover the path's sustainable rate at
      ~0 loss and pace to it, no hardcoded cap. Desk repro of a throttled portal
@@ -93,24 +134,14 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   cafés block every faster carrier and leave only DNS, but the café's DNS-to-
   server rate is the real ceiling and no client-side change raises it. See
   `DECISIONS.md` DNS-CARRIER-BACKPRESSURE for the full field result.
-- **Transport research (2026-08-24, `TRANSPORT-RESEARCH-2026-08-24.md`):** a
-  four-agent survey of public captive-portal / censorship-circumvention work.
-  Top actionable finding: **the café's `443 connection refused` was probably
-  "blocks non-web 443," not "blocks 443."** Portal gateways routinely pass 443
-  that completes an HTTP Upgrade (looks like a website) and reset a raw uTLS
-  session to an arbitrary IP — which is exactly our TLS/443 carrier. So the
-  strongest next build is a **WebSocket-over-TLS-443 carrier** (WireGuard inside
-  WSS frames): the portal-friendly denominator every mature tunnel converges on
-  (wstunnel/chisel/gost/xray), ~100 Mbps class, reuses our TLS+cert infra, and
-  the fall-through selection above is what would let the chain discover it works
-  where raw TLS/443 is refused. Second: an **IPv6 carrier** when a v4-only portal
-  leaks v6 (spike via a probe first). Roadmap: **MASQUE/HTTP-3** (UDP-native, no
-  TCP-over-TCP). Rejected with reasons: domain fronting (dead on major CDNs),
-  ECH (no benefit on our IP-addressed server), MAC-clone/ARP (hostile + macOS-
-  broken), refraction/Snowflake (need infra we can't run). The DNS-throttle
-  literature independently confirms the Stage-2 deferral: no technique widens a
-  recursor's forwarding cap; the way out of a throttled-DNS-only café is a
-  different carrier, not a better DNS carrier.
+- **Why the café's 443 failure was misread** (`TRANSPORT-RESEARCH-2026-08-24.md`):
+  the logged `443 connection refused` reads as "blocks 443" but portal gateways
+  routinely pass 443 that completes an HTTP Upgrade (looks like a website) while
+  resetting a raw uTLS session to an arbitrary IP — exactly our TLS/443 carrier.
+  That reading is what produced the WSS-443 carrier above. The DNS-throttle
+  literature also independently confirms the Stage-2 deferral: no technique
+  widens a recursor's forwarding cap, so the way out of a throttled-DNS-only café
+  is a different carrier, not a better DNS carrier.
 - **Deferred (deliberate, see `DECISIONS.md` DNS-CARRIER-BACKPRESSURE):** Stage 2,
   true backpressure. Stage 1 keeps the carrier clean but a throttled pipe's queue
   still overflows and starves the active flow. The fix is a custom wireguard-go
@@ -278,8 +309,12 @@ clear perf fix, but a careful core change; and (b) a routed test with background
 apps quit, to confirm a single request works when the carrier isn't swamped
 (isolating congestion from any residual data-plane bug).
 
-Diagnostic tools built: `--dns-probe`, `--dns-throughput [--duration]`,
-`--dns-datatest`, `--icmp-probe`, `--select-only`, `testing/cafe-diagnostic.sh`.
+Diagnostic tools built: `--probe-battery` (the one to reach for at a portal:
+surveys every carrier against our server, rootless, non-routed), `--wss-probe`
+(raw-443 vs WebSocket-443 side by side), `--dns-probe`, `--dns-throughput
+[--duration]`, `--dns-datatest`, `--icmp-probe`, `--select-only`,
+`testing/probe-transports.sh` (real WG handshake per carrier; café-capable via a
+cached peer), `testing/cafe-diagnostic.sh`.
 - **Two reliability bugs fixed and verified:** (1) the server's NAT MASQUERADE
   vanished on instance stop/start (netfilter-persistent was a no-op, iptables-
   persistent never installed) — every "connected but no traffic" failure traced
@@ -329,7 +364,7 @@ subnet, so tunnel egress cannot be tested against them. See
 | | |
 |---|---|
 | Server | `52.203.246.145` (Elastic IP, `t4g.small`, us-east-1). Deploy with `deploy/launch-aws.sh`, remove with `deploy/destroy-aws.sh` |
-| Ports | API `8080` (HTTPS), TLS `443`, DNS `53`, ICMP/UDP `4500`, WireGuard `51820` |
+| Ports | API `8080` (HTTPS), TLS+WebSocket `443/tcp`, DNS `53`, ICMP/UDP `4500`, WireGuard `51820`, probe responder `443/udp` + `123/udp`. `deploy/launch-aws.sh` opens all of them idempotently on every run |
 | Trust | The client pins the server's WireGuard public key. Set it with `defaults write com.freewire.vpn.Freewire pinnedServerKey '<key>'`; `provision.sh` prints it |
 | Build + run the app | `xcodebuild build -project macos/Freewire/Freewire.xcodeproj -scheme Freewire -configuration Debug CODE_SIGNING_ALLOWED=NO`, then run the product directly to see its stderr |
 | Helpers | `cd tunnel && go build -o freewire-tunnel ./cmd/freewire-tunnel && go build -o freewire-tokens ./cmd/freewire-tokens`. Debug builds fall back to these paths |
