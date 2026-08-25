@@ -323,7 +323,8 @@ func main() {
 			break
 		}
 
-		if err := setupRouting(tunName, bypassHost, carrierResolvers(cfg), cfg.DoHEndpoints); err == nil {
+		if err := setupRouting(tunName, bypassHost, carrierPeerAddr(transportConn),
+			carrierResolvers(cfg), cfg.DoHEndpoints); err == nil {
 			// Routed and egress verified: this carrier actually carries traffic.
 			break
 		} else {
@@ -739,6 +740,27 @@ func releaseStalePins() {
 	os.Remove(pinnedRoutesFile) //nolint:errcheck
 }
 
+// carrierPeerAddr reports the IP the established carrier is actually connected
+// to, or "" when there is nothing to read.
+//
+// The DNS and ICMP carriers run their own bridge and hand back a nil transport
+// connection; they pin their resolvers separately, so an empty result here is
+// the correct answer for them rather than a missing one.
+func carrierPeerAddr(transport net.Conn) string {
+	if transport == nil {
+		return ""
+	}
+	ra := transport.RemoteAddr()
+	if ra == nil {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(ra.String())
+	if err != nil {
+		return ""
+	}
+	return host
+}
+
 // recordPins persists the current pin list so a crash can be repaired later.
 func recordPins() {
 	if len(bypassRoutes) == 0 {
@@ -763,7 +785,7 @@ func recordPins() {
 // an arbitrary entry (a bridge's, say, not the physical link's) and the add then
 // fails with "file exists" while the original default survives. Traffic kept
 // flowing outside the tunnel while the client reported "Protected".
-func setupRouting(tunName, bypassHost string, carrierResolvers []string, dohEndpoints []string) error {
+func setupRouting(tunName, bypassHost, carrierPeer string, carrierResolvers []string, dohEndpoints []string) error {
 	// Already repaired at process start; nothing to redo here.
 
 	// Resolve bypass host to an IP if needed.
@@ -783,6 +805,30 @@ func setupRouting(tunName, bypassHost string, carrierResolvers []string, dohEndp
 	// over another interface — and would black-hole the transport.
 	if err := pinOutsideTunnel(bypassIP); err != nil {
 		return fmt.Errorf("pin server route: %w", err)
+	}
+
+	// Pin the address the carrier is ACTUALLY talking to, which is not always
+	// the server's.
+	//
+	// bypassIP comes from configuration; carrierPeer comes from the established
+	// connection. They are the same for every carrier that dials the server
+	// directly, and they diverge the moment anything sits in front of it -- a
+	// CDN-fronted carrier lands on an edge IP the config never names. Pinning
+	// only the configured address then lets the split-default route below
+	// capture the carrier's own packets and loop them into the tunnel, which
+	// presents exactly as "connected but carries nothing" -- the failure this
+	// project has already spent weeks on with routed DNS.
+	//
+	// Pinning the real peer is strictly more correct for every carrier, so it is
+	// not conditional on which one is running. Non-fatal: on a direct carrier it
+	// is the same address already pinned, and a failure here should not tear
+	// down a tunnel that would otherwise work.
+	if carrierPeer != "" && carrierPeer != bypassIP && net.ParseIP(carrierPeer) != nil {
+		if err := pinOutsideTunnel(carrierPeer); err != nil {
+			fmt.Fprintf(os.Stderr, "freewire-tunnel: pin carrier peer %s: %v\n", carrierPeer, err)
+		} else {
+			fmt.Fprintf(os.Stderr, "freewire-tunnel: pinned carrier peer %s outside the tunnel\n", carrierPeer)
+		}
 	}
 
 	// The DNS carrier must keep talking to whatever resolver it actually queries,
