@@ -36,13 +36,21 @@ echo "---- PROBE BATTERY (rootless; the key survey) ----"
 "$TUN" --probe-battery --server "$SERVER" --insecure --cdn "$CDN" 2>&1 || true
 echo ""
 
-echo "---- REAL WireGuard handshake per carrier (needs the passwordless sudo rule; "
-echo "     skipped cleanly if it is not set) ----"
+echo "---- REAL WireGuard handshake per carrier (incl. ICMP; needs root for the utun) ----"
+# Root is needed only to create the utun for the WireGuard handshake -- no routing
+# is installed (--select-only). You are at the keyboard, so authenticate once
+# here rather than maintaining a sudoers rule. Skips cleanly if you decline.
+if sudo -n true 2>/dev/null; then
+  : # already have a live sudo session
+else
+  echo "  (enter your Mac password once so the per-carrier WireGuard handshakes can run;"
+  echo "   press Ctrl-C to skip -- the battery above is the decisive result either way)"
+  sudo -v 2>/dev/null || true
+fi
 if sudo -n true 2>/dev/null; then
   bash "$ROOT/testing/probe-transports.sh" --reuse 2>&1 || true
 else
-  echo "  (no passwordless sudo -- probe-transports skipped; the battery above is the"
-  echo "   important result and it ran without root.)"
+  echo "  (skipped -- no sudo. The rootless battery above is the important result.)"
 fi
 
 echo ""
