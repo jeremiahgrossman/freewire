@@ -18,6 +18,30 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 - **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
 - **In progress:** nothing
+- **WebSocket-over-TLS-443 carrier DONE (`5db4bec`), not yet field-tested.** New
+  `wss443` rung: WireGuard inside WSS binary frames on the existing 443 port, one
+  cert, one listener; server discriminates raw-vs-WS by peeking one byte inside
+  TLS. Answers the café's "tls443: connection refused" = likely "blocks non-web
+  443, not 443." `--wss-probe` tests both carriers side by side (no root) and
+  names the network's behavior; wired into probe-transports.sh + regression.sh.
+  Both RFC-6455 codecs tested against the RFC's own vectors; real client-binary-
+  vs-server-listener interop test (bidirectional). Desk-verified (gofmt/vet/-race
+  both modules, app build). Needs a field/probe run to confirm a real portal
+  passes web-443 where it refuses raw 443. Sits after tls443 in speed order, so
+  the fall-through selection reaches it only when raw 443 was refused.
+- **Carrier ideation DONE (`PORTAL-CARRIER-IDEATION-2026-08-24.md`).** Six-agent
+  survey of novel carriers. Key reframe: mainstream portals allow-list by
+  DESTINATION (IP/FQDN), not port — so "port open" means "open to the vendor's
+  server," and the only test that matters is whether the portal passes arbitrary
+  bytes to OUR server on port N (venue-specific; probe it). Recommended next,
+  in order: (1) a cheap non-routed **probe battery** (UDP/443, NTP/123, UDP/4500,
+  IPv6 egress, multi-IP TLS/443) run at real portals BEFORE building; (2) **UDP/443
+  QUIC-shaped** carrier — near line-rate, no TCP-over-TCP, block-QUIC is off by
+  default on most portals, Mullvad ships WG-over-QUIC; (3) **IPv6 egress** where a
+  v4-only portal leaks v6 (full speed, trivial). Structural lead: **multi-IP
+  destination diversity** (server IPs in clean ranges). Folklore killed with
+  reasons: link-local protos (mDNS/SSDP/LLMNR/NetBIOS/DHCP), IPsec/IKE pre-auth,
+  APNs, SIP/RADIUS/syslog/SMTP/SSH, covert header/timing channels.
 - **Done since the 2026-08-23 field test:**
   1. **Fastest-transport selection** — the chain now tries carriers in speed order
      (wireguard-direct first) and picks the fastest a network allows, instead of
