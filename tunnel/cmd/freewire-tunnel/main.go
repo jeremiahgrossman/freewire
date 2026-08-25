@@ -228,15 +228,6 @@ func main() {
 	// is routine -- they whitelist the verb, not the destination -- and it made
 	// the client report the network as blocking VPNs without ever having tried
 	// TLS/443, DNS or ICMP. That is the exact situation this product exists for.
-	transportName, localProxy, transportConn, err := establishTunnel(cfg, wgDev, privKeyHex, pubKeyHex, keepalive)
-	if err != nil {
-		wgDev.Close()
-		tunDev.Close()
-		fmt.Println("all_paths_failed")
-		os.Stdout.Sync() //nolint:errcheck
-		os.Exit(2)
-	}
-
 	// Route traffic into the tunnel, pinning the server and resolver outside it.
 	bypassHost := cfg.ServerHost
 	if bypassHost == "" {
@@ -246,50 +237,95 @@ func main() {
 			bypassHost = h
 		}
 	}
-	// Recorded once the chain has chosen. Both the probe budget and whether DNS
-	// can be taken over depend on which transport is carrying traffic, and both
-	// are consulted from code that does not otherwise know.
-	activeTransport = transportName
 
-	if selectOnly() {
-		// The chain has chosen and WireGuard has handshaked over the winner.
-		// Report it and stop before routing: this mode exists to learn the
-		// selection safely, not to carry traffic.
-		fmt.Println(transportName)
-		fmt.Fprintf(os.Stderr, "freewire-tunnel: --select-only chose %s; routing not installed\n", transportName)
-		if transportConn != nil {
-			transportConn.Close()
+	// Walk the fallback chain judging each rung not by whether WireGuard
+	// handshakes over it, but by whether the routed tunnel actually carries
+	// traffic to the internet. A handshake proves the carrier reached the
+	// server; it does not prove the path is usable. A portal that answers HTTP
+	// CONNECT with 200 and discards the bytes, or throttles a DNS carrier below
+	// what a TCP handshake can survive, will pass the handshake and then carry
+	// nothing -- the exact situation this product exists for.
+	//
+	// So: establish over the fastest carrier that handshakes, route, and verify
+	// egress. If the tunnel carries nothing, exclude that carrier and fall
+	// through to the next-fastest one instead of giving up. "First to handshake"
+	// becomes "fastest that actually carries traffic," and a network that leaves
+	// only ICMP open is tried down to ICMP rather than abandoned at DNS.
+	var (
+		transportName string
+		localProxy    net.PacketConn
+		transportConn net.Conn
+	)
+	excluded := map[string]bool{}
+	for {
+		var err error
+		transportName, localProxy, transportConn, err = establishTunnel(cfg, wgDev, privKeyHex, pubKeyHex, keepalive, excluded)
+		if err != nil {
+			// Every remaining carrier either failed to open or failed to carry
+			// traffic. There is nothing left to fall through to.
+			wgDev.Close()
+			tunDev.Close()
+			fmt.Println("all_paths_failed")
+			os.Stdout.Sync() //nolint:errcheck
+			os.Exit(2)
 		}
-		if localProxy != nil {
-			localProxy.Close()
-		}
-		wgDev.Close()
-		os.Exit(0)
-	}
 
-	if skipEgressCheck() {
-		// Path selection has already been decided by this point: the transport
-		// is chosen and WireGuard has handshaked over it. Routing is the only
-		// step left, and it is the one that can strand the host, so it is
-		// skipped rather than made unsafe.
-		fmt.Fprintf(os.Stderr,
-			"freewire-tunnel: %s — tunnel is up but routing is NOT installed; traffic still uses the normal path\n",
-			skipEgressCheckFlag)
-	} else if err := setupRouting(tunName, bypassHost, carrierResolvers(cfg), cfg.DoHEndpoints); err != nil {
-		// Fatal. A tunnel that carries nothing is worse than no tunnel: the
-		// client reports "Protected" off the ready line, so a silent routing
-		// failure means the user believes they are covered while every packet
-		// leaves in the clear. Tear down and report instead.
-		cleanupRouting(tunName, bypassHost)
-		wgDev.Close()
-		if transportConn != nil {
-			transportConn.Close()
+		// Recorded once the chain has chosen. Both the probe budget and whether
+		// DNS can be taken over depend on which transport is carrying traffic,
+		// and both are consulted from code that does not otherwise know.
+		activeTransport = transportName
+
+		if selectOnly() {
+			// The chain has chosen and WireGuard has handshaked over the winner.
+			// Report it and stop before routing: this mode exists to learn the
+			// selection safely, not to carry traffic. Egress is not verified here
+			// (verifying would require routing), so this reports the fastest that
+			// handshakes, not the fastest that carries traffic.
+			fmt.Println(transportName)
+			fmt.Fprintf(os.Stderr, "freewire-tunnel: --select-only chose %s; routing not installed\n", transportName)
+			if transportConn != nil {
+				transportConn.Close()
+			}
+			if localProxy != nil {
+				localProxy.Close()
+			}
+			wgDev.Close()
+			os.Exit(0)
 		}
-		if localProxy != nil {
-			localProxy.Close()
+
+		if skipEgressCheck() {
+			// Path selection has already been decided by this point: the
+			// transport is chosen and WireGuard has handshaked over it. Routing
+			// is the only step left, and it is the one that can strand the host,
+			// so it is skipped rather than made unsafe. With routing skipped
+			// there is no egress to verify, so this carrier is accepted as-is
+			// (no fall-through).
+			fmt.Fprintf(os.Stderr,
+				"freewire-tunnel: %s — tunnel is up but routing is NOT installed; traffic still uses the normal path\n",
+				skipEgressCheckFlag)
+			break
 		}
-		fmt.Fprintf(os.Stderr, "freewire-tunnel: routing: %v\n", err)
-		os.Exit(1)
+
+		if err := setupRouting(tunName, bypassHost, carrierResolvers(cfg), cfg.DoHEndpoints); err == nil {
+			// Routed and egress verified: this carrier actually carries traffic.
+			break
+		} else {
+			// Handshaked but carried nothing once routed. Restore the machine,
+			// exclude this carrier, and fall through to the next-fastest one.
+			// Not fatal on its own -- fatal only when every carrier is exhausted
+			// (the establishTunnel error above).
+			cleanupRouting(tunName, bypassHost)
+			if transportConn != nil {
+				transportConn.Close()
+			}
+			if localProxy != nil {
+				localProxy.Close()
+			}
+			fmt.Fprintf(os.Stderr,
+				"freewire-tunnel: %s handshaked but carried no traffic once routed (%v); falling through to the next carrier\n",
+				transportName, err)
+			excluded[transportName] = true
+		}
 	}
 
 	// Record the pid before announcing ready, so a caller that reacts to the

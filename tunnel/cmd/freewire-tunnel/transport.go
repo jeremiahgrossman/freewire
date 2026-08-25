@@ -413,11 +413,19 @@ func handshakeBudgetFor(name string) time.Duration {
 // a failed rung costs a teardown of the transport rather than of the TUN
 // interface. Failure to hand back a working transport means every rung was
 // tried, including direct WireGuard.
+//
+// excluded names transports already tried and found NOT to carry real traffic:
+// the caller routes the winner and checks egress, and if a transport handshakes
+// but carries nothing (a portal that whitelists a verb or throttles a carrier to
+// death), it calls back in with that transport excluded so the chain falls
+// through to the next one instead of committing to a dead path. A nil map tries
+// everything.
 func establishTunnel(
 	cfg Config,
 	wgDev *device.Device,
 	privKeyHex, pubKeyHex string,
 	keepalive int,
+	excluded map[string]bool,
 ) (name string, localProxy net.PacketConn, transport net.Conn, err error) {
 	upped := false
 
@@ -441,6 +449,12 @@ func establishTunnel(
 	// single line for field diagnostics.
 	var attempts []string
 	for _, candidate := range candidates {
+		if excluded[candidate.name] {
+			// Already tried and proven not to carry real traffic on this network.
+			// Skip it so the chain falls through to the next-fastest carrier.
+			attempts = append(attempts, candidate.name+"=no-traffic")
+			continue
+		}
 		lp, tc, openErr := candidate.open(cfg)
 		if openErr != nil {
 			// Say why. A candidate that failed to open was skipped in silence,
