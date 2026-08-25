@@ -22,6 +22,10 @@
 #   3. acme_domain set in the server config, and the server restarted, so it
 #      holds a publicly trusted certificate. CloudFront will NOT talk to an
 #      origin presenting a self-signed certificate.
+#   4. AWS credentials with CloudFront permissions. The freewire-deploy user the
+#      other deploy scripts use does NOT have them by default -- create-distribution
+#      fails with AccessDenied. Attach deploy/cloudfront-iam-policy.json to that
+#      user (under an admin login), or run this script with an admin profile.
 # Step 3 is safe to enable only because certs.Build now serves the self-signed
 # certificate to handshakes without SNI; before that fix, enabling ACME broke
 # every client that dials by IP. See internal/certs/certs_test.go.
