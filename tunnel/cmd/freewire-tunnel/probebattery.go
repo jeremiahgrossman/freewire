@@ -17,7 +17,8 @@ import (
 // says nothing about whether it reaches us.
 //
 //	freewire-tunnel --probe-battery --server 52.203.246.145 [--insecure]
-//	                [--server6 2600:1f18:...]   # also probe our server over IPv6
+//	                [--server6 2600:1f18:...]      # also probe our server over IPv6
+//	                [--cdn d123.cloudfront.net]    # also probe a CDN that fronts us
 //
 // Non-routed and rootless: every probe is a single connection or datagram to the
 // server (or, for the v6-egress line, a reachability check). It changes no
@@ -36,6 +37,7 @@ const (
 func probeBattery(args []string) int {
 	server := ""
 	server6 := ""
+	cdnHost := ""
 	insecure := false
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -47,6 +49,11 @@ func probeBattery(args []string) int {
 		case "--server6":
 			if i+1 < len(args) {
 				server6 = args[i+1]
+				i++
+			}
+		case "--cdn":
+			if i+1 < len(args) {
+				cdnHost = args[i+1]
 				i++
 			}
 		case "--insecure":
@@ -81,9 +88,21 @@ func probeBattery(args []string) int {
 	rows = append(rows, row{"raw TLS/443", reportCarrier("raw TLS/443",
 		func() (net.Conn, error) { return tryTLS443(cfg) },
 		"a raw TLS session to our IP on 443")})
-	rows = append(rows, row{"WebSocket/443", reportCarrier("WebSocket/443",
+	wssDirectOK := reportCarrier("WebSocket/443",
 		func() (net.Conn, error) { return tryWSS443(cfg) },
-		"looks like a website; passes 'web-443-only' portals")})
+		"looks like a website; passes 'web-443-only' portals")
+	rows = append(rows, row{"WebSocket/443", wssDirectOK})
+
+	// The CDN-fronted carrier: same WebSocket, but to a CDN edge IP and hostname
+	// instead of our server's IP. This is the line that answers "does this portal
+	// gate our ADDRESS, or the port?" -- the question that decides whether the
+	// CDN-fronted carrier is worth building. See CDN-FRONTED-CARRIER-SPEC.md §9.
+	cdnTested := cdnHost != ""
+	cdnOK := false
+	if cdnTested {
+		cdnOK = reportCDN(cdnHost)
+		rows = append(rows, row{"CDN WebSocket/443", cdnOK})
+	}
 
 	// New carriers we are deciding whether to build (UDP side), via the server's
 	// ProbeResponder. A pass means the portal forwards arbitrary UDP to our
@@ -107,10 +126,36 @@ func probeBattery(args []string) int {
 			break // rows are in speed order
 		}
 	}
+	// The direct-vs-CDN comparison, stated as the engineering decision it drives.
+	// Both use the SAME protocol on the SAME port and differ only in destination,
+	// so a split between them isolates address gating from port gating -- which
+	// is what decides whether the CDN-fronted carrier is worth building.
+	// See CDN-FRONTED-CARRIER-SPEC.md §9.
+	if cdnTested {
+		switch {
+		case !wssDirectOK && cdnOK:
+			fmt.Fprintln(os.Stderr, "probe-battery: *** THIS PORTAL GATES OUR ADDRESS, NOT THE PORT. ***")
+			fmt.Fprintln(os.Stderr, "  Same protocol, same port, different destination: direct FAILED, CDN-fronted WORKED.")
+			fmt.Fprintln(os.Stderr, "  This is the hypothesis in CDN-FRONTED-CARRIER-SPEC.md §9 confirmed -- build the carrier.")
+		case wssDirectOK && cdnOK:
+			fmt.Fprintln(os.Stderr, "probe-battery: both direct and CDN-fronted work; this network is not gating us.")
+			fmt.Fprintln(os.Stderr, "  No evidence for or against the CDN carrier here -- it needs a portal that blocks direct.")
+		case wssDirectOK && !cdnOK:
+			fmt.Fprintln(os.Stderr, "probe-battery: direct works but CDN does not -- unexpected.")
+			fmt.Fprintln(os.Stderr, "  Check the distribution is up and serving WebSocket before reading anything into this.")
+		default:
+			fmt.Fprintln(os.Stderr, "probe-battery: neither direct nor CDN-fronted reached us on 443.")
+			fmt.Fprintln(os.Stderr, "  Either a live-SNI portal (CDN-fronting cannot help) or 443 is blocked outright.")
+		}
+		fmt.Fprintln(os.Stderr)
+	}
+
 	if best == "" {
 		fmt.Fprintln(os.Stderr, "probe-battery: NOTHING reached the server. This network blocks every carrier tested.")
-		fmt.Fprintln(os.Stderr, "  If it also gated our server's IP specifically, the next lever is a CDN-fronted")
-		fmt.Fprintln(os.Stderr, "  carrier (see PORTAL-CARRIER-IDEATION-2026-08-24.md), which this battery cannot test yet.")
+		if !cdnTested {
+			fmt.Fprintln(os.Stderr, "  If it gated our server's IP specifically, the next lever is a CDN-fronted carrier:")
+			fmt.Fprintln(os.Stderr, "  re-run with --cdn <distribution>.cloudfront.net to test that. See CDN-FRONTED-CARRIER-SPEC.md.")
+		}
 		return 1
 	}
 	fmt.Fprintf(os.Stderr, "probe-battery: fastest carrier that reached the server: %s\n", best)
@@ -142,6 +187,43 @@ func reportCarrier(label string, open func() (net.Conn, error), note string) boo
 	conn.Close()
 	fmt.Fprintf(os.Stderr, "  %-24s %-11s %s\n", label,
 		fmt.Sprintf("OK %dms", time.Since(start).Milliseconds()), note)
+	return true
+}
+
+// reportCDN opens a WebSocket to a CDN hostname that fronts our server, and
+// reports the edge IP it landed on.
+//
+// It reuses tryWSS443 unchanged, so the probe exercises the exact code path the
+// CDN carrier would use -- with two deliberate differences from the direct
+// carriers: the dial targets the CDN hostname (so DNS picks a nearby edge), and
+// InsecureTLS is forced OFF. A real CDN hostname has a real certificate chain,
+// so accepting an invalid one here would be accepting a portal's MITM rather
+// than tolerating our origin's self-signed cert.
+//
+// The edge IP is printed because it is field data we need twice over: it
+// identifies which CDN range the portal is letting through, and it is the
+// address the carrier would have to pin outside the tunnel (spec §2 -- pinning
+// only our server's IP would loop the carrier's own packets back into the
+// tunnel).
+func reportCDN(cdnHost string) bool {
+	const label = "CDN WebSocket/443"
+	cfg := Config{ServerHost: cdnHost, TLSPort: 443, InsecureTLS: false}
+
+	start := time.Now()
+	conn, err := tryWSS443(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  %-24s %-11s %s\n", label, "-- no", trimErr(err))
+		return false
+	}
+	edge := ""
+	if ra := conn.RemoteAddr(); ra != nil {
+		if h, _, e := net.SplitHostPort(ra.String()); e == nil {
+			edge = h
+		}
+	}
+	conn.Close()
+	fmt.Fprintf(os.Stderr, "  %-24s %-11s via edge %s\n", label,
+		fmt.Sprintf("OK %dms", time.Since(start).Milliseconds()), edge)
 	return true
 }
 
