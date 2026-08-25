@@ -37,14 +37,21 @@ func TestACMEConfigStillServesHandshakesWithoutSNI(t *testing.T) {
 		t.Fatal("no-SNI handshake returned an empty certificate")
 	}
 
-	// An unrecognized name must also fall back rather than fail the handshake.
-	cert, err = cfg.GetCertificate(&tls.ClientHelloInfo{ServerName: "not-our-domain.example"})
+	// An unrecognized name (a CDN fronting this origin sends its own distribution
+	// hostname as SNI) must also complete rather than fail the handshake.
+	cert, err = cfg.GetCertificate(&tls.ClientHelloInfo{ServerName: "d123.cloudfront.net"})
 	if err != nil {
 		t.Fatalf("unknown-SNI handshake refused: %v", err)
 	}
 	if cert == nil || len(cert.Certificate) == 0 {
 		t.Fatal("unknown-SNI handshake returned an empty certificate")
 	}
+	// In this test ACME cannot actually issue (no network), so both the no-SNI
+	// and unknown-SNI paths land on the self-signed fallback -- the point here is
+	// only that neither REFUSES the handshake. The live behavior (unknown SNI ->
+	// real ACME cert for our domain, which is what makes CloudFront accept the
+	// origin) is exercised end to end against the deployed server, not here,
+	// because it needs a genuinely issued certificate.
 }
 
 // With no ACME domain the behavior is unchanged: a self-signed certificate is

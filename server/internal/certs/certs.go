@@ -82,16 +82,31 @@ func Build(certFile, keyFile string, acme ACMEOptions, log *zap.Logger) (*tls.Co
 		}
 		acmeGetCert := cfg.GetCertificate
 		cfg.GetCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			// No SNI: a bare-IP client, which pins the self-signed key. Serve it.
 			if hello.ServerName == "" {
 				return &selfSigned, nil
 			}
-			cert, err := acmeGetCert(hello)
-			if err != nil {
-				// Unknown SNI: serve the self-signed identity rather than
-				// refusing the handshake outright.
-				return &selfSigned, nil
+			// SNI names our ACME domain: the real certificate.
+			if cert, err := acmeGetCert(hello); err == nil {
+				return cert, nil
 			}
-			return cert, nil
+			// SNI present but not our ACME domain. A CDN fronting this origin
+			// sends its OWN distribution hostname as SNI (CloudFront forwards the
+			// viewer Host and derives the SNI from it), which autocert's
+			// HostWhitelist rejects. But the CDN validates the origin certificate
+			// against the ORIGIN DOMAIN it is configured with (origin.pinghop.net),
+			// NOT the SNI it sent -- so the trusted ACME cert for our domain is
+			// exactly what it needs. Serving the self-signed cert here instead
+			// makes the CDN reject the origin and 502. Fetch the ACME cert for our
+			// own domain by name and serve it regardless of the SNI asked for.
+			byDomain := *hello
+			byDomain.ServerName = acme.Domain
+			if cert, err := acmeGetCert(&byDomain); err == nil {
+				return cert, nil
+			}
+			// The ACME cert is genuinely unavailable (not yet issued): fall back
+			// to the self-signed identity rather than failing the handshake.
+			return &selfSigned, nil
 		}
 		log.Info("acme enabled", zap.String("domain", acme.Domain),
 			zap.String("no_sni", "served the self-signed certificate"))
