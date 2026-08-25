@@ -28,13 +28,19 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   ```
   It reports which carriers that portal passes **to our server** and names the
   decision. The probe battery needs no registered peer, so it works cold.
+- **The CloudFront distribution EXISTS** (created 2026-08-24): id `EFJL255K0RTR`,
+  hostname **`d29cubp361kpm8.cloudfront.net`**, logging verified off. So the café
+  probe tests address-gating directly:
+  ```
+  tunnel/freewire-tunnel --probe-battery --server 52.203.246.145 --insecure --cdn d29cubp361kpm8.cloudfront.net
+  ```
+  Teardown when done (idle is ~free, so no rush): disable then
+  `aws cloudfront delete-distribution --id EFJL255K0RTR --if-match <ETag>`.
 - **Field prep before the café (user actions, not desk work):** (1) reboot the
   Mac to clear stale `utun` interfaces (the app cache in UserDefaults and the
-  server peer on AWS both survive a reboot). (2) To also test the address-gating
-  hypothesis, create the CloudFront distribution first: `deploy/setup-cloudfront.sh
-  --domain origin.pinghop.net`, then add `--cdn <dist>.cloudfront.net` to the
-  probe. (3) To also run `probe-transports.sh` at the café, run it once on the
-  hotspot first (its /tmp peer cache is cleared by a reboot; the battery is not).
+  server peer on AWS both survive a reboot). (2) To also run `probe-transports.sh`
+  at the café, run it once on the hotspot first (its /tmp peer cache is cleared by
+  a reboot; the battery is not).
 - **CDN-fronted-carrier groundwork is DONE and verified; only the distribution
   is uncreated.** ACME is live on the server: `origin.pinghop.net` (A →
   52.203.246.145, Cloudflare DNS-only) serves a real Let's Encrypt cert, and the
