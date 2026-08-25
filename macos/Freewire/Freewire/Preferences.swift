@@ -37,7 +37,7 @@ final class Preferences {
     /// the one selected, and a portal that allows HTTPS would otherwise settle on
     /// TLS/443 and never exercise DNS. Set with
     /// `defaults write com.freewire.vpn.Freewire forceTransport dns` (values:
-    /// wireguard, http_connect, tls443, dns, icmp_udp); clear with `delete` to
+    /// wireguard, http_connect, tls443, wss443, dns, icmp_udp); clear with `delete` to
     /// restore normal selection.
     var forceTransport: String? {
         let v = UserDefaults.standard.string(forKey: Key.forceTransport)

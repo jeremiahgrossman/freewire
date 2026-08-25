@@ -103,6 +103,15 @@ final class PathUpgradeManager {
             return await probeWireGuard()
         case .tls443:
             return await probeTCP443()
+        case .wss443:
+            // Reaching TCP/443 is necessary but not sufficient: the whole point
+            // of this carrier is the networks that accept a completed HTTP
+            // Upgrade while resetting a raw TLS session on the same port, and a
+            // bare TCP probe cannot tell those apart. Upgrading to it on a TCP
+            // probe alone would mean upgrading onto a path that may not carry
+            // traffic. The chain already discovers it correctly on connect, so
+            // the upgrade manager declines rather than guesses.
+            return false
         case .httpConnect:
             return await probeHTTPConnect()
         case .dns:
@@ -274,17 +283,23 @@ enum TunnelTransport: String, CaseIterable {
     case wireguard  = "wireguard"
     case httpConnect = "http_connect"
     case tls443     = "tls443"
+    case wss443     = "wss443"
     case dns        = "dns"
     case icmpUDP    = "icmp_udp"
 
     /// Lower = faster. Upgrade manager only upgrades toward lower priority numbers.
+    ///
+    /// Must match the chain's speed order in tunnel/cmd/freewire-tunnel/transport.go
+    /// (defaultCandidates). A mismatch here does not fail loudly: it silently
+    /// makes the upgrade manager chase the wrong path.
     var priority: Int {
         switch self {
         case .wireguard:   return 1
         case .httpConnect: return 2
         case .tls443:      return 3
-        case .dns:         return 4
-        case .icmpUDP:     return 5
+        case .wss443:      return 4
+        case .dns:         return 5
+        case .icmpUDP:     return 6
         }
     }
 
@@ -309,6 +324,7 @@ enum TunnelTransport: String, CaseIterable {
         case .wireguard:   return "WireGuard"
         case .httpConnect: return "HTTP CONNECT"
         case .tls443:      return "TLS/443"
+        case .wss443:      return "WebSocket/443"
         case .dns:         return "DNS tunnel"
         case .icmpUDP:     return "ICMP tunnel"
         }
