@@ -255,6 +255,55 @@ the handshake completes, the portal is desyncable. Gated on that one probe.
   Stage-2 backpressure deferral and the Stage-1 AIMD — if Stage 2 is ever picked
   up, mirror standard TCP/BBR dynamics, don't hand-roll an aggressive window.
 
+### KILLED as a carrier — data inside the PKI/TLS handshake itself (certificates, keys, handshake fields)
+
+Idea: carry tunnel bytes in the *fields* of a TLS handshake — certificate
+contents, key material, handshake randoms — rather than in application data.
+
+**The mechanism is real.** A TLS 1.3 handshake has genuinely free bytes that both
+ends control and that no middlebox validates:
+- `ClientHello.random` — 32 bytes, arbitrary.
+- `legacy_session_id` — 32 bytes, arbitrary in practice.
+- `ServerHello.random` — 32 bytes, arbitrary (server → client).
+- Server certificate contents and extensions; session tickets; padding,
+  extension ordering, GREASE values.
+
+So roughly **~64 bytes per handshake in each direction**, inside a handshake that
+looks entirely normal. This is not hypothetical: it is essentially the mechanism
+REALITY uses to smuggle an authentication marker into a ClientHello — proven to
+work in the wild, but used for *signaling*, not bulk data.
+
+**One correction worth recording**, because it was stated too loosely when this
+idea was first raised: the **`key_share` is NOT freely usable** if a real
+handshake must complete. X25519 accepts any 32-byte string as a public key, but
+if the client puts arbitrary data there it cannot compute the matching shared
+secret (that would require the discrete log), so the handshake fails unless the
+server special-cases it and abandons standard key agreement. The freely usable
+fields are the randoms/session-id/extensions above, not the key exchange.
+
+**Why it is killed anyway — it is a content channel, not a destination one.**
+The handshake packets still travel to an IP. If the portal drops packets to our
+server's address, the ClientHello never arrives and there is nothing to be
+covert *inside*. Concretely: the café reset us at **TCP connect**, before TLS
+began, so a handshake-field channel would not have helped there at all. It fails
+the one bar that matters here, exactly like the rest of the content-evasion
+corpus (REALITY, ShadowTLS, obfs4).
+
+**And the throughput is below the floor.** One full TCP+TLS round trip per ~64
+bytes is worse than the DNS carrier we already treat as the slow last resort, and
+far worse under a portal that throttles.
+
+**The one niche where it would be uniquely useful** — and the cheap way to test
+it: a portal that lets a TLS handshake *complete* to our server but drops the
+application data afterwards. That is unusual (portals gate at L3/L4, not
+"handshake yes, data no"), but it costs almost nothing to check: run N handshakes
+to our server and see whether they complete while raw data is refused. Worth one
+probe line if the question ever needs closing; not worth a carrier.
+
+**Verdict:** real, elegant, and in the same category as the covert header/timing
+channels — a low-bandwidth *signaling* channel that does not beat destination
+gating. Do not build. Recorded so it is not re-proposed.
+
 ### KILLED — IP-source-spoofing / reflection ("echo") carriers (physics)
 
 Sending packets pre-auth with a **spoofed source = our server** so replies land
