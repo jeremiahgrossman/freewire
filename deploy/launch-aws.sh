@@ -108,6 +108,75 @@ open_port udp 123   'probe responder (would-be NTP carrier)'
 # does not listen on 80 otherwise, so the rule is inert until then.
 open_port tcp 80    'ACME HTTP-01 challenge'
 
+# IPv6 ingress, mirroring the v4 ports, so a client on a v6-capable network can
+# reach WireGuard (and the other carriers) over IPv6. Same idempotent shape as
+# open_port but with an Ipv6Ranges rule.
+open_port6() { # proto port description
+  local out
+  if out="$(aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --region "$REGION" \
+      --ip-permissions \
+        "IpProtocol=$1,FromPort=$2,ToPort=$2,Ipv6Ranges=[{CidrIpv6=::/0,Description='$3 v6'}]" \
+      2>&1)"; then
+    echo "    opened $1/$2 v6 ($3)"
+  elif grep -q "InvalidPermission.Duplicate" <<<"$out"; then
+    :
+  else
+    echo "    WARNING: could not open $1/$2 v6: $(tr '\n' ' ' <<<"$out")" >&2
+  fi
+}
+open_port6 udp 51820 'WireGuard'
+open_port6 tcp 443   'TLS/WSS'
+open_port6 udp 443   'UDP443'
+open_port6 tcp 8080  'API'
+open_port6 udp 53    'DNS tunnel'
+open_port6 udp 4500  'ICMP/UDP tunnel'
+
+# IPv6 addressing for the VPC/subnet/route/instance, so the server has a global
+# v6 address and the config API can advertise it (endpoint_host_v6). All steps
+# are additive (v6 only) and idempotent -- they never touch the v4 path. Ubuntu
+# brings the address up on its own via RA, and wireguard-go binds dual-stack, so
+# no OS or server change is needed beyond this.
+echo "==> IPv6 addressing"
+VPC_ID="$(aws ec2 describe-security-groups --group-ids "$SG_ID" --region "$REGION" \
+           --query 'SecurityGroups[0].VpcId' --output text)"
+V6_VPC="$(aws ec2 describe-vpcs --vpc-ids "$VPC_ID" --region "$REGION" \
+           --query 'Vpcs[0].Ipv6CidrBlockAssociationSet[0].Ipv6CidrBlock' --output text 2>/dev/null || true)"
+if [[ -z "$V6_VPC" || "$V6_VPC" == "None" ]]; then
+  aws ec2 associate-vpc-cidr-block --vpc-id "$VPC_ID" --amazon-provided-ipv6-cidr-block --region "$REGION" >/dev/null
+  sleep 5
+  V6_VPC="$(aws ec2 describe-vpcs --vpc-ids "$VPC_ID" --region "$REGION" \
+             --query 'Vpcs[0].Ipv6CidrBlockAssociationSet[0].Ipv6CidrBlock' --output text)"
+  echo "    associated VPC v6 CIDR $V6_VPC"
+else
+  echo "    VPC v6 CIDR $V6_VPC"
+fi
+# The subnet gets the first /64 of the VPC /56.
+SUBNET_ID="$(aws ec2 describe-instances --region "$REGION" \
+  --filters "Name=tag:Name,Values=$NAME" "Name=instance-state-name,Values=running,pending" \
+  --query 'Reservations[0].Instances[0].SubnetId' --output text 2>/dev/null || true)"
+if [[ -n "$SUBNET_ID" && "$SUBNET_ID" != "None" ]]; then
+  V6_SUBNET="$(aws ec2 describe-subnets --subnet-ids "$SUBNET_ID" --region "$REGION" \
+               --query 'Subnets[0].Ipv6CidrBlockAssociationSet[0].Ipv6CidrBlock' --output text 2>/dev/null || true)"
+  if [[ -z "$V6_SUBNET" || "$V6_SUBNET" == "None" ]]; then
+    SUB64="${V6_VPC%::/56}::/64"
+    aws ec2 associate-subnet-cidr-block --subnet-id "$SUBNET_ID" --ipv6-cidr-block "$SUB64" --region "$REGION" >/dev/null 2>&1 \
+      && echo "    associated subnet v6 CIDR $SUB64" || echo "    subnet v6 CIDR present"
+  fi
+  # ::/0 route to the IGW (additive; leaves v4 routes untouched).
+  IGW_ID="$(aws ec2 describe-internet-gateways --region "$REGION" \
+             --filters "Name=attachment.vpc-id,Values=$VPC_ID" \
+             --query 'InternetGateways[0].InternetGatewayId' --output text)"
+  RT_ID="$(aws ec2 describe-route-tables --region "$REGION" \
+            --filters "Name=association.subnet-id,Values=$SUBNET_ID" \
+            --query 'RouteTables[0].RouteTableId' --output text)"
+  [[ "$RT_ID" == "None" ]] && RT_ID="$(aws ec2 describe-route-tables --region "$REGION" \
+            --filters "Name=vpc-id,Values=$VPC_ID" "Name=association.main,Values=true" \
+            --query 'RouteTables[0].RouteTableId' --output text)"
+  aws ec2 create-route --route-table-id "$RT_ID" --destination-ipv6-cidr-block ::/0 \
+    --gateway-id "$IGW_ID" --region "$REGION" >/dev/null 2>&1 \
+    && echo "    added ::/0 route via $IGW_ID" || echo "    ::/0 route present"
+fi
+
 echo "==> latest Ubuntu 24.04 arm64 AMI"
 AMI="$(aws ssm get-parameters --region "$REGION" \
         --names /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id \
@@ -151,6 +220,21 @@ sleep 3
 IP="$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --region "$REGION" \
       --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)"
 echo "==> public IP: $IP"
+
+# Give the instance a global IPv6 address (idempotent: skip if it already has
+# one). Ubuntu configures it via RA on its own; the server auto-detects it and
+# advertises it as endpoint_host_v6.
+V6="$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --region "$REGION" \
+      --query 'Reservations[0].Instances[0].Ipv6Address' --output text 2>/dev/null || true)"
+if [[ -z "$V6" || "$V6" == "None" ]]; then
+  ENI="$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --region "$REGION" \
+         --query 'Reservations[0].Instances[0].NetworkInterfaces[0].NetworkInterfaceId' --output text)"
+  aws ec2 assign-ipv6-addresses --network-interface-id "$ENI" --ipv6-address-count 1 --region "$REGION" >/dev/null 2>&1 || true
+  sleep 3
+  V6="$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" --region "$REGION" \
+        --query 'Reservations[0].Instances[0].Ipv6Address' --output text 2>/dev/null || true)"
+fi
+[[ -n "$V6" && "$V6" != "None" ]] && echo "==> public IPv6: $V6"
 
 echo "==> waiting for ssh"
 for _ in $(seq 1 60); do

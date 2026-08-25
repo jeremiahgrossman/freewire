@@ -36,6 +36,11 @@ type Config struct {
 	TLSPort         int    `json:"tls_port"`          // default 443; server reports its own
 	DNSTunnelPort   int    `json:"dns_tunnel_port"`   // default 53; server reports its own
 	ICMPUDPPort     int    `json:"icmp_udp_port"`     // default 4500
+	// ServerHostV6 is the server's global IPv6 address, advertised by the server.
+	// The client stores it for the (not-yet-wired) wireguard6 carrier; see
+	// IPV6-CARRIER-REMAINING.md. Populated from the config API today so a future
+	// client build needs no server change.
+	ServerHostV6 string `json:"server_host_v6,omitempty"`
 	// CDNHost is a CDN hostname (e.g. a CloudFront distribution) that fronts the
 	// server. When set, the cdn_wss carrier dials it instead of the server's IP,
 	// so a portal that gates our ADDRESS -- not just the port -- still passes the

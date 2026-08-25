@@ -32,7 +32,7 @@ Rows are ordered best-case to worst-case. "Built" = ships today, nothing to do.
 | 3 | direct WSS fails, **CDN WSS OK** | Gates our ADDRESS, not the port | **Nothing new to build** — `cdn_wss` handles it. BUT measure throughput (see "CDN throughput" below); the carrier is proven to carry, not yet measured. |
 | 4 | **UDP/443 passes to our server** | Portal passes QUIC-class UDP | **BUILT** (`udp443`, pre-built 2026-08-25) — validates on the spot, no field build. Near line-rate, no TCP-over-TCP; 307ms handshake, routed 6/6 TUNNELLED. |
 | 5 | UDP/123 passes, UDP/443 doesn't | Portal passes NTP-class UDP | **BUILD the UDP/123 carrier** (same shape as #4, lower priority). |
-| 6 | IPv6 egress present | v4-only portal leaks v6 | **Provision v6 on the server FIRST** (it has none today), then build the v6 carrier. Two-part. See below. |
+| 6 | IPv6 egress present | v4-only portal leaks v6 | **Server is now v6-ready** (provisioned + advertises endpoint_host_v6). The client `wireguard6` carrier + its leak-safe routing is the one remaining build, and it must be verified ON a v6 network -- see IPV6-CARRIER-REMAINING.md. |
 | 7 | Only throttled DNS (the original café) | Hard destination gate, DNS is the floor | If UDP/443 also fails: **nothing client-side raises the ceiling** (research-confirmed). This is the characterized case. |
 | 8 | Everything incl. CDN fails | Live-SNI portal or hard block | The hard case. Geneva-class desync IS an option **only if the portal is stateful-inline** (an active RST hints yes); big conditional build. Or accept the café as unsupported. |
 

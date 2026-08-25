@@ -58,6 +58,12 @@ type Config struct {
 	// a resolver the client does not control. Default "t.pinghop.net".
 	DNSTunnelDomain string `json:"dns_tunnel_domain"`
 
+	// PublicHostV6 is the externally reachable IPv6 address, advertised so a
+	// client on a v6-capable (or v4-only-portal-that-leaks-v6) network can reach
+	// WireGuard over IPv6 at full speed. Empty means auto-detect the first global
+	// unicast v6 on the host; set it to override.
+	PublicHostV6 string `json:"public_host_v6"`
+
 	// CDNHost is a CDN hostname that fronts this server (e.g. a CloudFront
 	// distribution). Reported to clients so they can add the CDN-fronted
 	// WebSocket carrier to their fallback chain. Empty disables it. The client
