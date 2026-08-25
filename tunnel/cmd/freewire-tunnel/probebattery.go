@@ -115,6 +115,17 @@ func probeBattery(args []string) int {
 		reportUDPProbe("UDP/123 (NTP-class)", net.JoinHostPort(server, "123"),
 			"raw UDP tunnel IF this passes; portals allow NTP for clock sync")})
 
+	// DNS carrier, server-direct on UDP/53. This is the historical winner at hard
+	// captive portals: a portal MUST pass some DNS pre-auth to serve its own
+	// redirect, and where it lets outbound 53 reach our authoritative server, the
+	// DNS tunnel works (throttled but real). A full handshake, not a reachability
+	// ping -- the server has to issue a session token and the client confirm it,
+	// so a portal's own resolver answering for a bogus name does not read as OK.
+	// Rootless (plain UDP queries). ICMP needs raw sockets (root), so it is NOT in
+	// this battery -- run probe-transports.sh with the passwordless-sudo rule for
+	// the ICMP carrier.
+	rows = append(rows, row{"DNS/53 (server-direct)", reportDNS(cfg, server)})
+
 	// IPv6 egress: a whole-address-family bypass when a v4-only portal leaks v6.
 	rows = append(rows, row{"IPv6 egress", reportV6(server6)})
 
@@ -248,6 +259,28 @@ func blockTag(err error) string {
 	default:
 		return ""
 	}
+}
+
+// reportDNS runs a real server-direct DNS-tunnel handshake to server:53 and
+// reports whether it completes -- i.e. whether the portal passes outbound UDP/53
+// to our authoritative server, which is what the DNS carrier needs.
+func reportDNS(cfg Config, server string) bool {
+	const label = "DNS/53 (server-direct)"
+	start := time.Now()
+	dcfg := cfg
+	dcfg.ServerHost = server
+	// Query our authoritative server directly, bypassing any recursor -- the
+	// server-direct path is the one that actually carries throughput.
+	_, err := dnsHandshake(dcfg, []string{net.JoinHostPort(server, "53")}, dnsHandshakeTimeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  %-24s %-11s %s%s\n", label, "-- no", blockTag(err), trimErr(err))
+		recordBlock(err)
+		return false
+	}
+	fmt.Fprintf(os.Stderr, "  %-24s %-11s %s\n", label,
+		fmt.Sprintf("OK %dms", time.Since(start).Milliseconds()),
+		"the fallback that survives hard captive portals (throttled but real)")
+	return true
 }
 
 // reportCDN opens a WebSocket to a CDN hostname that fronts our server, and
