@@ -18,14 +18,35 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 - **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
 - **In progress:** nothing
-- **NEXT ACTION IS A FIELD RUN, and everything for it is deployed.** At a café:
+- **NEXT ACTION IS A FIELD RUN. Desk work is exhausted and re-verified end to
+  end against the live post-ACME server** (2026-08-24): git clean, tunnel+server
+  vet/-race pass, app builds, cert pin MATCHES the live self-signed cert (no
+  lockout), and the real app connects+reconnects against the deployed server. At
+  a café:
   ```
   tunnel/freewire-tunnel --probe-battery --server 52.203.246.145 --insecure
   ```
   It reports which carriers that portal passes **to our server** and names the
-  decision. Add `--cdn <dist>.cloudfront.net` once a distribution exists to also
-  test the address-gating hypothesis. Everything below is desk-verified; the
-  open questions are all "what does a real portal do", which only this answers.
+  decision. The probe battery needs no registered peer, so it works cold.
+- **Field prep before the café (user actions, not desk work):** (1) reboot the
+  Mac to clear stale `utun` interfaces (the app cache in UserDefaults and the
+  server peer on AWS both survive a reboot). (2) To also test the address-gating
+  hypothesis, create the CloudFront distribution first: `deploy/setup-cloudfront.sh
+  --domain origin.pinghop.net`, then add `--cdn <dist>.cloudfront.net` to the
+  probe. (3) To also run `probe-transports.sh` at the café, run it once on the
+  hotspot first (its /tmp peer cache is cleared by a reboot; the battery is not).
+- **CDN-fronted-carrier groundwork is DONE and verified; only the distribution
+  is uncreated.** ACME is live on the server: `origin.pinghop.net` (A →
+  52.203.246.145, Cloudflare DNS-only) serves a real Let's Encrypt cert, and the
+  IP path still serves the self-signed cert to no-SNI clients (the certs.Build
+  fix, `a2f4140`, with tests — enabling ACME without it would have locked out
+  every IP client). TCP/80 is open for the challenge. The `freewire-deploy` IAM
+  user has the CloudFront policy (`deploy/cloudfront-iam-policy.json`, attached
+  inline). `deploy/setup-cloudfront.sh` passes preflight; running it is the one
+  remaining create step (idle CloudFront is ~free — per-request/GB, no hourly
+  charge — so create it whenever, no rush). Then carrier build items #2–#7 in
+  `CDN-FRONTED-CARRIER-SPEC.md` (item #2, carrier peer pinning, is already done
+  in `01d9780`).
 
 ### Session 2026-08-24 (carriers + measurement)
 
