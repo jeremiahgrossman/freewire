@@ -67,12 +67,15 @@ Rows are ordered best-case to worst-case. "Built" = ships today, nothing to do.
   (still better than no connection). Kill criterion is in
   `CDN-FRONTED-CARRIER-SPEC.md` §10.
 
-### Geneva-class desync (row 8) — conditional, big
-- Only if the portal is a stateful inline redirect box (the café's active RST is
-  encouraging), NOT a hard L3 ACL. Client-side pf/divert packet-mangler (root).
-  Probe: send a ClientHello to a blocked dest preceded by a low-TTL fake segment;
-  if the handshake completes, the portal is desyncable. Defer unless rows 1–6 all
-  fail and row 8's probe says yes.
+### Geneva-class desync (row 8) — scoped, NOT recommended (see DESYNC-CARRIER-SPEC.md)
+- Only helps a **content/SNI-gated** middlebox: TCP handshake completes, reset
+  comes AFTER the ClientHello. The probe tags this `[reset]`.
+- Does NOT help a **`[SYN-RST]`** (the 2026-08-25 café): the SYN is refused by
+  destination, so there is no handshake to manipulate. Nor a `[timeout]` drop.
+- macOS needs raw packet injection → a NetworkExtension system extension behind
+  the same Developer ID wall as the kill switch. Large project.
+- **Build only if a real café reports `[reset]`.** We have not seen one; captive
+  portals gate by destination, not SNI. Until then, DNS covers the hard case.
 
 ## The honest shape of the field test
 
