@@ -74,6 +74,7 @@ func probeBattery(args []string) int {
 	fmt.Fprintf(os.Stderr, "\n  %-24s %-11s %s\n", "CARRIER", "RESULT", "NOTE")
 
 	cfg := Config{ServerHost: server, TLSPort: 443, InsecureTLS: insecure}
+	blockResets, blockTimeouts = 0, 0 // fresh accounting per run
 
 	type row struct {
 		name string
@@ -150,6 +151,22 @@ func probeBattery(args []string) int {
 		fmt.Fprintln(os.Stderr)
 	}
 
+	// How the blocked carriers were blocked, whenever any were -- it decides
+	// whether the desync path (row 8) is worth pursuing. RST = inline stateful
+	// box, possibly desyncable; timeout = hard L3 ACL, no client trick beats it.
+	if blockResets > 0 || blockTimeouts > 0 {
+		switch {
+		case blockResets > 0 && blockTimeouts == 0:
+			fmt.Fprintln(os.Stderr, "probe-battery: blocked carriers were ACTIVELY REJECTED (RST) -- an inline stateful")
+			fmt.Fprintln(os.Stderr, "  box, possibly desyncable (Geneva-class); see FIELD-TEST-CONTINGENCIES.md row 8.")
+		case blockTimeouts > 0 && blockResets == 0:
+			fmt.Fprintln(os.Stderr, "probe-battery: blocked carriers were SILENTLY DROPPED (timeout) -- a hard L3 ACL;")
+			fmt.Fprintln(os.Stderr, "  no client trick beats it. The ways out are a permitted destination (CDN) or v6.")
+		default:
+			fmt.Fprintln(os.Stderr, "probe-battery: blocked carriers were mixed (some RST, some drop) -- desync may help the RST ones.")
+		}
+	}
+
 	if best == "" {
 		fmt.Fprintln(os.Stderr, "probe-battery: NOTHING reached the server. This network blocks every carrier tested.")
 		if !cdnTested {
@@ -181,13 +198,56 @@ func reportCarrier(label string, open func() (net.Conn, error), note string) boo
 	start := time.Now()
 	conn, err := open()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "  %-24s %-11s %s\n", label, "-- no", trimErr(err))
+		recordBlock(err)
+		fmt.Fprintf(os.Stderr, "  %-24s %-11s %s%s\n", label, "-- no", blockTag(err), trimErr(err))
 		return false
 	}
 	conn.Close()
 	fmt.Fprintf(os.Stderr, "  %-24s %-11s %s\n", label,
 		fmt.Sprintf("OK %dms", time.Since(start).Milliseconds()), note)
 	return true
+}
+
+// Block-type accounting. A portal that actively REJECTS (TCP RST / "connection
+// refused") is an inline stateful box and may be desyncable (Geneva-class);
+// one that silently DROPS (timeout) is a hard L3 ACL that no client trick beats.
+// Knowing which decides whether the row-8 desync path in
+// FIELD-TEST-CONTINGENCIES.md is worth pursuing, so the probe classifies it.
+var blockResets, blockTimeouts int
+
+func recordBlock(err error) {
+	switch classifyBlock(err) {
+	case "reset":
+		blockResets++
+	case "timeout":
+		blockTimeouts++
+	}
+}
+
+func classifyBlock(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	switch {
+	case strings.Contains(s, "refused"), strings.Contains(s, "reset"):
+		return "reset"
+	case strings.Contains(s, "timeout"), strings.Contains(s, "deadline"), strings.Contains(s, "no route"):
+		return "timeout"
+	default:
+		return ""
+	}
+}
+
+func blockTag(err error) string {
+	switch classifyBlock(err) {
+	case "reset":
+		return "[RST] "
+	case "timeout":
+		return "[timeout] "
+	default:
+		return ""
+	}
 }
 
 // reportCDN opens a WebSocket to a CDN hostname that fronts our server, and
