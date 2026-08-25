@@ -163,6 +163,14 @@ func main() {
 		os.Exit(wssProbe(os.Args[2:]))
 	}
 
+	// --probe-battery runs the full reachability survey: every carrier we ship
+	// plus the UDP/443, UDP/123 and IPv6 candidates we are deciding whether to
+	// build, each probed against OUR server. No root, no routing. Run it at a
+	// real portal to learn what that network passes before connecting.
+	if len(os.Args) > 1 && os.Args[1] == "--probe-battery" {
+		os.Exit(probeBattery(os.Args[2:]))
+	}
+
 	// Repair before doing anything else, on every run. setupRouting used to be
 	// the only place this happened, so a machine left broken stayed broken
 	// until a connection attempt got far enough to reach it -- and a connection

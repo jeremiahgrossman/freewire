@@ -99,49 +99,75 @@ egress IPs across reputationally-clean ranges multiplies the success odds of
 endpoint list). Probe first: same TLS/443 probe to several server IPs; if some
 pass and some are reset, gating is by IP and this is high leverage.
 
-## FOLKLORE — do not build (with the reason)
+## FOLKLORE — do not build. Two confidence classes.
 
-The generalizable killer: a protocol is worthless as a carrier if either (a) its
-destination is a link-local / admin-scoped multicast or limited broadcast (it
-physically cannot leave the segment), or (b) its only "remote" mode degenerates
-to "UDP/TCP to port N," whose viability is *entirely* the port-allowlist
-question above — in which case the protocol confers nothing and only the probe
-matters.
+A "should work per spec" argument is not a safe kill: a network that misbehaves
+can leave a port open the spec says to block, or block one the spec says to
+allow. So the kills below are split by *what enforces them*. Only the first
+class is safe regardless of how a given portal chooses to behave; the second is
+a claim about portal *policy*, which varies by venue and must be **measured, not
+assumed** — which is exactly what the probe battery is for.
 
-- **mDNS/5353, SSDP/1900, LLMNR/5355, NetBIOS/137, DHCP options:** link-local by
-  construction (RFC 5771/2365 scope, TTL-255/TTL-1 checks, limited broadcast,
-  relay forwards only to its configured server). Cannot reach our server *by
-  virtue of being that protocol*. Unconditional kill. Their unicast modes are
-  just "UDP to port N" with no pre-auth allow-list rationale (unlike 53).
-- **IPsec/IKE 500, NAT-T 4500, L2TP 1701 pre-auth:** evidence says *blocked*.
-  "VPN passthrough" on hotel gateways (Nomadix) is a **NAT-correctness** feature
-  (NAT-T/GRE rewriting so a tunnel survives translation once you've paid), NOT
-  pre-auth authorization. Conflating the two is the biggest error here. (Note: a
-  vendor default ACL sometimes lists `svc-natt`/4500, which is why we keep our
-  existing 4500 carrier and *probe* it — but do not build *for* IPsec-shaping.)
-- **APNs 5223 / 17.0.0.0/8:** partly real but destination-locked to Apple's
-  netblock, which we cannot occupy. And portals deliberately do NOT allow-list
-  Apple's captive-detection set (that would suppress the login popup they want).
-  Unexploitable.
-- **STUN/3478 alone:** discovers your address, cannot relay payload. Only **TURN/
-  TURNS (5349/TLS)** is a real relay we could terminate — but it's venue-
-  dependent (conferencing-friendly venues) and destination-scoped, so lower
-  priority than UDP/443. Probe (public STUN reachability) before considering.
-- **SIP/5060, RADIUS/1812, syslog/514:** SIP is ALG-mediated (collapses to a
-  toy) or blocked; RADIUS/syslog are gateway→server, the client is never the
-  speaker — category error.
-- **SMTP 25/587, SSH 22:** the *most* documented deliberately-blocked ports on
-  hotel/guest networks. Actively hostile.
-- **NTP as a covert-fields channel:** if a portal runs an NTP ALG, the ceiling
-  is ~240 bits/min — below the DNS floor. Only worth it if the portal passes
-  *raw* UDP/123 to our server (the good case), which the probe decides. Do not
-  build the covert-fields version.
-- **IP/TCP header covert fields (IP-ID, TTL, DSCP, TCP options, TFO), pure
-  timing channels:** bits-per-packet / bits-per-second. Below the DNS floor.
-  Toys, not carriers.
-- **Domain fronting, ECH, MAC-clone/ARP, refraction, Snowflake:** killed in the
-  prior research doc (dead CDNs / no benefit on our IP / hostile+macOS-broken /
-  need infra we can't run).
+### Class A — physics/addressing kills (safe regardless of portal behavior)
+
+Enforced *below* the portal's policy layer, by router hardware and the OS
+network stack. A misconfigured portal cannot override these.
+
+- **mDNS/5353, SSDP/1900, LLMNR/5355, NetBIOS-NS/137, DHCP broadcast:** their
+  destination is a link-local / admin-scoped multicast group or a limited
+  broadcast (RFC 5771/2365 scope; TTL-255 check in the mDNS responder, TTL-1 in
+  LLMNR; 255.255.255.255 never forwarded). Forwarding one off-link would need
+  multicast routing toward the internet that no café AP runs, and the receiving
+  stack drops it on the TTL check. Cannot reach our server *by virtue of being
+  that protocol*, at any portal, correct or broken.
+  - **Residue (honest):** the *unicast* modes — mDNS §5.5 direct-to-:5353, NBNS
+    P-node — DO produce a routable packet. But then they are not a special
+    carrier at all, just "UDP to port N," and their viability is entirely the
+    empirical port question below. The probe battery tests arbitrary UDP to our
+    server, so this residue is covered by measurement, not assumption.
+- **APNs 17.0.0.0/8, RADIUS/1812, syslog/514:** category errors, not policy. APNs
+  is destination-locked to Apple-owned IPs we cannot occupy; RADIUS/syslog flow
+  gateway→server and the client is never the speaker. No portal setting changes
+  this.
+- **IP/TCP header covert fields, pure timing channels:** capacity is
+  bits-per-packet / bits-per-second by information theory — below the DNS floor
+  regardless of network.
+- **Domain fronting, ECH:** dead on the CDNs that matter / no SNI to encrypt on
+  our IP-addressed server (prior doc). Structural, not policy.
+
+### Class B — policy/empirical kills (venue-dependent: PROBE, don't assume)
+
+"Usually blocked" or "usually destination-scoped," from vendor docs and field
+reports — but a specific café could differ. Do not build a bespoke carrier on
+the assumption; DO add a probe line so the field decides.
+
+- **IPsec/IKE 500, NAT-T 4500, L2TP 1701 pre-auth:** field reports and vendor
+  guides say *usually blocked* pre-auth, and hotel-gateway "VPN passthrough"
+  (Nomadix) is NAT-correctness (so a tunnel survives translation once you've
+  paid), NOT pre-auth authorization. But this is portal policy, not physics — a
+  vendor default ACL sometimes lists `svc-natt`/4500. **We already listen on
+  4500 (the ICMP/UDP carrier) and the probe battery tests it, so the field tells
+  us per-café.** Just don't build an IPsec-*shaped* carrier on the assumption.
+- **NTP/123 to our server:** RFC 8952/8908 say portals SHOULD allow NTP (clock
+  sync before the portal's own HTTPS validates), and Apple mandates it — but a
+  well-run walled garden allow-lists *specific* NTP servers, not arbitrary ones.
+  Raw UDP/123 to *our* server may or may not pass. The covert-fields version (if
+  an NTP ALG is present) tops out ~240 bits/min, below the DNS floor. **Probe raw
+  UDP/123 to our server; only build if it passes as a raw UDP carrier.**
+- **STUN/3478, TURN/TURNS/5349:** STUN can't relay payload (kill). TURN is a real
+  relay we could terminate, but venue-dependent (conferencing-friendly venues)
+  and destination-scoped. Probe public-STUN reachability before considering.
+- **SIP/5060:** usually ALG-mediated (collapses to a toy) or blocked. Probe
+  before dismissing entirely, but low priority.
+- **SMTP 25/587, SSH 22:** among the *most* documented deliberately-blocked
+  ports on guest networks. Very unlikely, but a probe line costs nothing.
+- **MAC-clone/ARP, refraction, Snowflake:** hostile+macOS-broken / need ISP-core
+  or broker+proxy infra we can't run (prior doc). These stay killed on
+  feasibility, not portal policy.
+
+The rule of thumb: if the kill is enforced by addressing/hardware/information
+theory, trust it. If it's enforced by *portal configuration*, turn it into a
+probe line and let the café answer.
 
 ## The honest meta-point
 

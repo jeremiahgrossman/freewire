@@ -139,6 +139,20 @@ func main() {
 		}
 	}()
 
+	// Reachability probe responder. Magic-gated, non-amplifying, rate-limited:
+	// it exists so a client behind a captive portal can learn whether the portal
+	// passes arbitrary UDP to THIS server on a given port, which is the only
+	// honest test under destination-based walled gardens. Ports colliding with a
+	// listener above are dropped rather than fought over.
+	if probePorts := safeProbePorts(cfg, log); len(probePorts) > 0 {
+		probe := transport.NewProbeResponder(log)
+		go func() {
+			if err := probe.Run(ctx, probePorts); err != nil {
+				log.Error("probe responder error", zap.Error(err))
+			}
+		}()
+	}
+
 	// HTTP API (blocks until shutdown).
 	//
 	// log.Fatal here would call os.Exit and skip every deferred cleanup above
@@ -151,4 +165,29 @@ func main() {
 	}
 
 	log.Info("stopped")
+}
+
+// safeProbePorts returns the configured probe ports minus any that would collide
+// with a UDP listener the server already runs. Binding a probe responder on the
+// DNS (53), ICMP/UDP (4500), or WireGuard (51820) port would either fail to bind
+// or shadow the real carrier, so those are dropped with a warning rather than
+// risked. TCP/443 does not collide: the probe responder is UDP.
+func safeProbePorts(cfg *config.Config, log *zap.Logger) []int {
+	if cfg.ProbePorts == nil {
+		return nil
+	}
+	reserved := map[int]bool{
+		cfg.DNSTunnelPort: true,
+		cfg.ICMPUDPPort:   true,
+		cfg.ListenPort:    true, // WireGuard UDP
+	}
+	var out []int
+	for _, p := range *cfg.ProbePorts {
+		if reserved[p] {
+			log.Warn("probe port collides with an existing UDP listener; skipping", zap.Int("port", p))
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
 }

@@ -18,6 +18,14 @@ import (
 // name pointing at a nameserver A record on this server's public IP).
 const DefaultDNSTunnelDomain = "t.pinghop.net"
 
+// DefaultProbePorts are the UDP ports the reachability responder answers on when
+// a config names none. 443 (would-be QUIC) and 123 (NTP) are the two highest-
+// value carriers to measure per-portal: the field decides whether a portal
+// passes arbitrary UDP to this server there. Neither collides with an existing
+// listener (TLS is TCP/443; the ICMP/UDP carrier owns 4500, which the client
+// probes through that carrier instead). See PORTAL-CARRIER-IDEATION-2026-08-24.md.
+var DefaultProbePorts = []int{443, 123}
+
 type Config struct {
 	PrivateKey       string `json:"private_key"`
 	PublicKey        string `json:"public_key"`
@@ -36,6 +44,13 @@ type Config struct {
 	TLSKeyFile    string `json:"tls_key_file"`    // path to key PEM; empty = self-signed
 	DNSTunnelPort int    `json:"dns_tunnel_port"` // default 53
 	ICMPUDPPort   int    `json:"icmp_udp_port"`   // default 4500
+
+	// ProbePorts are UDP ports on which the server answers reachability probes
+	// (magic-gated, non-amplifying) so a client can learn whether a captive
+	// portal passes arbitrary UDP to THIS server on that port. Ports already
+	// served by another listener must not appear here. nil -> the default set
+	// (DefaultProbePorts); an explicit [] disables the responder.
+	ProbePorts *[]int `json:"probe_ports"`
 
 	// DNSTunnelDomain is the authoritative zone this server answers for and
 	// advertises to clients. It must be delegated to this host's public IP (an
@@ -134,6 +149,10 @@ func (c *Config) applyDefaults() {
 	}
 	if c.ICMPUDPPort == 0 {
 		c.ICMPUDPPort = 4500
+	}
+	if c.ProbePorts == nil {
+		d := append([]int(nil), DefaultProbePorts...)
+		c.ProbePorts = &d
 	}
 	if c.DNSTunnelDomain == "" {
 		c.DNSTunnelDomain = DefaultDNSTunnelDomain
