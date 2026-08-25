@@ -223,6 +223,21 @@ matrix at a café:
 The second row is the hypothesis. One café visit confirms or kills the whole
 build before we write the carrier.
 
+## Throughput MEASURED (2026-08-25): cdn_wss clears the target
+
+Desk measurement via `testing/throughput-test.sh` (25 MB blob from Cloudflare's
+speed endpoint, routed through each carrier, single samples so noisy but
+order-of-magnitude clear):
+
+- **udp443: ~125 Mbps** (UDP-native, no TCP-over-TCP -- the fastest carrier)
+- **cdn_wss: ~54 Mbps** (CloudFront WebSocket buffering does NOT throttle it)
+- wss443 direct: ~22-50 Mbps (TCP-over-TCP limited)
+
+So the kill criterion below ("throughput below the DNS carrier's ~71 KB/s") is
+NOT met: cdn_wss holds tens of Mbps, ~750x the DNS floor. CloudFront WebSocket
+buffering was the open risk; it is not fatal. cdn_wss is a genuine usable
+carrier, not a last-resort reach-only path.
+
 ## 10. Kill criteria (state them now, honor them later)
 
 Abandon or park this carrier if any hold:
