@@ -34,7 +34,7 @@ Rows are ordered best-case to worst-case. "Built" = ships today, nothing to do.
 | 5 | UDP/123 passes, UDP/443 doesn't | Portal passes NTP-class UDP | **BUILD the UDP/123 carrier** (same shape as #4, lower priority). |
 | 6 | IPv6 egress present | v4-only portal leaks v6 | **Server is now v6-ready** (provisioned + advertises endpoint_host_v6). The client `wireguard6` carrier + its leak-safe routing is the one remaining build, and it must be verified ON a v6 network -- see IPV6-CARRIER-REMAINING.md. |
 | 7 | Only throttled DNS (the original café) | Hard destination gate, DNS is the floor | If UDP/443 also fails: **nothing client-side raises the ceiling** (research-confirmed). This is the characterized case. |
-| 8 | Everything incl. CDN fails | Live-SNI portal or hard block | The hard case. Geneva-class desync IS an option **only if the portal is stateful-inline** (an active RST hints yes); big conditional build. Or accept the café as unsupported. |
+| 8 | Everything fast fails, DNS works | Destination-gated hard captive portal | The 2026-08-25 café: TCP/443 SYN-RST (incl. CDN edge), UDP dropped, but DNS/53 works. **Supported via DNS (slow).** Desync CANNOT help a SYN-RST (no handshake to manipulate) -- it needs a `[reset]` content-gated portal, not yet seen. See DESYNC-CARRIER-SPEC.md. |
 
 ## The builds, pre-scoped
 

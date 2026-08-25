@@ -74,7 +74,7 @@ func probeBattery(args []string) int {
 	fmt.Fprintf(os.Stderr, "\n  %-24s %-11s %s\n", "CARRIER", "RESULT", "NOTE")
 
 	cfg := Config{ServerHost: server, TLSPort: 443, InsecureTLS: insecure}
-	blockResets, blockTimeouts = 0, 0 // fresh accounting per run
+	blockSynRST, blockContentRST, blockTimeouts = 0, 0, 0 // fresh accounting per run
 
 	type row struct {
 		name string
@@ -162,19 +162,21 @@ func probeBattery(args []string) int {
 		fmt.Fprintln(os.Stderr)
 	}
 
-	// How the blocked carriers were blocked, whenever any were -- it decides
-	// whether the desync path (row 8) is worth pursuing. RST = inline stateful
-	// box, possibly desyncable; timeout = hard L3 ACL, no client trick beats it.
-	if blockResets > 0 || blockTimeouts > 0 {
-		switch {
-		case blockResets > 0 && blockTimeouts == 0:
-			fmt.Fprintln(os.Stderr, "probe-battery: blocked carriers were ACTIVELY REJECTED (RST) -- an inline stateful")
-			fmt.Fprintln(os.Stderr, "  box, possibly desyncable (Geneva-class); see FIELD-TEST-CONTINGENCIES.md row 8.")
-		case blockTimeouts > 0 && blockResets == 0:
+	// How the blocked carriers were blocked, whenever any were -- it decides what,
+	// if anything, is left to try. See classifyBlock for why the RST KIND matters.
+	if blockSynRST > 0 || blockContentRST > 0 || blockTimeouts > 0 {
+		if blockContentRST > 0 {
+			fmt.Fprintln(os.Stderr, "probe-battery: a carrier was RESET AFTER the TCP handshake -- content/SNI gating.")
+			fmt.Fprintln(os.Stderr, "  Desync (Geneva/zapret) MIGHT slip past this; see DESYNC-CARRIER-SPEC.md.")
+		}
+		if blockSynRST > 0 {
+			fmt.Fprintln(os.Stderr, "probe-battery: TCP SYN was REFUSED (destination-gated at L4). There is no handshake")
+			fmt.Fprintln(os.Stderr, "  to manipulate, so DESYNC CANNOT HELP here. The ways through are a permitted")
+			fmt.Fprintln(os.Stderr, "  destination (CDN, if its edge is allow-listed) or a leaked family (v6), or DNS.")
+		}
+		if blockTimeouts > 0 && blockSynRST == 0 && blockContentRST == 0 {
 			fmt.Fprintln(os.Stderr, "probe-battery: blocked carriers were SILENTLY DROPPED (timeout) -- a hard L3 ACL;")
 			fmt.Fprintln(os.Stderr, "  no client trick beats it. The ways out are a permitted destination (CDN) or v6.")
-		default:
-			fmt.Fprintln(os.Stderr, "probe-battery: blocked carriers were mixed (some RST, some drop) -- desync may help the RST ones.")
 		}
 	}
 
@@ -219,17 +221,31 @@ func reportCarrier(label string, open func() (net.Conn, error), note string) boo
 	return true
 }
 
-// Block-type accounting. A portal that actively REJECTS (TCP RST / "connection
-// refused") is an inline stateful box and may be desyncable (Geneva-class);
-// one that silently DROPS (timeout) is a hard L3 ACL that no client trick beats.
-// Knowing which decides whether the row-8 desync path in
-// FIELD-TEST-CONTINGENCIES.md is worth pursuing, so the probe classifies it.
-var blockResets, blockTimeouts int
+// Block-type accounting. The distinction that matters is WHERE the reject
+// happens, because it decides whether client-side desync (Geneva/zapret) could
+// ever help:
+//
+//   - syn-rst: the TCP SYN itself is refused ("connection refused" -- a dial
+//     failure). The portal gates by DESTINATION at L4, before any TLS/SNI. There
+//     is no handshake to manipulate, so desync CANNOT help. This is what the café
+//     did on 2026-08-25.
+//   - content-rst: the TCP handshake COMPLETED and the connection was reset later
+//     ("connection reset by peer" mid-stream, i.e. after dial). The portal gates
+//     on CONTENT (the SNI). Desync -- splitting the ClientHello, low-TTL/bad-
+//     checksum decoys to poison the middlebox's stream state -- MIGHT slip past.
+//   - timeout: silently dropped. A hard L3 ACL; no client trick beats it.
+//
+// Lumping the two RST kinds together (the earlier version did) gives a
+// misleading "possibly desyncable" for a destination SYN-RST, which is exactly
+// the case desync cannot touch. So they are counted separately.
+var blockSynRST, blockContentRST, blockTimeouts int
 
 func recordBlock(err error) {
 	switch classifyBlock(err) {
-	case "reset":
-		blockResets++
+	case "syn-rst":
+		blockSynRST++
+	case "content-rst":
+		blockContentRST++
 	case "timeout":
 		blockTimeouts++
 	}
@@ -241,8 +257,10 @@ func classifyBlock(err error) string {
 	}
 	s := err.Error()
 	switch {
-	case strings.Contains(s, "refused"), strings.Contains(s, "reset"):
-		return "reset"
+	case strings.Contains(s, "refused"):
+		return "syn-rst" // RST in response to the SYN: destination-gated at L4
+	case strings.Contains(s, "reset"):
+		return "content-rst" // reset after the handshake: content/SNI-gated
 	case strings.Contains(s, "timeout"), strings.Contains(s, "deadline"), strings.Contains(s, "no route"):
 		return "timeout"
 	default:
@@ -252,8 +270,10 @@ func classifyBlock(err error) string {
 
 func blockTag(err error) string {
 	switch classifyBlock(err) {
-	case "reset":
-		return "[RST] "
+	case "syn-rst":
+		return "[SYN-RST] "
+	case "content-rst":
+		return "[reset] "
 	case "timeout":
 		return "[timeout] "
 	default:
