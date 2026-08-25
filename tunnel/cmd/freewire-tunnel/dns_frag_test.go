@@ -155,7 +155,7 @@ func TestNoPreferenceKeepsSpeedOrder(t *testing.T) {
 	// round trip for the HTTP Upgrade, so it is only worth reaching when the raw
 	// carrier was refused -- which is what a portal passing "web 443" but
 	// resetting raw 443 does.
-	want := []string{"wireguard", "http_connect", "tls443", "wss443", "cdn_wss", "dns", "icmp_udp"}
+	want := []string{"wireguard", "udp443", "http_connect", "tls443", "wss443", "cdn_wss", "dns", "icmp_udp"}
 	got := orderCandidates(defaultCandidates(), "")
 	for i, name := range want {
 		if got[i].name != name {

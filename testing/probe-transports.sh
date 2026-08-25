@@ -67,10 +67,10 @@ echo "==> probing each transport (non-routed; WG handshake over each)"
 WG="$(jq -r .server_endpoint <<<"$(cat "$CFG")" | sed 's/.*://')"
 TLS="$(jq -r .tls_port <<<"$(cat "$CFG")")"; DNS="$(jq -r .dns_tunnel_port <<<"$(cat "$CFG")")"; ICMP="$(jq -r .icmp_udp_port <<<"$(cat "$CFG")")"; CDN="$(jq -r '.cdn_host // ""' <<<"$(cat "$CFG")")"
 printf '  %-14s %-8s %s\n' "TRANSPORT" "PORT" "RESULT"
-declare -A PORT=( [wireguard]="UDP $WG" [http_connect]="gateway" [tls443]="TCP $TLS" [wss443]="TCP $TLS" [cdn_wss]="CDN 443" [dns]="UDP $DNS" [icmp_udp]="UDP $ICMP" )
+declare -A PORT=( [wireguard]="UDP $WG" [udp443]="UDP $TLS" [http_connect]="gateway" [tls443]="TCP $TLS" [wss443]="TCP $TLS" [cdn_wss]="CDN 443" [dns]="UDP $DNS" [icmp_udp]="UDP $ICMP" )
 # wss443 sits next to tls443 on the same port: probing both is how a portal that
 # passes web-443 (HTTP Upgrade) while refusing raw 443 shows itself here.
-for t in wireguard http_connect tls443 wss443 cdn_wss dns icmp_udp; do
+for t in wireguard udp443 http_connect tls443 wss443 cdn_wss dns icmp_udp; do
   start=$(python3 -c 'import time;print(int(time.time()*1000))')
   # sudo: --select-only still creates the utun for the WireGuard device, which
   # needs root. The passwordless rule covers the tunnel binary. No routing is

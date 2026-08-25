@@ -38,6 +38,12 @@ type transportCandidate struct {
 	// will point at; transport is the stream to bridge, or nil when the
 	// implementation runs its own bridge (DNS and ICMP do).
 	open func(Config) (localProxy net.PacketConn, transport net.Conn, err error)
+	// endpoint, when set, is the address WireGuard is pointed at directly (no
+	// local proxy). It is how a carrier reaches the server on a non-default UDP
+	// port -- udp443 sends WireGuard straight to server:443. When nil, the
+	// endpoint is derived the usual way: the local proxy's address, or the
+	// configured server endpoint for the direct WireGuard carrier.
+	endpoint func(Config) string
 }
 
 // transportCandidates lists the chain in priority order.
@@ -87,6 +93,31 @@ func defaultCandidates() []transportCandidate {
 			// settles for a slower encapsulation.
 			name: "wireguard",
 			open: func(Config) (net.PacketConn, net.Conn, error) { return nil, nil, nil },
+		},
+		{
+			// WireGuard straight to the server on UDP/443. No proxy, no framing,
+			// no TCP-over-TCP: as fast as direct WireGuard, just on a port portals
+			// pass far more often (blocking UDP/443 breaks HTTP/3, so "block QUIC"
+			// is off by default). Tried right after direct 51820 -- same cost, one
+			// port more likely to be open. The server relays UDP/443 to its local
+			// WireGuard. Skipped if the network gives WireGuard-direct anyway; the
+			// fall-through selection reaches it when 51820 is blocked but UDP/443
+			// is not.
+			name: "udp443",
+			open: func(Config) (net.PacketConn, net.Conn, error) { return nil, nil, nil },
+			endpoint: func(cfg Config) string {
+				host := cfg.ServerHost
+				if host == "" {
+					if h, _, e := net.SplitHostPort(cfg.ServerEndpoint); e == nil {
+						host = h
+					}
+				}
+				port := cfg.TLSPort
+				if port == 0 {
+					port = 443
+				}
+				return net.JoinHostPort(host, fmt.Sprintf("%d", port))
+			},
 		},
 		{
 			name: "http_connect",
@@ -512,11 +543,11 @@ func handshakeBudgetFor(name string) time.Duration {
 		return 8 * time.Second
 	case "icmp_udp":
 		return 5 * time.Second
-	case "wireguard":
-		// Tried first now. A WireGuard handshake over a working network is one
-		// round trip (well under a second), so a short budget still succeeds on an
-		// open network while falling through fast on a portal that blocks UDP
-		// 51820 -- the common captive case -- instead of stalling the whole chain.
+	case "wireguard", "udp443":
+		// Both are a direct WireGuard handshake -- one round trip, well under a
+		// second on a working network -- so a short budget succeeds on an open
+		// network while falling through fast on a portal that blocks the port
+		// instead of stalling the whole chain.
 		return 2 * time.Second
 	default:
 		return 3 * time.Second
@@ -585,9 +616,12 @@ func establishTunnel(
 		}
 
 		// Point WireGuard at this candidate. Direct WireGuard has no proxy, so
-		// it uses the server endpoint itself.
+		// it uses the server endpoint itself; a carrier with an explicit endpoint
+		// (udp443 -> server:443) uses that; otherwise the local proxy's address.
 		endpoint := cfg.ServerEndpoint
-		if lp != nil {
+		if candidate.endpoint != nil {
+			endpoint = candidate.endpoint(cfg)
+		} else if lp != nil {
 			endpoint = lp.LocalAddr().String()
 		}
 

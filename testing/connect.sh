@@ -95,7 +95,7 @@ printf '%s' "$PEER_TOKEN" > "$STATE/peer-token"
 PREFERRED=""
 if [[ -n "$TRANSPORT" ]]; then
   case "$TRANSPORT" in
-    wireguard|tls443|wss443|cdn_wss|http_connect|dns|icmp_udp) ;;
+    wireguard|udp443|tls443|wss443|cdn_wss|http_connect|dns|icmp_udp) ;;
     *) echo "unknown transport: $TRANSPORT" >&2; exit 1 ;;
   esac
   PREFERRED=",

@@ -101,6 +101,11 @@ final class PathUpgradeManager {
         switch transport {
         case .wireguard:
             return await probeWireGuard()
+        case .udp443:
+            // A direct WireGuard handshake on UDP/443. The chain discovers it on
+            // connect; the upgrade manager does not have a cheap UDP/443 probe
+            // distinct from a full handshake, so it declines rather than guess.
+            return false
         case .tls443:
             return await probeTCP443()
         case .cdnWSS:
@@ -286,6 +291,7 @@ final class PathUpgradeManager {
 
 enum TunnelTransport: String, CaseIterable {
     case wireguard  = "wireguard"
+    case udp443     = "udp443"
     case httpConnect = "http_connect"
     case tls443     = "tls443"
     case wss443     = "wss443"
@@ -301,12 +307,13 @@ enum TunnelTransport: String, CaseIterable {
     var priority: Int {
         switch self {
         case .wireguard:   return 1
-        case .httpConnect: return 2
-        case .tls443:      return 3
-        case .wss443:      return 4
-        case .cdnWSS:      return 5
-        case .dns:         return 6
-        case .icmpUDP:     return 7
+        case .udp443:      return 2
+        case .httpConnect: return 3
+        case .tls443:      return 4
+        case .wss443:      return 5
+        case .cdnWSS:      return 6
+        case .dns:         return 7
+        case .icmpUDP:     return 8
         }
     }
 
@@ -329,6 +336,7 @@ enum TunnelTransport: String, CaseIterable {
     var displayName: String {
         switch self {
         case .wireguard:   return "WireGuard"
+        case .udp443:      return "WireGuard UDP/443"
         case .httpConnect: return "HTTP CONNECT"
         case .tls443:      return "TLS/443"
         case .wss443:      return "WebSocket/443"

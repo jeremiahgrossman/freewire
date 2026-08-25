@@ -139,11 +139,23 @@ func main() {
 		}
 	}()
 
+	// WireGuard-over-UDP/443 carrier. The fastest carrier when a portal passes
+	// QUIC-class UDP (no framing, no TCP-over-TCP). It owns UDP/443 and answers
+	// the reachability probe on that port itself, so the standalone responder
+	// below skips 443.
+	udp443 := transport.NewUDP443Server(cfg.ListenPort, log)
+	go func() {
+		if err := udp443.Run(ctx, cfg.TLSPort); err != nil {
+			log.Error("udp443 server error", zap.Error(err))
+		}
+	}()
+
 	// Reachability probe responder. Magic-gated, non-amplifying, rate-limited:
 	// it exists so a client behind a captive portal can learn whether the portal
 	// passes arbitrary UDP to THIS server on a given port, which is the only
 	// honest test under destination-based walled gardens. Ports colliding with a
-	// listener above are dropped rather than fought over.
+	// listener above -- including UDP/443, now owned by the carrier above -- are
+	// dropped rather than fought over.
 	if probePorts := safeProbePorts(cfg, log); len(probePorts) > 0 {
 		probe := transport.NewProbeResponder(log)
 		go func() {
@@ -180,6 +192,7 @@ func safeProbePorts(cfg *config.Config, log *zap.Logger) []int {
 		cfg.DNSTunnelPort: true,
 		cfg.ICMPUDPPort:   true,
 		cfg.ListenPort:    true, // WireGuard UDP
+		cfg.TLSPort:       true, // UDP/443 is owned by the UDP443 carrier, which answers probes itself
 	}
 	var out []int
 	for _, p := range *cfg.ProbePorts {
