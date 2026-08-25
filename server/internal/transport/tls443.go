@@ -74,8 +74,24 @@ func NewTLS443Server(tlsCfg *tls.Config, wgPort int, log *zap.Logger) (*TLS443Se
 	if tlsCfg == nil {
 		return nil, fmt.Errorf("tls443: nil tls config")
 	}
+
+	// This listener speaks HTTP/1.1 (the WebSocket carrier) and our own raw
+	// length-framed protocol, and NEVER HTTP/2. So it must not offer "h2" in
+	// ALPN. The shared config does when ACME is on -- autocert's TLSConfig sets
+	// NextProtos to {"h2","http/1.1","acme-tls/1"} -- and a peer that RESPECTS
+	// ALPN then speaks real HTTP/2 to us: CloudFront does exactly this, and its
+	// HTTP/2 connection preface ("PRI * HTTP/2.0...") gets read as a raw frame
+	// whose length byte is 'P' (0x50), i.e. a ~20 KB "packet too large". Our own
+	// client and server both ignore the negotiated protocol (client writes
+	// HTTP/1.1, server peeks a byte), which is why the carriers worked anyway and
+	// hid this -- but a conforming intermediary does not, so the fronted path
+	// 502s. Clone and force http/1.1 so ALPN can never select h2 here. The clone
+	// leaves the API listener's shared config (which does speak HTTP/2) untouched.
+	cloned := tlsCfg.Clone()
+	cloned.NextProtos = []string{"http/1.1"}
+
 	return &TLS443Server{
-		tlsConfig: tlsCfg,
+		tlsConfig: cloned,
 		wgPort:    wgPort,
 		log:       log,
 		sem:       make(chan struct{}, maxTLSConnections),
