@@ -15,6 +15,7 @@ type serverConfigResponse struct {
 	DNSTunnelPort     int      `json:"dns_tunnel_port"`
 	ICMPUDPPort       int      `json:"icmp_udp_port"`
 	DNSTunnelDomain   string   `json:"dns_tunnel_domain"`
+	CDNHost           string   `json:"cdn_host,omitempty"`
 	AllowedIPs        []string `json:"allowed_ips"`
 	ServerVersion     string   `json:"server_version"`
 	MinClientVersion  string   `json:"min_client_version"`
@@ -53,6 +54,7 @@ func (s *Server) handleServerConfig(w http.ResponseWriter, r *http.Request) {
 		DNSTunnelPort:     s.cfg.DNSTunnelPort,
 		ICMPUDPPort:       s.cfg.ICMPUDPPort,
 		DNSTunnelDomain:   s.cfg.DNSTunnelDomain,
+		CDNHost:           s.cfg.CDNHost,
 		AllowedIPs:        []string{"0.0.0.0/0", "::/0"},
 		ServerVersion:     s.cfg.ServerVersion,
 		MinClientVersion:  s.cfg.MinClientVersion,

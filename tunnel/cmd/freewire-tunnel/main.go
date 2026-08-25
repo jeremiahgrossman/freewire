@@ -36,6 +36,12 @@ type Config struct {
 	TLSPort         int    `json:"tls_port"`          // default 443; server reports its own
 	DNSTunnelPort   int    `json:"dns_tunnel_port"`   // default 53; server reports its own
 	ICMPUDPPort     int    `json:"icmp_udp_port"`     // default 4500
+	// CDNHost is a CDN hostname (e.g. a CloudFront distribution) that fronts the
+	// server. When set, the cdn_wss carrier dials it instead of the server's IP,
+	// so a portal that gates our ADDRESS -- not just the port -- still passes the
+	// tunnel, because the CDN edge IP is one the portal already permits. Empty
+	// disables that carrier. Reported by the server (cdn_host).
+	CDNHost string `json:"cdn_host,omitempty"`
 	// DNSTunnelDomain is the authoritative zone the DNS tunnel queries, reported
 	// by the server so a rotation needs no client rebuild. Empty falls back to
 	// defaultDNSTunnelDomain.

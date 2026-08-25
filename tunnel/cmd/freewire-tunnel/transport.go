@@ -142,6 +142,31 @@ func defaultCandidates() []transportCandidate {
 			},
 		},
 		{
+			// WebSocket over TLS/443 to a CDN that fronts the server, instead of
+			// to the server's own IP. This is the only carrier that beats
+			// DESTINATION gating: a portal that allow-lists by IP/FQDN (the
+			// common café/hotel class) refuses our server's address but passes a
+			// CloudFront edge IP, because its own login page and payment SDKs are
+			// CDN-hosted. We are not fronting someone else's domain -- we own the
+			// distribution and terminate behind it. Slower than the direct
+			// carriers (an extra hop), so it sits below them and is reached only
+			// when they are blocked -- exactly the destination-gated portal.
+			// Skipped unless the server advertised a CDN host.
+			name: "cdn_wss",
+			open: func(cfg Config) (net.PacketConn, net.Conn, error) {
+				tc, err := tryCDNWSS(cfg)
+				if err != nil {
+					return nil, nil, err
+				}
+				lp, err := newLocalUDPProxy()
+				if err != nil {
+					tc.Close()
+					return nil, nil, err
+				}
+				return lp, tc, nil
+			},
+		},
+		{
 			name: "dns",
 			open: func(cfg Config) (net.PacketConn, net.Conn, error) {
 				lp, err := runDNSTunnel(cfg)
@@ -345,6 +370,30 @@ func tryWSS443(cfg Config) (net.Conn, error) {
 	}
 	tc.SetDeadline(time.Time{}) //nolint:errcheck
 	return ws, nil
+}
+
+// tryCDNWSS opens the WebSocket carrier to the configured CDN hostname instead
+// of the server's IP.
+//
+// It is tryWSS443 with two deliberate differences: the destination is the CDN
+// host (so DNS picks a nearby edge and the portal sees a permitted CDN address),
+// and TLS verification is ALWAYS on. A CDN hostname has a real certificate
+// chain; accepting an invalid one here would accept a portal's man-in-the-middle
+// -- strictly stronger than the direct carriers, which face the server's own
+// self-signed cert and so run with verification off in dev.
+func tryCDNWSS(cfg Config) (net.Conn, error) {
+	if cfg.CDNHost == "" {
+		return nil, fmt.Errorf("cdn_wss: no CDN host configured")
+	}
+	cdnCfg := cfg
+	cdnCfg.ServerHost = cfg.CDNHost
+	cdnCfg.TLSPort = 443       // the CDN terminates TLS on 443 regardless of the server's port
+	cdnCfg.InsecureTLS = false // a real hostname: never skip verification
+	tc, err := tryWSS443(cdnCfg)
+	if err != nil {
+		return nil, fmt.Errorf("cdn_wss via %s: %w", cfg.CDNHost, err)
+	}
+	return tc, nil
 }
 
 // runLocalProxy bridges between wireguard-go (via localProxy UDP) and the

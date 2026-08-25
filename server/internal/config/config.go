@@ -58,6 +58,13 @@ type Config struct {
 	// a resolver the client does not control. Default "t.pinghop.net".
 	DNSTunnelDomain string `json:"dns_tunnel_domain"`
 
+	// CDNHost is a CDN hostname that fronts this server (e.g. a CloudFront
+	// distribution). Reported to clients so they can add the CDN-fronted
+	// WebSocket carrier to their fallback chain. Empty disables it. The client
+	// validates this certificate normally: unlike the direct carriers, a CDN
+	// hostname has a real chain, so there is no self-signed cert to skip.
+	CDNHost string `json:"cdn_host"`
+
 	// PrivacyPassKey is the PEM-encoded RSA issuer key, empty on self-hosted
 	// servers.
 	//

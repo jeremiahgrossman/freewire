@@ -51,6 +51,9 @@ WG_PORT="$(jq -r .endpoint_port <<<"$CFG")"
 TLS_PORT="$(jq -r .tls_endpoint_port <<<"$CFG")"
 DNS_PORT="$(jq -r .dns_tunnel_port <<<"$CFG")"
 ICMP_PORT="$(jq -r .icmp_udp_port <<<"$CFG")"
+# CDN host the server advertises, if any. FREEWIRE_CDN_HOST overrides it, so the
+# cdn_wss carrier can be exercised even before the server config carries one.
+CDN_HOST="${FREEWIRE_CDN_HOST:-$(jq -r '.cdn_host // ""' <<<"$CFG")}"
 [[ -n "$SERVER_KEY" && "$SERVER_KEY" != null ]] || { echo "no server key in config" >&2; exit 1; }
 
 # The key the client pins must be the key the server serves, or this script
@@ -92,7 +95,7 @@ printf '%s' "$PEER_TOKEN" > "$STATE/peer-token"
 PREFERRED=""
 if [[ -n "$TRANSPORT" ]]; then
   case "$TRANSPORT" in
-    wireguard|tls443|http_connect|dns|icmp_udp) ;;
+    wireguard|tls443|wss443|cdn_wss|http_connect|dns|icmp_udp) ;;
     *) echo "unknown transport: $TRANSPORT" >&2; exit 1 ;;
   esac
   PREFERRED=",
@@ -149,7 +152,8 @@ cat > "$STATE/config.json" <<JSON
   "insecure_tls": true,
   "tls_port": $TLS_PORT,
   "dns_tunnel_port": $DNS_PORT,
-  "icmp_udp_port": $ICMP_PORT$PREFERRED
+  "icmp_udp_port": $ICMP_PORT,
+  "cdn_host": "$CDN_HOST"$PREFERRED
 }
 JSON
 

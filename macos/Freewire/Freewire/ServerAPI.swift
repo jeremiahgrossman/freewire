@@ -11,6 +11,10 @@ struct ServerConfig: Decodable {
     // Authoritative DNS tunnel zone. Optional so a server old enough not to send
     // it still decodes; the Go tunnel falls back to its own default when empty.
     let dnsTunnelDomain: String?
+    // CDN hostname that fronts the server (e.g. a CloudFront distribution).
+    // Optional so an older server without it still decodes; empty disables the
+    // cdn_wss carrier client-side.
+    let cdnHost: String?
 
     var endpoint: String { "\(endpointHost):\(endpointPort)" }
 
@@ -23,6 +27,7 @@ struct ServerConfig: Decodable {
         case icmpUDPPort = "icmp_udp_port"
         case capacityAvailable = "capacity_available"
         case dnsTunnelDomain = "dns_tunnel_domain"
+        case cdnHost = "cdn_host"
     }
 }
 
@@ -57,6 +62,7 @@ struct CachedConnection: Codable {
     let dnsTunnelPort: Int
     let icmpUDPPort: Int
     let dnsTunnelDomain: String?
+    let cdnHost: String?
     let tunnelIP: String
     let keepalive: Int
     let peerToken: String

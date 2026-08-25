@@ -103,6 +103,11 @@ final class PathUpgradeManager {
             return await probeWireGuard()
         case .tls443:
             return await probeTCP443()
+        case .cdnWSS:
+            // Same reasoning as wss443, and more so: reaching the CDN edge on 443
+            // says nothing about whether the fronted path carries traffic, and
+            // the chain discovers it correctly on connect.
+            return false
         case .wss443:
             // Reaching TCP/443 is necessary but not sufficient: the whole point
             // of this carrier is the networks that accept a completed HTTP
@@ -284,6 +289,7 @@ enum TunnelTransport: String, CaseIterable {
     case httpConnect = "http_connect"
     case tls443     = "tls443"
     case wss443     = "wss443"
+    case cdnWSS     = "cdn_wss"
     case dns        = "dns"
     case icmpUDP    = "icmp_udp"
 
@@ -298,8 +304,9 @@ enum TunnelTransport: String, CaseIterable {
         case .httpConnect: return 2
         case .tls443:      return 3
         case .wss443:      return 4
-        case .dns:         return 5
-        case .icmpUDP:     return 6
+        case .cdnWSS:      return 5
+        case .dns:         return 6
+        case .icmpUDP:     return 7
         }
     }
 
@@ -325,6 +332,7 @@ enum TunnelTransport: String, CaseIterable {
         case .httpConnect: return "HTTP CONNECT"
         case .tls443:      return "TLS/443"
         case .wss443:      return "WebSocket/443"
+        case .cdnWSS:      return "CDN WebSocket/443"
         case .dns:         return "DNS tunnel"
         case .icmpUDP:     return "ICMP tunnel"
         }

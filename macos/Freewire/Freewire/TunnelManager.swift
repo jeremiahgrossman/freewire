@@ -289,7 +289,8 @@ final class TunnelManager: ObservableObject {
                 icmpUDPPort:     server.icmpUDPPort,
                 preferredTransport: Preferences.shared.forceTransport,
                 dnsResolver: Preferences.shared.dnsResolverOverride,
-                dnsTunnelDomain: server.dnsTunnelDomain
+                dnsTunnelDomain: server.dnsTunnelDomain,
+                cdnHost: server.cdnHost
             )
 
             // CONN-5: the control plane answered above, so this is a normal
@@ -327,6 +328,7 @@ final class TunnelManager: ObservableObject {
                 dnsTunnelPort:   server.dnsTunnelPort,
                 icmpUDPPort:     server.icmpUDPPort,
                 dnsTunnelDomain: server.dnsTunnelDomain,
+                cdnHost: server.cdnHost,
                 tunnelIP:        peer.tunnelIP,
                 keepalive:       peer.keepaliveInterval,
                 peerToken:       peer.peerToken
@@ -493,7 +495,8 @@ final class TunnelManager: ObservableObject {
                     // Try what was working before walking the whole chain again.
                     preferredTransport: Preferences.shared.forceTransport ?? lastGoodTransport?.rawValue,
                     dnsResolver: Preferences.shared.dnsResolverOverride,
-                    dnsTunnelDomain: server.dnsTunnelDomain
+                    dnsTunnelDomain: server.dnsTunnelDomain,
+                    cdnHost: server.cdnHost
                 )
 
                 let (ifName, transport) = try await launchTunnel(config: cfg)
@@ -615,7 +618,8 @@ final class TunnelManager: ObservableObject {
                 icmpUDPPort:     server.icmpUDPPort,
                 preferredTransport: nil, // fastest-first chain, up to WireGuard-direct
                 dnsResolver: Preferences.shared.dnsResolverOverride,
-                dnsTunnelDomain: server.dnsTunnelDomain
+                dnsTunnelDomain: server.dnsTunnelDomain,
+                cdnHost: server.cdnHost
             )
             let (ifName, newTransport) = try await launchTunnel(config: cfg)
 
@@ -835,7 +839,8 @@ final class TunnelManager: ObservableObject {
             icmpUDPPort:     cached.icmpUDPPort,
             preferredTransport: Preferences.shared.forceTransport,
             dnsResolver:     Preferences.shared.dnsResolverOverride,
-            dnsTunnelDomain: cached.dnsTunnelDomain
+            dnsTunnelDomain: cached.dnsTunnelDomain,
+            cdnHost: cached.cdnHost
         )
         guard let (ifName, transport) = try? await launchTunnel(config: cfg), !Task.isCancelled else {
             await killTunnel()
@@ -1008,6 +1013,7 @@ private struct TunnelConfig: Encodable {
     let preferredTransport: String?
     let dnsResolver:        String?
     let dnsTunnelDomain:    String?
+    let cdnHost:            String?
 
     enum CodingKeys: String, CodingKey {
         case privateKey      = "private_key"
@@ -1024,6 +1030,7 @@ private struct TunnelConfig: Encodable {
         case preferredTransport = "preferred_transport"
         case dnsResolver        = "dns_resolver"
         case dnsTunnelDomain    = "dns_tunnel_domain"
+        case cdnHost            = "cdn_host"
     }
 }
 
