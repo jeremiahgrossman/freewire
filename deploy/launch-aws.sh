@@ -103,6 +103,10 @@ open_port udp 4500  'ICMP/UDP tunnel'
 # probes, so an open port here is not an NTP or QUIC service.
 open_port udp 443   'probe responder (would-be QUIC carrier)'
 open_port udp 123   'probe responder (would-be NTP carrier)'
+# ACME HTTP-01 challenge. Only used when acme_domain is configured (needed for a
+# publicly trusted origin certificate, which CloudFront requires); the server
+# does not listen on 80 otherwise, so the rule is inert until then.
+open_port tcp 80    'ACME HTTP-01 challenge'
 
 echo "==> latest Ubuntu 24.04 arm64 AMI"
 AMI="$(aws ssm get-parameters --region "$REGION" \

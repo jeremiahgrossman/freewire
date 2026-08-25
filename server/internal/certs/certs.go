@@ -59,7 +59,42 @@ func Build(certFile, keyFile string, acme ACMEOptions, log *zap.Logger) (*tls.Co
 		}()
 		cfg := m.TLSConfig()
 		cfg.MinVersion = tls.VersionTLS12
-		log.Info("acme enabled", zap.String("domain", acme.Domain))
+
+		// Keep serving clients that connect by IP.
+		//
+		// autocert's GetCertificate answers from a host whitelist, so it fails
+		// any handshake whose SNI is absent or unrecognized. Every current
+		// client dials this server by bare IP and therefore sends NO SNI at all
+		// (confirmed by capture; see WHAT-THE-SERVER-CAN-SEE in DECISIONS.md).
+		// Handing autocert's config over unmodified would break the raw TLS/443
+		// carrier, the WebSocket carrier and the API for every existing client
+		// the moment a domain is configured -- turning "add a hostname" into a
+		// total outage.
+		//
+		// So: real certificate when the SNI names the ACME domain (which is what
+		// a CDN origin fetch and any hostname client will send), self-signed
+		// fallback otherwise. The pinned WireGuard key is what establishes trust
+		// on the IP path regardless, which is why a self-signed certificate is
+		// sufficient there.
+		selfSigned, err := loadOrGenerateCert(certFile, keyFile, log)
+		if err != nil {
+			return nil, fmt.Errorf("acme enabled but no fallback certificate: %w", err)
+		}
+		acmeGetCert := cfg.GetCertificate
+		cfg.GetCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if hello.ServerName == "" {
+				return &selfSigned, nil
+			}
+			cert, err := acmeGetCert(hello)
+			if err != nil {
+				// Unknown SNI: serve the self-signed identity rather than
+				// refusing the handshake outright.
+				return &selfSigned, nil
+			}
+			return cert, nil
+		}
+		log.Info("acme enabled", zap.String("domain", acme.Domain),
+			zap.String("no_sni", "served the self-signed certificate"))
 		return cfg, nil
 	}
 
