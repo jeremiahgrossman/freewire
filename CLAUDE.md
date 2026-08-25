@@ -47,6 +47,18 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   ```
   Teardown when done (idle is ~free, so no rush): disable then
   `aws cloudfront delete-distribution --id EFJL255K0RTR --if-match <ETag>`.
+- **Carriers pre-built for the field (2026-08-25):** `udp443` (WireGuard straight
+  over UDP/443 — the fastest carrier, ~125 Mbps measured, no TCP-over-TCP; server
+  dispatches the port between the WG relay and the magic probe) and throughput
+  measured across the 443 family: **cdn_wss ~54 Mbps** (CloudFront buffering is
+  NOT fatal — kill criterion not met), wss443 ~22–50, udp443 ~125. See
+  `testing/throughput-test.sh` and `FIELD-TEST-CONTINGENCIES.md`. The probe
+  battery now also classifies a block as RST (stateful/desyncable) vs timeout
+  (hard ACL). **Server is IPv6-ready** (provisioned + advertises endpoint_host_v6,
+  codified in launch-aws.sh); the client `wireguard6` carrier's leak-safe routing
+  is the one piece left, deferred to a v6 network — `IPV6-CARRIER-REMAINING.md`.
+  Eight carriers ship: wireguard, udp443, http_connect, tls443, wss443, cdn_wss,
+  dns, icmp_udp.
 - **The `cdn_wss` CARRIER IS BUILT and verified end to end** (routed run 6/6
   TUNNELLED through CloudFront, edge IP 3.163.157.x pinned outside the tunnel by
   the carrier-peer-pinning `01d9780`). It sits after `wss443` in speed order and
