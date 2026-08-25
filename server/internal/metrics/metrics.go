@@ -34,11 +34,16 @@ import (
 // remembered when it was incremented would be an event log wearing a different
 // name.
 type Counters struct {
-	PeersAdded     atomic.Int64
-	PeersRemoved   atomic.Int64
-	TLSSessions    atomic.Int64
-	DNSSessions    atomic.Int64
-	ICMPSessions   atomic.Int64
+	PeersAdded   atomic.Int64
+	PeersRemoved atomic.Int64
+	TLSSessions  atomic.Int64
+	// WSSessions counts WebSocket-carrier sessions. They arrive on the same
+	// port as TLSSessions and are counted there too, so this is the subset that
+	// took the WebSocket upgrade -- which is how we learn whether portals are
+	// passing web-443 while refusing raw 443.
+	WSSessions      atomic.Int64
+	DNSSessions     atomic.Int64
+	ICMPSessions    atomic.Int64
 	SessionsEvicted atomic.Int64
 }
 
@@ -61,6 +66,7 @@ func RunRollup(log *zap.Logger, interval time.Duration, stop <-chan struct{}) {
 				zap.Int64("peers_added", Global.PeersAdded.Swap(0)),
 				zap.Int64("peers_removed", Global.PeersRemoved.Swap(0)),
 				zap.Int64("tls_sessions", Global.TLSSessions.Swap(0)),
+				zap.Int64("ws_sessions", Global.WSSessions.Swap(0)),
 				zap.Int64("dns_sessions", Global.DNSSessions.Swap(0)),
 				zap.Int64("icmp_sessions", Global.ICMPSessions.Swap(0)),
 				zap.Int64("sessions_evicted", Global.SessionsEvicted.Swap(0)),

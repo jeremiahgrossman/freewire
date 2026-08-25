@@ -175,7 +175,40 @@ func (s *TLS443Server) handleConn(rawConn net.Conn) {
 	// when someone connected, which the privacy policy says does not exist.
 	// See internal/metrics.
 	metrics.Global.TLSSessions.Add(1)
-	s.bridgeToWireGuard(tlsConn)
+
+	// Discriminate the two carriers that share this port, INSIDE the TLS
+	// session. The raw carrier's first bytes are a uint16 length prefix, whose
+	// high byte is always small (a frame cannot exceed tlsMaxFrame), while a
+	// WebSocket upgrade begins "GET ". So one byte separates them with no
+	// ambiguity and no new port, listener or certificate.
+	br := bufio.NewReader(tlsConn)
+	first, err := br.Peek(1)
+	if err != nil {
+		tlsConn.Close()
+		return
+	}
+
+	var carrier net.Conn
+	if first[0] == 'G' {
+		// WebSocket: complete the upgrade, then bridge the same length-framed
+		// stream through binary frames. wsConn is a transparent net.Conn, so
+		// the bridge below is identical for both carriers.
+		tlsConn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
+		if err := wsServerHandshake(tlsConn, br); err != nil {
+			s.log.Error("tls443: websocket upgrade", zap.String("cause", netErrCause(err)))
+			tlsConn.Close()
+			return
+		}
+		tlsConn.SetReadDeadline(time.Time{}) //nolint:errcheck
+		metrics.Global.WSSessions.Add(1)
+		carrier = newWSConn(tlsConn, br, false) // server MUST NOT mask (RFC 6455 §5.1)
+	} else {
+		// Raw length-framed carrier. Reads go through the same bufio.Reader so
+		// the peeked byte is not lost.
+		carrier = &bufConn{Conn: tlsConn, r: br}
+	}
+
+	s.bridgeToWireGuard(carrier)
 }
 
 // handleHTTPConnect reads an HTTP CONNECT request from conn and responds 200.

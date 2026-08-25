@@ -154,6 +154,15 @@ func main() {
 		os.Exit(dnsDataTest(os.Args[2:]))
 	}
 
+	// --wss-probe tests the WebSocket carrier's handshake, and alongside it the
+	// raw TLS carrier on the same port, reporting both. It changes no system
+	// state and needs no root, which is the point: it answers "does this network
+	// pass web-443 while refusing raw 443?" from a café table, before committing
+	// to a connection. See TRANSPORT-RESEARCH-2026-08-24.md.
+	if len(os.Args) > 1 && os.Args[1] == "--wss-probe" {
+		os.Exit(wssProbe(os.Args[2:]))
+	}
+
 	// Repair before doing anything else, on every run. setupRouting used to be
 	// the only place this happened, so a machine left broken stayed broken
 	// until a connection attempt got far enough to reach it -- and a connection

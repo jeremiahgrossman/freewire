@@ -21,6 +21,10 @@ import (
 const (
 	httpConnectBudget = 2 * time.Second
 	tls443Budget      = 3 * time.Second
+	// The WebSocket carrier costs one extra round trip (the HTTP Upgrade) on
+	// top of the same dial and TLS handshake as tls443, so it gets the same
+	// budget plus that round trip rather than a fresh 3s.
+	wss443Budget = 4 * time.Second
 )
 
 // Fallback order (per spec, ~10s total budget):
@@ -103,6 +107,29 @@ func defaultCandidates() []transportCandidate {
 			name: "tls443",
 			open: func(cfg Config) (net.PacketConn, net.Conn, error) {
 				tc, err := tryTLS443(cfg)
+				if err != nil {
+					return nil, nil, err
+				}
+				lp, err := newLocalUDPProxy()
+				if err != nil {
+					tc.Close()
+					return nil, nil, err
+				}
+				return lp, tc, nil
+			},
+		},
+		{
+			// WebSocket over TLS/443. Same port and cost as tls443, tried after
+			// it because it adds a round trip and frame overhead for no gain on
+			// a network that allows the raw carrier. It earns its place where
+			// the gateway passes only 443 that completes an HTTP Upgrade --
+			// "web 443" -- and resets a raw TLS session to an IP, which is the
+			// likeliest reading of the café's active refusal. Falling from
+			// tls443 to here costs one dial; the alternative was falling all the
+			// way to a throttled DNS carrier.
+			name: "wss443",
+			open: func(cfg Config) (net.PacketConn, net.Conn, error) {
+				tc, err := tryWSS443(cfg)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -277,6 +304,47 @@ func tryTLS443(cfg Config) (net.Conn, error) {
 		return nil, fmt.Errorf("tls443: %w", err)
 	}
 	return c, nil
+}
+
+// tryWSS443 connects to the server's TLS port and upgrades to WebSocket.
+//
+// Identical dial and uTLS handshake to tryTLS443 -- same port, same
+// certificate, same rotated fingerprint -- differing only in what happens
+// inside the TLS session: an HTTP Upgrade, then binary frames. The server
+// discriminates the two by peeking one byte inside TLS, so this needs no
+// additional port or configuration.
+func tryWSS443(cfg Config) (net.Conn, error) {
+	host := cfg.ServerHost
+	if host == "" {
+		h, _, err := net.SplitHostPort(cfg.ServerEndpoint)
+		if err != nil {
+			return nil, fmt.Errorf("wss443: no server host: %w", err)
+		}
+		host = h
+	}
+	addr := net.JoinHostPort(host, fmt.Sprintf("%d", cfg.TLSPort))
+	overall := time.Now().Add(wss443Budget)
+	raw, err := net.DialTimeout("tcp", addr, wss443Budget)
+	if err != nil {
+		return nil, fmt.Errorf("wss443: dial: %w", err)
+	}
+	tc, err := utlsHandshake(raw, host, cfg.InsecureTLS, time.Until(overall))
+	if err != nil {
+		raw.Close()
+		return nil, fmt.Errorf("wss443: %w", err)
+	}
+	// The upgrade shares the carrier's overall budget: a gateway that accepts
+	// the TLS session and then stalls the HTTP Upgrade must not hold the chain
+	// past this rung's slice of the ~10s total. Cleared on success so the
+	// established carrier has no inherited deadline.
+	tc.SetDeadline(overall) //nolint:errcheck
+	ws, err := wsClientHandshake(tc, host)
+	if err != nil {
+		tc.Close()
+		return nil, fmt.Errorf("wss443: %w", err)
+	}
+	tc.SetDeadline(time.Time{}) //nolint:errcheck
+	return ws, nil
 }
 
 // runLocalProxy bridges between wireguard-go (via localProxy UDP) and the
