@@ -837,7 +837,15 @@ final class TunnelManager: ObservableObject {
             tlsPort:         cached.tlsPort,
             dnsTunnelPort:   cached.dnsTunnelPort,
             icmpUDPPort:     cached.icmpUDPPort,
-            preferredTransport: Preferences.shared.forceTransport,
+            // Prefer the carrier that last carried traffic, so a café where only
+            // a late-chain carrier works (cdn_wss is last) does not re-walk all
+            // eight carriers on every reconnect -- ~11s each, and café wifi drops
+            // often. Safe here: connectFromCache runs ONLY behind a portal (the
+            // API path handles good networks), so preferring the last winner
+            // cannot slow an open network onto a slower carrier. On the first
+            // connect of a session lastGoodTransport is nil and the chain walks
+            // normally to discover what works.
+            preferredTransport: Preferences.shared.forceTransport ?? lastGoodTransport?.rawValue,
             dnsResolver:     Preferences.shared.dnsResolverOverride,
             dnsTunnelDomain: cached.dnsTunnelDomain,
             cdnHost: cached.cdnHost
