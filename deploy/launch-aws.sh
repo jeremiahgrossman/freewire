@@ -63,16 +63,46 @@ if [[ -z "$SG_ID" || "$SG_ID" == "None" ]]; then
   aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --region "$REGION" \
     --ip-permissions \
       "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=$MYIP,Description='ssh from deployer'}]" \
-      "IpProtocol=tcp,FromPort=443,ToPort=443,IpRanges=[{CidrIp=0.0.0.0/0,Description='TLS transport'}]" \
-      "IpProtocol=tcp,FromPort=8080,ToPort=8080,IpRanges=[{CidrIp=0.0.0.0/0,Description='API'}]" \
-      "IpProtocol=udp,FromPort=51820,ToPort=51820,IpRanges=[{CidrIp=0.0.0.0/0,Description='WireGuard'}]" \
-      "IpProtocol=udp,FromPort=53,ToPort=53,IpRanges=[{CidrIp=0.0.0.0/0,Description='DNS tunnel'}]" \
-      "IpProtocol=udp,FromPort=4500,ToPort=4500,IpRanges=[{CidrIp=0.0.0.0/0,Description='ICMP/UDP tunnel'}]" \
     >/dev/null
   echo "    created $SG_ID (ssh limited to $MYIP)"
 else
   echo "    exists $SG_ID"
 fi
+
+# Transport ports are opened on EVERY run, not only when the group is created.
+#
+# They used to be part of the create branch, so a group that already existed
+# never gained a rule added later -- a new listener would deploy, bind, and be
+# silently unreachable from the internet. That is worse than an outright failure:
+# the client reports the carrier as blocked, which is indistinguishable from a
+# captive portal blocking it, and the wrong conclusion gets drawn from a field
+# test. Each rule is added independently and an already-exists error is ignored,
+# which is what makes this idempotent.
+open_port() { # proto port description
+  local out
+  if out="$(aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --region "$REGION" \
+      --ip-permissions \
+        "IpProtocol=$1,FromPort=$2,ToPort=$2,IpRanges=[{CidrIp=0.0.0.0/0,Description='$3'}]" \
+      2>&1)"; then
+    echo "    opened $1/$2 ($3)"
+  elif grep -q "InvalidPermission.Duplicate" <<<"$out"; then
+    : # already open; nothing to do
+  else
+    echo "    WARNING: could not open $1/$2: $(tr '\n' ' ' <<<"$out")" >&2
+  fi
+}
+open_port tcp 443   'TLS transport'
+open_port tcp 8080  'API'
+open_port udp 51820 'WireGuard'
+open_port udp 53    'DNS tunnel'
+open_port udp 4500  'ICMP/UDP tunnel'
+# Reachability probe responder (server/internal/transport/probe.go). Without
+# these the probe battery reports UDP/443 and UDP/123 as blocked everywhere,
+# which reads as "the portal blocks them" and would sink the carrier decision on
+# a false negative. The responder answers only magic-gated, non-amplifying
+# probes, so an open port here is not an NTP or QUIC service.
+open_port udp 443   'probe responder (would-be QUIC carrier)'
+open_port udp 123   'probe responder (would-be NTP carrier)'
 
 echo "==> latest Ubuntu 24.04 arm64 AMI"
 AMI="$(aws ssm get-parameters --region "$REGION" \
