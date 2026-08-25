@@ -30,7 +30,7 @@ Rows are ordered best-case to worst-case. "Built" = ships today, nothing to do.
 | 1 | wireguard-direct OK | Open/permissive café | **Nothing.** Product just works. |
 | 2 | raw 443 fails, **direct WSS OK** | Blocks non-web 443 | **Nothing to build** — `wss443` handles it. Confirm it's selected on a real connect and note throughput. |
 | 3 | direct WSS fails, **CDN WSS OK** | Gates our ADDRESS, not the port | **Nothing new to build** — `cdn_wss` handles it. BUT measure throughput (see "CDN throughput" below); the carrier is proven to carry, not yet measured. |
-| 4 | **UDP/443 passes to our server** | Portal passes QUIC-class UDP | **BUILD the UDP/443 carrier** — the highest-value next build (near line-rate, no TCP-over-TCP). Not built yet. See below. |
+| 4 | **UDP/443 passes to our server** | Portal passes QUIC-class UDP | **BUILT** (`udp443`, pre-built 2026-08-25) — validates on the spot, no field build. Near line-rate, no TCP-over-TCP; 307ms handshake, routed 6/6 TUNNELLED. |
 | 5 | UDP/123 passes, UDP/443 doesn't | Portal passes NTP-class UDP | **BUILD the UDP/123 carrier** (same shape as #4, lower priority). |
 | 6 | IPv6 egress present | v4-only portal leaks v6 | **Provision v6 on the server FIRST** (it has none today), then build the v6 carrier. Two-part. See below. |
 | 7 | Only throttled DNS (the original café) | Hard destination gate, DNS is the floor | If UDP/443 also fails: **nothing client-side raises the ceiling** (research-confirmed). This is the characterized case. |
@@ -38,19 +38,16 @@ Rows are ordered best-case to worst-case. "Built" = ships today, nothing to do.
 
 ## The builds, pre-scoped
 
-### UDP/443 QUIC-shaped carrier (row 4) — the one worth pre-building
-- **Why:** research ranks it #1, block-QUIC is off by default on most portals, and
-  it is near-line-rate with no TCP-over-TCP penalty. The probe already shows
-  UDP/443 reaches our server on open networks.
-- **Server:** a real UDP/443 WireGuard-forwarding listener. NOTE the probe
-  responder currently owns UDP/443 (magic-gated echo) — the carrier must either
-  coexist (dispatch by first byte: magic → probe, else → WG) or the responder
-  moves. Straightforward.
-- **Client:** a `udp443` carrier that sends WireGuard datagrams to `server:443`,
-  optionally shaped like a QUIC Initial. Structurally simpler than the WSS
-  carriers (no framing — WireGuard is already UDP). The carrier-peer-pinning and
-  fall-through selection already handle it.
-- **Effort:** a focused build + one redeploy. **Pre-buildable at the desk now.**
+### UDP/443 carrier (row 4) — DONE (pre-built 2026-08-25)
+- Built and verified end to end: real WG handshake over UDP/443 (307ms, same as
+  direct WireGuard — no overhead), routed 6/6 TUNNELLED, only the server IP pinned
+  (it talks straight to the server, no CDN edge). The server dispatches UDP/443 by
+  first byte — magic → probe reply, WireGuard type 1..4 → per-source relay to the
+  local WireGuard, else drop — so `--probe-battery` still works on the port.
+- v1 is **bare WireGuard over UDP/443**, no QUIC shaping. If a café gates UDP/443
+  on "looks like QUIC" (rare — block-QUIC is off by default), the follow-up is to
+  prepend a QUIC Initial-shaped header; the dispatch already leaves room (a QUIC
+  long header is 0xC0+, distinct from WireGuard's 1..4 and the probe magic).
 
 ### IPv6 carrier (row 6) — two-part, server first
 - **Server has no v6 today** (checked: 0 global inet6, no v6 default route). So
