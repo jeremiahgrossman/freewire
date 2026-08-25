@@ -23,6 +23,20 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
      (wireguard-direct first) and picks the fastest a network allows, instead of
      stopping at the first in a fixed order. `testing/probe-transports.sh` lists
      what any network allows (non-routed, --select-only per transport).
+  0. **Traffic-verified fall-through selection** (`3bae110`) — selection judged
+     each rung by whether WireGuard *handshaked*, committed to the first that
+     did, and gave up if routing then found the tunnel carried nothing. That is
+     why the café stopped at DNS and never tried ICMP. Now the establish→route
+     step is a fall-through loop: establish over the fastest carrier that
+     handshakes, route, verify egress; if it carries no traffic, restore the
+     machine, exclude that carrier, and fall through to the next-fastest. "First
+     to handshake" → "fastest that actually carries traffic." Reuses the exact
+     setupRouting/cleanupRouting the old fatal path used; new behavior fires ONLY
+     when egress verify fails (a normal net verifies the first carrier and breaks
+     as before). `establishTunnel` takes an `excluded` set; probe-transports.sh
+     now registers-or-reuses a cached peer so it probes all five carriers behind
+     a portal. Desk-verified (build/vet/-race); the routed fall-through itself
+     still needs a guarded routed/field run to confirm it reaches ICMP.
   2. **Adaptive carrier-rate pacing (Stage 1 of backpressure)** — per-direction
      AIMD limiters (`dns_ratelimit.go`) discover the path's sustainable rate at
      ~0 loss and pace to it, no hardcoded cap. Desk repro of a throttled portal
@@ -55,6 +69,24 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   cafés block every faster carrier and leave only DNS, but the café's DNS-to-
   server rate is the real ceiling and no client-side change raises it. See
   `DECISIONS.md` DNS-CARRIER-BACKPRESSURE for the full field result.
+- **Transport research (2026-08-24, `TRANSPORT-RESEARCH-2026-08-24.md`):** a
+  four-agent survey of public captive-portal / censorship-circumvention work.
+  Top actionable finding: **the café's `443 connection refused` was probably
+  "blocks non-web 443," not "blocks 443."** Portal gateways routinely pass 443
+  that completes an HTTP Upgrade (looks like a website) and reset a raw uTLS
+  session to an arbitrary IP — which is exactly our TLS/443 carrier. So the
+  strongest next build is a **WebSocket-over-TLS-443 carrier** (WireGuard inside
+  WSS frames): the portal-friendly denominator every mature tunnel converges on
+  (wstunnel/chisel/gost/xray), ~100 Mbps class, reuses our TLS+cert infra, and
+  the fall-through selection above is what would let the chain discover it works
+  where raw TLS/443 is refused. Second: an **IPv6 carrier** when a v4-only portal
+  leaks v6 (spike via a probe first). Roadmap: **MASQUE/HTTP-3** (UDP-native, no
+  TCP-over-TCP). Rejected with reasons: domain fronting (dead on major CDNs),
+  ECH (no benefit on our IP-addressed server), MAC-clone/ARP (hostile + macOS-
+  broken), refraction/Snowflake (need infra we can't run). The DNS-throttle
+  literature independently confirms the Stage-2 deferral: no technique widens a
+  recursor's forwarding cap; the way out of a throttled-DNS-only café is a
+  different carrier, not a better DNS carrier.
 - **Deferred (deliberate, see `DECISIONS.md` DNS-CARRIER-BACKPRESSURE):** Stage 2,
   true backpressure. Stage 1 keeps the carrier clean but a throttled pipe's queue
   still overflows and starves the active flow. The fix is a custom wireguard-go
