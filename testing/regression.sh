@@ -24,7 +24,11 @@ ok()   { echo "  PASS: $1"; }
 bad()  { echo "  FAIL: $1"; fails=$((fails+1)); }
 
 step "build (tunnel + server)"
-if (cd "$ROOT/tunnel" && go build ./... ) && (cd "$ROOT/server" && go build ./...); then ok "both build"; else bad "build error"; fi
+# The client binary is built into the tree, not just compiled: the server's
+# WSS interop test runs the real freewire-tunnel binary against the real
+# listener, and skips itself when the binary is absent. Building it here is what
+# turns that cross-module test on.
+if (cd "$ROOT/tunnel" && go build ./... && go build -o freewire-tunnel ./cmd/freewire-tunnel) && (cd "$ROOT/server" && go build ./...); then ok "both build"; else bad "build error"; fi
 
 step "unit tests -race (tunnel + server)"
 if (cd "$ROOT/tunnel" && go test -race ./... >/tmp/reg-tun.txt 2>&1); then ok "tunnel tests"; else bad "tunnel tests"; tail -5 /tmp/reg-tun.txt|sed 's/^/    /'; fi
@@ -35,9 +39,9 @@ if xcodebuild build -project "$ROOT/macos/Freewire/Freewire.xcodeproj" -scheme F
 
 step "live transport probe (what this network allows)"
 PROBE="$(bash "$ROOT/testing/probe-transports.sh" 2>&1)"
-echo "$PROBE" | grep -E "wireguard|tls443|dns|icmp_udp|http_connect" | sed 's/^/  /'
+echo "$PROBE" | grep -E "wireguard|tls443|wss443|dns|icmp_udp|http_connect" | sed 's/^/  /'
 # At least one carrier must reach the server, or the client can't connect at all.
-if echo "$PROBE" | grep -qE "(wireguard|tls443|dns|icmp_udp).*OK"; then ok "at least one carrier reachable"; else bad "no carrier reachable"; fi
+if echo "$PROBE" | grep -qE "(wireguard|tls443|wss443|dns|icmp_udp).*OK"; then ok "at least one carrier reachable"; else bad "no carrier reachable"; fi
 
 printf '\n================  %s  ================\n' "$([ $fails -eq 0 ] && echo 'CORE CHECKS PASSED' || echo "$fails CHECK(S) FAILED")"
 echo "Heavy end-to-end (run standalone): testing/verify-reconnect.sh, testing/routed-test.sh dns"
