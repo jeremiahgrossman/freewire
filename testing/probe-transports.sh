@@ -12,8 +12,8 @@
 # FIELD USE: run it ONCE on an open network (your hotspot) to register a probe
 # peer and cache its config, then run it again on the captive-portal wifi -- the
 # API is blocked there, so it falls back to the cached config and still probes
-# every transport (that is the only way to learn what a café allows across ALL
-# five pathways, including ICMP, since a live connect stops at the first that
+# every transport (that is the only way to learn what a café allows across all seven
+# pathways, including ICMP, since a live connect stops at the first that
 # works). The probe peer is persistent and NOT deleted, so it survives the switch.
 #
 #   testing/probe-transports.sh          # register+cache if API reachable, else reuse cache
@@ -39,7 +39,7 @@ KEY="$(jq -r .public_key <<<"$SC" 2>/dev/null)"
 if [[ -n "$KEY" && "$KEY" != null ]]; then
   echo "==> API reachable: registering a probe peer and caching its config"
   WG="$(jq -r .endpoint_port <<<"$SC")"; TLS="$(jq -r .tls_endpoint_port <<<"$SC")"
-  DNS="$(jq -r .dns_tunnel_port <<<"$SC")"; ICMP="$(jq -r .icmp_udp_port <<<"$SC")"
+  DNS="$(jq -r .dns_tunnel_port <<<"$SC")"; ICMP="$(jq -r .icmp_udp_port <<<"$SC")"; CDN="$(jq -r '.cdn_host // ""' <<<"$SC")"
   PRIV="$(openssl rand 32 | base64)"
   PUB="$(cd "$ROOT/tunnel" && go run ../testing/pubkey.go "$PRIV" 2>/dev/null)"
   TOKEN="$([[ -x "$TOKENS" ]] && "$TOKENS" issue --server "$API" --count 1 --insecure --issuer-pin "$STATE/issuer.pin" 2>/dev/null | head -1 || true)"
@@ -53,7 +53,7 @@ if [[ -n "$KEY" && "$KEY" != null ]]; then
   "server_endpoint": "$SERVER:$WG", "server_host": "$SERVER",
   "tunnel_ip": "$TIP", "server_tunnel_ip": "10.0.0.1",
   "keepalive": 25, "insecure_tls": true,
-  "tls_port": $TLS, "dns_tunnel_port": $DNS, "icmp_udp_port": $ICMP
+  "tls_port": $TLS, "dns_tunnel_port": $DNS, "icmp_udp_port": $ICMP, "cdn_host": "$CDN"
 }
 JSON
   echo "    cached probe peer $TIP -> $CFG (reused automatically when the API is blocked)"
@@ -65,12 +65,12 @@ fi
 
 echo "==> probing each transport (non-routed; WG handshake over each)"
 WG="$(jq -r .server_endpoint <<<"$(cat "$CFG")" | sed 's/.*://')"
-TLS="$(jq -r .tls_port <<<"$(cat "$CFG")")"; DNS="$(jq -r .dns_tunnel_port <<<"$(cat "$CFG")")"; ICMP="$(jq -r .icmp_udp_port <<<"$(cat "$CFG")")"
+TLS="$(jq -r .tls_port <<<"$(cat "$CFG")")"; DNS="$(jq -r .dns_tunnel_port <<<"$(cat "$CFG")")"; ICMP="$(jq -r .icmp_udp_port <<<"$(cat "$CFG")")"; CDN="$(jq -r '.cdn_host // ""' <<<"$(cat "$CFG")")"
 printf '  %-14s %-8s %s\n' "TRANSPORT" "PORT" "RESULT"
-declare -A PORT=( [wireguard]="UDP $WG" [http_connect]="gateway" [tls443]="TCP $TLS" [wss443]="TCP $TLS" [dns]="UDP $DNS" [icmp_udp]="UDP $ICMP" )
+declare -A PORT=( [wireguard]="UDP $WG" [http_connect]="gateway" [tls443]="TCP $TLS" [wss443]="TCP $TLS" [cdn_wss]="CDN 443" [dns]="UDP $DNS" [icmp_udp]="UDP $ICMP" )
 # wss443 sits next to tls443 on the same port: probing both is how a portal that
 # passes web-443 (HTTP Upgrade) while refusing raw 443 shows itself here.
-for t in wireguard http_connect tls443 wss443 dns icmp_udp; do
+for t in wireguard http_connect tls443 wss443 cdn_wss dns icmp_udp; do
   start=$(python3 -c 'import time;print(int(time.time()*1000))')
   # sudo: --select-only still creates the utun for the WireGuard device, which
   # needs root. The passwordless rule covers the tunnel binary. No routing is
