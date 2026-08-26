@@ -79,72 +79,92 @@ func probeBattery(args []string) int {
 	type row struct {
 		name string
 		open bool
+		// shipped marks a carrier the app can actually select. The "fastest carrier
+		// that reached the server" verdict must consider ONLY these -- a candidate
+		// probe (UDP/123, IPv6) that has no client carrier must never be crowned
+		// fastest, or the survey would name a path the app cannot take.
+		shipped bool
 	}
 	var rows []row
 
-	// Fast carriers we already ship (TCP side), in speed order.
+	// Rows are emitted in the app's REAL carrier order (defaultCandidates in
+	// transport.go), so the "fastest that reached the server" verdict names the
+	// same carrier the app would actually pick: wireguard -> udp443 -> http_connect
+	// -> tls443 -> wss443 -> cdn_wss -> dns. Keep this in sync with that chain.
+
+	// 1. WireGuard direct, UDP/51820. Fastest; what an open network lands on.
 	rows = append(rows, row{"wireguard UDP/51820", reportCarrier("wireguard UDP/51820",
 		func() (net.Conn, error) { return dialUDPProbeless(server, 51820) },
-		"socket only; a real select completes the WG handshake")})
-	// http_connect is the one shipped carrier that does NOT talk to our server to
-	// establish: it asks the LOCAL gateway (3128/8080/443) for a CONNECT proxy and
-	// tunnels through it. So it cannot be inferred from any server-directed row --
-	// it has to be probed on its own, which is why the field survey needs it
-	// explicitly. A "-- no" here just means this portal offers no open CONNECT
-	// proxy (the common case); a hit means a whole extra path is available.
+		"socket only; a real select completes the WG handshake"), true})
+
+	// 2. udp443: WireGuard straight over UDP/443. SAME speed as direct (no
+	// TCP-over-TCP), one port portals pass far more often -- so it is the app's #2,
+	// not a sixth-place candidate. Probed via the server's ProbeResponder; a pass
+	// means the portal forwards arbitrary UDP to us on 443.
+	rows = append(rows, row{"UDP/443 (udp443 carrier)",
+		reportUDPProbe("UDP/443 (udp443 carrier)", net.JoinHostPort(server, "443"),
+			"near-line-rate, no TCP-over-TCP; the app's #2 carrier"), true})
+
+	// 2b. UDP/123: a CANDIDATE raw-UDP tunnel (not built), grouped with the UDP
+	// probes for readability. Not shipped, so it is excluded from the verdict.
+	rows = append(rows, row{"UDP/123 (NTP-class, candidate)",
+		reportUDPProbe("UDP/123 (NTP-class, candidate)", net.JoinHostPort(server, "123"),
+			"raw UDP tunnel IF built; portals allow NTP for clock sync"), false})
+
+	// 3. http_connect: the one shipped carrier that does NOT talk to our server to
+	// establish -- it asks the LOCAL gateway (3128/8080/443) for a CONNECT proxy
+	// and tunnels through it. It cannot be inferred from any server-directed row,
+	// so the field survey has to probe it explicitly. A "-- no" just means this
+	// portal offers no open CONNECT proxy (the common case); a hit means a whole
+	// extra path is available.
 	rows = append(rows, row{"HTTP CONNECT (gateway)", reportCarrier("HTTP CONNECT (gateway)",
 		func() (net.Conn, error) { return tryHTTPConnect(cfg) },
-		"asks the LOCAL gateway for a CONNECT proxy; independent of our server")})
+		"asks the LOCAL gateway for a CONNECT proxy; independent of our server"), true})
+
+	// 4. tls443: a raw TLS session to our IP on 443.
 	rows = append(rows, row{"raw TLS/443", reportCarrier("raw TLS/443",
 		func() (net.Conn, error) { return tryTLS443(cfg) },
-		"a raw TLS session to our IP on 443")})
+		"a raw TLS session to our IP on 443"), true})
+
+	// 5. wss443: WebSocket over TLS/443; passes 'web-443-only' portals.
 	wssDirectOK := reportCarrier("WebSocket/443",
 		func() (net.Conn, error) { return tryWSS443(cfg) },
 		"looks like a website; passes 'web-443-only' portals")
-	rows = append(rows, row{"WebSocket/443", wssDirectOK})
+	rows = append(rows, row{"WebSocket/443", wssDirectOK, true})
 
-	// The CDN-fronted carrier: same WebSocket, but to a CDN edge IP and hostname
-	// instead of our server's IP. This is the line that answers "does this portal
-	// gate our ADDRESS, or the port?" -- the question that decides whether the
-	// CDN-fronted carrier is worth building. See CDN-FRONTED-CARRIER-SPEC.md §9.
+	// 6. cdn_wss: same WebSocket, but to a CDN edge IP and hostname instead of our
+	// server's IP. The line that answers "does this portal gate our ADDRESS, or the
+	// port?" -- and the only carrier that beats destination gating. Skipped unless
+	// a CDN host was given. See CDN-FRONTED-CARRIER-SPEC.md §9.
 	cdnTested := cdnHost != ""
 	cdnOK := false
 	if cdnTested {
 		cdnOK = reportCDN(cdnHost)
-		rows = append(rows, row{"CDN WebSocket/443", cdnOK})
+		rows = append(rows, row{"CDN WebSocket/443", cdnOK, true})
 	}
 
-	// New carriers we are deciding whether to build (UDP side), via the server's
-	// ProbeResponder. A pass means the portal forwards arbitrary UDP to our
-	// server on that port -- the green light to build the carrier.
-	rows = append(rows, row{"UDP/443 (QUIC-class)",
-		reportUDPProbe("UDP/443 (QUIC-class)", net.JoinHostPort(server, "443"),
-			"near-line-rate IF this passes; block-QUIC is off by default")})
-	rows = append(rows, row{"UDP/123 (NTP-class)",
-		reportUDPProbe("UDP/123 (NTP-class)", net.JoinHostPort(server, "123"),
-			"raw UDP tunnel IF this passes; portals allow NTP for clock sync")})
+	// 7. dns: server-direct on UDP/53. The historical winner at hard captive
+	// portals: a portal MUST pass some DNS pre-auth to serve its own redirect, and
+	// where it lets outbound 53 reach our authoritative server, the DNS tunnel
+	// works (throttled but real). A full handshake, not a reachability ping -- the
+	// server issues a session token and the client confirms it, so a portal's own
+	// resolver answering for a bogus name does not read as OK. Rootless (plain UDP
+	// queries). ICMP needs raw sockets (root), so it is NOT in this battery -- run
+	// probe-transports.sh with the passwordless-sudo rule for the ICMP carrier.
+	rows = append(rows, row{"DNS/53 (server-direct)", reportDNS(cfg, server), true})
 
-	// DNS carrier, server-direct on UDP/53. This is the historical winner at hard
-	// captive portals: a portal MUST pass some DNS pre-auth to serve its own
-	// redirect, and where it lets outbound 53 reach our authoritative server, the
-	// DNS tunnel works (throttled but real). A full handshake, not a reachability
-	// ping -- the server has to issue a session token and the client confirm it,
-	// so a portal's own resolver answering for a bogus name does not read as OK.
-	// Rootless (plain UDP queries). ICMP needs raw sockets (root), so it is NOT in
-	// this battery -- run probe-transports.sh with the passwordless-sudo rule for
-	// the ICMP carrier.
-	rows = append(rows, row{"DNS/53 (server-direct)", reportDNS(cfg, server)})
-
-	// IPv6 egress: a whole-address-family bypass when a v4-only portal leaks v6.
-	rows = append(rows, row{"IPv6 egress", reportV6(server6)})
+	// IPv6 egress: a whole-address-family bypass IF a v4-only portal leaks v6. The
+	// client carrier (leak-safe v6 routing) is NOT built yet, so this is a
+	// candidate, excluded from the verdict.
+	rows = append(rows, row{"IPv6 egress", reportV6(server6), false})
 
 	// Verdict.
 	fmt.Fprintln(os.Stderr)
 	best := ""
 	for _, r := range rows {
-		if r.open {
+		if r.open && r.shipped {
 			best = r.name
-			break // rows are in speed order
+			break // rows are in the app's real speed order; shipped-only
 		}
 	}
 	// The direct-vs-CDN comparison, stated as the engineering decision it drives.
