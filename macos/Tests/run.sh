@@ -12,6 +12,7 @@ OUT="$(mktemp -d)/killswitch-tests"
 
 swiftc -O \
   "$SRC/KillSwitchRules.swift" \
+  "$SRC/PathUpgradeManager.swift" \
   "$HERE/main.swift" \
   -o "$OUT"
 

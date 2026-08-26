@@ -106,9 +106,58 @@ check(noServer.contains("block drop all"),
 check(!noServer.contains("pass out quick proto tcp"),
       "emits no server rules when there are no endpoints")
 
+// MARK: - TunnelTransport / Go carrier-chain parity
+//
+// The Swift enum's rawValues ARE the wire names passed to and parsed from the Go
+// helper (preferred_transport in, "transport selected: <name>" out), and its
+// priority order drives the upgrade manager. Both must match the Go chain in
+// tunnel/cmd/freewire-tunnel/transport.go (defaultCandidates) and the probe
+// battery that mirrors it. A drift here does not fail loudly at runtime -- it
+// silently makes the app chase the wrong path or fail to parse a carrier name --
+// so this is the tripwire. Keep this list identical to Go's TestCarrierChainOrderIsStable.
+let goCarrierChain = [
+    "wireguard", "udp443", "http_connect", "tls443",
+    "wss443", "cdn_wss", "dns", "icmp_udp",
+]
+
+// Every carrier the app can select, in speed order.
+let byPriority = TunnelTransport.allCases.sorted { $0.priority < $1.priority }
+check(byPriority.map { $0.rawValue } == goCarrierChain,
+      "transport rawValues match the Go chain order exactly")
+check(TunnelTransport.allCases.count == goCarrierChain.count,
+      "no carrier added on one side only (\(TunnelTransport.allCases.count) vs \(goCarrierChain.count))")
+
+// Priorities must be exactly 1...8, dense and unique, so "lower = faster" is a
+// total order with no ties the upgrade manager could resolve arbitrarily.
+check(Set(TunnelTransport.allCases.map { $0.priority }) == Set(1...8),
+      "priorities are exactly 1...8, unique and dense")
+
+// udp443 must rank second: same speed as WireGuard-direct, one port portals pass
+// more often. This is the exact rank the Go battery reorder corrected.
+check(TunnelTransport.udp443.priority == 2,
+      "udp443 ranks #2 (right after wireguard-direct)")
+for tcp in [TunnelTransport.httpConnect, .tls443, .wss443, .cdnWSS] {
+    check(tcp.priority > TunnelTransport.udp443.priority,
+          "\(tcp.rawValue) ranks after udp443 (no TCP-over-TCP on udp443)")
+}
+
+// The reduced-speed / DNS-leak carriers are exactly the two tunnels, nothing else.
+for t in TunnelTransport.allCases {
+    let slow = (t == .dns || t == .icmpUDP)
+    check(t.isReducedSpeed == slow, "isReducedSpeed correct for \(t.rawValue)")
+    check(t.leaksDNSToNetwork == slow, "leaksDNSToNetwork correct for \(t.rawValue)")
+}
+
+// A round trip through rawValue (the Go boundary) must recover every case, so a
+// "transport selected: <name>" line from the helper never silently falls back.
+for t in TunnelTransport.allCases {
+    check(TunnelTransport(rawValue: t.rawValue) == t,
+          "rawValue round-trips for \(t.rawValue)")
+}
+
 print("")
 if failures == 0 {
-    print("all KillSwitchRules assertions passed")
+    print("all KillSwitchRules + TunnelTransport assertions passed")
     exit(0)
 } else {
     print("\(failures) assertion(s) failed")
