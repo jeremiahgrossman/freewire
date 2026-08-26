@@ -51,6 +51,16 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   floor); the question is usable-slow vs unusable-slow. No client change raises a
   throttled-DNS ceiling (research-confirmed), so this grades the experience, it
   does not gate a build.
+- **Every field test runs the full carrier battery.** `testing/cafe-run.sh`
+  surveys ALL 8 shipped carriers so a portal's support map is complete: the
+  rootless probe battery covers 7/8 (wireguard, http_connect, tls443, wss443,
+  cdn_wss, udp443, dns — plus the udp123 candidate and IPv6), and the rooted
+  `probe-transports.sh` half (real WG handshake per carrier, if you give it sudo)
+  covers all 8 including `icmp_udp`, which needs raw sockets and so cannot be in
+  the rootless battery. `http_connect` was added to the battery 2026-08-26 (it
+  uniquely probes the LOCAL gateway for a CONNECT proxy, not our server, so it had
+  been absent). The `--walled-garden` line then maps which third-party
+  destinations the portal permits, to learn what fronting could work.
 - To re-survey any café: `testing/cafe-run.sh` (self-contained, writes a /tmp
   file). The raw one-liner is
   `tunnel/freewire-tunnel --probe-battery --server 52.203.246.145 --insecure --cdn d29cubp361kpm8.cloudfront.net`
