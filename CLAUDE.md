@@ -18,6 +18,17 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 - **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
 - **In progress:** nothing
+- **CARRIER RE-VALIDATION DONE (2026-08-26, `testing/validate-all-carriers.sh`).**
+  Ran every carrier routed against the live server on an open network: **7/7 carry
+  real traffic** (wireguard/udp443/tls443/wss443/cdn_wss ~20–30 Mbps here —
+  network-path-capped, not carrier-capped; the peak-baseline run measured udp443
+  ~125 / cdn_wss ~54). dns + icmp are the ~72 Kbps interactive floor and
+  **overflow under whole-machine routed load** (tail-drop, queue full) — which
+  RE-VALIDATES the café finding and the documented DNS marginality, not a
+  regression. The harness retries a cold-start CONNECT-FAILED flake (a wireguard
+  false-fail in the first run reproduced then passed on retest). Assumptions hold.
+  A new `--walled-garden` probe (in `cafe-run.sh`) surveys which destinations a
+  portal permits, to learn what fronting could work where ours did not.
 - **FIELD TEST DONE (2026-08-25, café #2). Result: hard destination-gated captive
   portal — Freewire is SUPPORTED there via DNS.** The probe battery (run from
   `testing/cafe-run.sh`, which is self-contained because a captive portal cuts
