@@ -86,6 +86,15 @@ func probeBattery(args []string) int {
 	rows = append(rows, row{"wireguard UDP/51820", reportCarrier("wireguard UDP/51820",
 		func() (net.Conn, error) { return dialUDPProbeless(server, 51820) },
 		"socket only; a real select completes the WG handshake")})
+	// http_connect is the one shipped carrier that does NOT talk to our server to
+	// establish: it asks the LOCAL gateway (3128/8080/443) for a CONNECT proxy and
+	// tunnels through it. So it cannot be inferred from any server-directed row --
+	// it has to be probed on its own, which is why the field survey needs it
+	// explicitly. A "-- no" here just means this portal offers no open CONNECT
+	// proxy (the common case); a hit means a whole extra path is available.
+	rows = append(rows, row{"HTTP CONNECT (gateway)", reportCarrier("HTTP CONNECT (gateway)",
+		func() (net.Conn, error) { return tryHTTPConnect(cfg) },
+		"asks the LOCAL gateway for a CONNECT proxy; independent of our server")})
 	rows = append(rows, row{"raw TLS/443", reportCarrier("raw TLS/443",
 		func() (net.Conn, error) { return tryTLS443(cfg) },
 		"a raw TLS session to our IP on 443")})
