@@ -182,6 +182,13 @@ func main() {
 		os.Exit(probeBattery(os.Args[2:]))
 	}
 
+	// --walled-garden surveys which well-known destinations a captive portal
+	// permits pre-login, to learn what fronting could work where ours did not.
+	// Rootless, non-routed.
+	if len(os.Args) > 1 && os.Args[1] == "--walled-garden" {
+		os.Exit(wgProbe(os.Args[2:]))
+	}
+
 	// Repair before doing anything else, on every run. setupRouting used to be
 	// the only place this happened, so a machine left broken stayed broken
 	// until a connection attempt got far enough to reach it -- and a connection

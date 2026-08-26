@@ -36,6 +36,11 @@ echo "---- PROBE BATTERY (rootless; the key survey) ----"
 "$TUN" --probe-battery --server "$SERVER" --insecure --cdn "$CDN" 2>&1 || true
 echo ""
 
+echo "---- WALLED GARDEN (rootless; what destinations does this portal permit?) ----"
+echo "     If our fronting is blocked but another provider is open, that is the way in."
+"$TUN" --walled-garden 2>&1 || true
+echo ""
+
 echo "---- REAL WireGuard handshake per carrier (incl. ICMP; needs root for the utun) ----"
 # Root is needed only to create the utun for the WireGuard handshake -- no routing
 # is installed (--select-only). You are at the keyboard, so authenticate once
