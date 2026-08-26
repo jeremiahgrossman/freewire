@@ -27,6 +27,8 @@ server/freewire-server
 server/freewire-server-*
 tunnel/freewire-tunnel
 tunnel/freewire-tunnel-*
+tunnel/freewire-tokens
+tunnel/freewire-tokens-*
 *.exe
 *.test
 *.out
