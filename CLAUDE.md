@@ -18,16 +18,32 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 - **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
 - **In progress:** nothing
-- **NEXT ACTION IS A FIELD RUN. Desk work is exhausted and re-verified end to
-  end against the live post-ACME server** (2026-08-24): git clean, tunnel+server
-  vet/-race pass, app builds, cert pin MATCHES the live self-signed cert (no
-  lockout), and the real app connects+reconnects against the deployed server. At
-  a café:
-  ```
-  tunnel/freewire-tunnel --probe-battery --server 52.203.246.145 --insecure
-  ```
-  It reports which carriers that portal passes **to our server** and names the
-  decision. The probe battery needs no registered peer, so it works cold.
+- **FIELD TEST DONE (2026-08-25, café #2). Result: hard destination-gated captive
+  portal — Freewire is SUPPORTED there via DNS.** The probe battery (run from
+  `testing/cafe-run.sh`, which is self-contained because a captive portal cuts
+  the Claude session's own internet) found: TCP/443 raw + WSS + **the CloudFront
+  edge** all `[SYN-RST]` (connection refused on the SYN — destination-gated at L4,
+  the café's walled garden does not include our edge); UDP/443 + UDP/123 dropped;
+  no IPv6; and **DNS/53 server-direct OK** (188ms handshake). So this café blocks
+  every fast carrier by destination but leaves DNS open, exactly the case the DNS
+  tunnel exists for. `cdn_wss` did NOT rescue it (edge not allow-listed here) —
+  the CDN hypothesis holds for FQDN→frozen-IP portals but not this one.
+- **Desync is scoped and NOT the answer here** (`DESYNC-CARRIER-SPEC.md`): a
+  `[SYN-RST]` gives desync no handshake to manipulate; it needs a `[reset]`
+  (post-handshake SNI reset), which no café has shown. The probe now splits
+  `[SYN-RST]` (destination, desync futile) from `[reset]` (content, desync
+  viable) from `[timeout]` (hard drop) so this is decided by measurement.
+- **PENDING FIELD DATA (the one open thread): is DNS *usable* here, or does it
+  just handshake?** Launch the Freewire app on the café wifi (it falls through to
+  DNS), then run `testing/cafe-measure.sh` (read-only: egress, latency,
+  throughput, a real page load) and read the file back. Expect ~72 Kbps (the DNS
+  floor); the question is usable-slow vs unusable-slow. No client change raises a
+  throttled-DNS ceiling (research-confirmed), so this grades the experience, it
+  does not gate a build.
+- To re-survey any café: `testing/cafe-run.sh` (self-contained, writes a /tmp
+  file). The raw one-liner is
+  `tunnel/freewire-tunnel --probe-battery --server 52.203.246.145 --insecure --cdn d29cubp361kpm8.cloudfront.net`
+  — rootless, needs no registered peer, works cold.
 - **The CloudFront distribution EXISTS and the fronted path is VERIFIED WORKING**
   (2026-08-24): id `EFJL255K0RTR`, hostname **`d29cubp361kpm8.cloudfront.net`**,
   logging off. `--cdn` probe reaches the origin through CloudFront and completes a
