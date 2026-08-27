@@ -53,6 +53,13 @@ type serverConfigResponse struct {
 	PublicKey         string   `json:"public_key"`
 	EndpointHost      string   `json:"endpoint_host"`
 	EndpointPort      int      `json:"endpoint_port"`
+	// TLSEndpointHost is advertised for a deployment that fronts the TLS carriers
+	// on a different host than the WireGuard UDP endpoint (e.g. an ACME hostname
+	// with a real cert). No current client consumes it independently: the Go
+	// helper dials TLS/DNS/ICMP at a single ServerHost (= endpoint_host), so this
+	// MUST equal EndpointHost until a distinct-TLS-host path is plumbed on both
+	// sides. handleServerConfig sets both to the same value; do not diverge them
+	// without wiring the client, or the TLS/WSS carriers go silently unreachable.
 	TLSEndpointHost   string   `json:"tls_endpoint_host"`
 	TLSEndpointPort   int      `json:"tls_endpoint_port"`
 	DNSTunnelPort     int      `json:"dns_tunnel_port"`
