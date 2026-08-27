@@ -55,6 +55,16 @@ struct RegisteredPeer: Decodable {
 //
 // Single-user by design: the first connect to a server must happen on an open
 // network to populate this. You set up your own server, so that always holds.
+//
+// INVARIANT: this MUST persist every field of ServerConfig that a carrier needs
+// to establish, because behind a portal this cache is the ONLY source of that
+// config (fetchConfig is blocked). A carrier-selection field added to ServerConfig
+// but not mirrored here is silently unavailable exactly on the portal networks
+// Freewire exists to beat. Threading a new carrier field takes THREE edits in
+// lockstep: ServerConfig (decode), the CachedConnection(...) save site in
+// TunnelManager, and connectFromCache (map into TunnelConfig). Today that set is
+// {publicKey, endpoint, tlsPort, dnsTunnelPort, icmpUDPPort, dnsTunnelDomain,
+// cdnHost}; capacity_available is a pre-connect gate, not needed to reconnect.
 struct CachedConnection: Codable {
     let serverPublicKey: String
     let serverEndpoint: String
