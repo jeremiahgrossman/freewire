@@ -114,6 +114,25 @@ func TestTokenIssuedOverHTTPIsRedeemable(t *testing.T) {
 	}
 }
 
+// The macOS client sends the token UNQUOTED (Authorization: PrivateToken
+// token=<b64>), which `redeem` above exercises. RFC 9577 also permits the QUOTED
+// form (token="<b64>"), and the parser strips one surrounding quote pair to accept
+// it. Nothing tested that path, so a refactor could drop the quote-strip and
+// silently break a spec-following client. This pins it: a valid token in the
+// quoted form must redeem exactly like the unquoted one.
+func TestQuotedTokenFormIsAccepted(t *testing.T) {
+	s, iss := testServer(t)
+	tok := issueOverHTTP(t, s, iss)
+
+	r := httptest.NewRequest("POST", "/v1/peers", nil)
+	r.Header.Set("Authorization",
+		`PrivateToken token="`+base64.RawURLEncoding.EncodeToString(tok.Marshal())+`"`)
+	_, code, e := s.redeemToken(r)
+	if code != 0 {
+		t.Errorf("quoted-form token refused with %d (%s); the parser's quote-strip is broken", code, e.code)
+	}
+}
+
 // The spec is explicit that a spent token is 402 TOKEN_SPENT, not 401 or 429:
 // the client maps those to different retry behaviour.
 func TestSpentTokenIsRefusedWith402(t *testing.T) {
