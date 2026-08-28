@@ -51,6 +51,21 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   floor); the question is usable-slow vs unusable-slow. No client change raises a
   throttled-DNS ceiling (research-confirmed), so this grades the experience, it
   does not gate a build.
+- **PLAN B for the throttled-DNS-only café is specced: `ESSENTIALS-MODE-SPEC.md`
+  (2026-08-28, not built).** When only throttled DNS escapes, full-tunnel (`0/0`)
+  collapses under whole-machine load — so instead carry only a low-bandwidth
+  destination **allowlist** (Apple `17.0.0.0/8` for push+iMessage, operator mail
+  IP) through the DNS carrier and blackhole the rest on the physical path.
+  Admission control by SCOPE, not pacing — a routing change, NOT the deferred
+  Stage-2 backpressure refactor. Keeps WG crypto (not the bottleneck; the overhead
+  to cut is DNS base32/64 encoding inflation). IP-only MVP sidesteps in-tunnel
+  resolution; domain entries + a scoped resolver are Phase 2. Opt-in only (partial
+  protection must never read as "Protected"; new status copy specced). **Build
+  order:** (1) close the pending `cafe-measure.sh` DNS-usability question first —
+  if DNS can't carry a text message there is nothing to allow-list; (2) build the
+  IP-only MVP against the `FREEWIRE_DNS_CARRIER_CAP` desk throttle repro (no café
+  needed); (3) field-validate. Do not build blind — routing changes have broken
+  the machine before.
 - **Every field test runs the full carrier battery.** `testing/cafe-run.sh`
   surveys ALL 8 shipped carriers so a portal's support map is complete: the
   rootless probe battery covers 7/8 (wireguard, http_connect, tls443, wss443,
