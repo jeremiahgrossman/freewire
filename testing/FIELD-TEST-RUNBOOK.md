@@ -1,100 +1,126 @@
-# Field-test runbook — real captive portal
+# Field-test runbook — real captive portal (current plan)
 
-The one thing simulation can't confirm: does the app carry a **sustained session
-through a real un-authenticated portal**, and **which transport the portal
-allows**. Everything else is proven at the desk (delegation live; routed
-WG-over-DNS carries HTTPS at ~65–71 KB/s via the *server-direct* carrier; the
-recursor carrier moves packets but can't carry a TCP handshake; cache fallback
-works in the config7 sim; false-Protected fixed; disconnect tears down on stdin
-EOF).
+**Updated 2026-08-28.** This is THE plan for the next café visit. Pair it with
+`FIELD-TEST-CONTINGENCIES.md` (result → what to build) and, for the throttled-DNS
+outcome, `ESSENTIALS-MODE-SPEC.md` (Plan B).
 
-## What the field test is actually deciding
+Everything else is proven at the desk (all 8 carriers carry traffic on an open
+network — `testing/validate-all-carriers.sh`, 7/7 routed; delegation live; cache
+fallback works; false-Protected fixed; disconnect tears down on stdin EOF). The
+field answers only what simulation cannot: **which carriers a real portal allows**,
+and **whether the DNS floor is actually usable**.
 
-On a captive portal, the fallback chain tries HTTP CONNECT → TLS/443 → DNS →
-ICMP. Which one wins tells us the portal's shape:
+## What this next test decides (in priority order)
 
-- **TLS/443 wins** → the portal allows HTTPS to arbitrary IPs. Great result, full
-  speed. (DNS not exercised — see "forcing DNS" below to test it anyway.)
-- **DNS wins, carrier = server-direct** → portal blocks 443 but allows outbound
-  53 to any IP. This is the DNS win we built: ~65–71 KB/s. The prize case.
-- **DNS wins, carrier = system-resolver** → portal allows only its own resolver.
-  Packets flow but HTTPS likely won't establish (recursor forward-rate limit).
-  Expected to be marginal; documents the field reality.
+1. **PRIMARY — is throttled DNS at café #2 *usable*, or does it only handshake?**
+   This is the one open thread. Café #2 is a hard destination-gated portal where
+   only server-direct DNS/53 escapes (~72 Kbps floor). We know it *handshakes*; we
+   do not know if it carries a real message/page at a tolerable speed. The answer
+   gates whether **Essentials Mode** (`ESSENTIALS-MODE-SPEC.md`) is worth building:
+   usable-slow → build it; unusable-slow → DNS is only a liveness floor and that
+   café is effectively unsupported for real use. Tool: `cafe-measure.sh`.
+2. **Complete the portal's 8-carrier support map.** Which of wireguard, udp443,
+   http_connect, tls443, wss443, cdn_wss, dns, icmp_udp the portal allows. Tool:
+   `cafe-run.sh` (the full battery). Match the result to a `FIELD-TEST-CONTINGENCIES.md`
+   row.
+3. **Walled-garden survey.** Which third-party destinations the portal permits on
+   443 (Apple/Google/Cloudflare/Fastly/a *different* CloudFront edge). If a
+   frontable provider is open while our edge is not, a carrier fronted through it
+   could beat this café — where our own `cdn_wss` failed. Tool: `cafe-run.sh`
+   (`--walled-garden` line).
+4. **Classify each block: `[SYN-RST]` vs `[reset]` vs `[timeout]`.** A `[reset]`
+   (post-handshake SNI reset) is the only thing that makes desync viable; no café
+   has shown one yet. The battery tags each automatically.
 
-## Before you leave (at home / open wifi)
+## Before you leave (at home / on the hotspot)
 
-1. **Start clean.** Reboot if the Mac has had heavy tunnel testing (clears stale
-   `utun`s). Otherwise:
+1. **Reboot the Mac.** Clears stale `utun` interfaces from desk testing. The app's
+   cached peer (UserDefaults) and the server peer (AWS) both survive a reboot.
+2. **Build + run the current app**, then populate the cache:
    ```
-   sudo /Users/jeremiah/Claude/Projects/FreewireVPN/tunnel/freewire-tunnel --restore
+   xcodebuild build -project macos/Freewire/Freewire.xcodeproj -scheme Freewire -configuration Debug CODE_SIGNING_ALLOWED=NO
    ```
-2. **Use the current build** (server-direct-first DNS default, forceTransport
-   pref, persistent peer, cache fallback, stdin-EOF teardown):
-   ```
-   open /Users/jeremiah/Library/Developer/Xcode/DerivedData/Freewire-elmajhbhindocnejdnjhxousdzrg/Build/Products/Debug/Freewire.app
-   ```
-3. **Populate the cache** — connect once on the open network. Registers the (now
-   persistent) peer and saves the control-plane state the portal fallback needs.
-   Confirm **Protected** + real egress (public IP becomes the server). Then
-   **disconnect** — the peer stays registered.
+   Launch the built `Freewire.app`, **Connect once on the open network**, confirm
+   **Protected** + real egress (public IP becomes the server), then **Disconnect**.
+   The peer stays registered (persistent), and the control-plane cache the portal
+   fallback needs is now saved.
+3. **Prime the rooted probe.** Run `testing/probe-transports.sh` **once on the
+   hotspot** so its `/tmp` peer cache exists — a reboot clears it, and at the café
+   there is no internet to re-register. (The rootless battery needs no priming.)
 4. **Confirm no stale overrides** (all should be empty/error):
    ```
    defaults read com.freewire.vpn.Freewire dnsResolverOverride
    defaults read com.freewire.vpn.Freewire skipRouting
    defaults read com.freewire.vpn.Freewire forceTransport
    ```
+5. *(Optional)* If you want the app to auto-select `cdn_wss`, confirm `cdn_host` is
+   set in the server config. The probe tests the CDN via `--cdn` regardless, so
+   this is not required for the survey.
 
-## At the café
+## At the café — self-contained, no internet needed
 
-**Run A — normal selection (what a real user gets).** Leave forceTransport unset.
-1. Join the café wifi. If the OS login sheet appears, **Cancel it — do not log in.**
-2. Click **Connect**.
-3. Diagnostic (records egress timeline locally; ~45s, prints progress):
-   ```
-   /Users/jeremiah/Claude/Projects/FreewireVPN/testing/cafe-diagnostic.sh
-   ```
-4. Disconnect.
+A captive portal cuts this Claude session's own internet, so the café tools write
+to `/tmp` and are read back afterward. Nothing here needs a live session.
 
-**Run B — force DNS (validate the DNS win specifically).** Only needed if Run A
-selected TLS/443 (i.e. the portal allowed HTTPS) and you want to test DNS too:
+**Step 1 — the full survey (rootless + rooted, ~1–2 min).**
+Join the café wifi. If the OS login sheet appears, **Cancel it — do not log in.**
 ```
-defaults write com.freewire.vpn.Freewire forceTransport dns
+bash testing/cafe-run.sh
 ```
-Reconnect, run the diagnostic again, disconnect, then clear it:
+This runs, in one shot: the 8-carrier probe battery (reachability of all carriers
++ UDP/123 and IPv6 candidates, RST/timeout classification), the walled-garden
+survey, and — if you give it your password once — the rooted per-carrier real-WG
+handshake (`probe-transports.sh`, covering `icmp_udp` too). Writes `/tmp/freewire-cafe-*.txt`.
+
+**Step 2 — grade the DNS floor (the primary question).**
+Launch `Freewire.app`, Cancel the login sheet, click **Connect**. It falls through
+the chain to DNS (the only carrier this café allows). Once it shows connected:
 ```
-defaults delete com.freewire.vpn.Freewire forceTransport
+bash testing/cafe-measure.sh
+```
+Read-only: measures real egress, latency, sustained throughput, and a real page
+load over the DNS tunnel. Writes `/tmp/freewire-cafe-measure-*.txt`. This answers
+usable-slow vs unusable-slow. Then **Disconnect**.
+
+**Recover if the machine goes sluggish** (routing everything over a ~72 Kbps DNS
+tunnel is slow by design):
+```
+sudo tunnel/freewire-tunnel --restore
 ```
 
-Switch back to your hotspot and tell Claude **"diagnostic done"** — it reads
-`/tmp/freewire-cafe-diagnostic.log` and `/tmp/freewire-tunnel-stderr.log`
-directly. No copy-paste.
+**Then** switch back to the hotspot and tell Claude to read the two `/tmp` files.
 
-## Reading the result
+## Reading the result → what it gates
 
-- The **`freewire-tunnel: dns carrier: <server-direct|system-resolver> (...)`**
-  line in the stderr log says which DNS carrier was chosen (if DNS won).
-- The transport that reached ready is in the `ready <iface> <ip> <transport>`
-  line.
-- **SUSTAINED, egress = server IP** → the tunnel carried a real session end to
-  end. On DNS+server-direct, that's the marquee capability confirmed in the field.
-- **INTERMITTENT / BLOCKED on DNS+system-resolver** → the recursor path's known
-  ceiling; expected, not a regression.
-- **NOT TUNNELLED / false Protected** → should not happen (sustained-egress check);
-  if it does, the log shows the transport and why.
-
-## If the machine goes sluggish
-
-Routing everything over a slow DNS tunnel is slow by design. Recover:
-```
-sudo /Users/jeremiah/Claude/Projects/FreewireVPN/tunnel/freewire-tunnel --restore
-```
+- **Carrier support map** (from `cafe-run.sh`): match to a `FIELD-TEST-CONTINGENCIES.md`
+  row (1 = permissive, … 8 = destination-gated DNS-only). Café #2 was row 8.
+- **Walled-garden**: if Cloudflare/Fastly/a generic CloudFront edge is permitted
+  while our server + edge are `[SYN-RST]`, a fronted-through-them carrier is the
+  candidate next build (our own CDN front is not allow-listed there).
+- **DNS usability number** (from `cafe-measure.sh`): the decision on Essentials
+  Mode. Roughly: can it carry a text message and a small email in a few seconds?
+  → usable-slow → build the IP-only Essentials MVP against the
+  `FREEWIRE_DNS_CARRIER_CAP` desk repro. If a page load never completes and even a
+  message stalls → unusable-slow → Essentials Mode has nothing to carry; record it
+  and stop.
+- **Block classes**: any `[reset]` (not seen yet) → desync becomes worth
+  considering (`DESYNC-CARRIER-SPEC.md`). All `[SYN-RST]`/`[timeout]` → desync
+  stays futile.
 
 ## Known limits this test cannot get past
 
-- **Recursor throughput.** Where the portal allows only its own resolver, the DNS
-  tunnel is minimal (public/portal recursors rate-limit forwards of unique names
-  to our auth server to ~14/s each). Server-direct is the path with real speed.
-- **DNS hijacking.** A portal that answers every DNS query with its own IP (no
-  recursion, and rewriting destination :53) kills the DNS tunnel. Fundamental.
-- **macOS Captive Network Assistant.** The OS may gate app traffic while its login
-  sheet is up; cancelling the sheet releases it.
+- **Recursor throughput.** Where a portal allows only its own resolver, the DNS
+  tunnel is minimal (recursors rate-limit forwards of unique names to ~14/s).
+  Server-direct DNS is the path with real speed; café #2 allowed it.
+- **DNS hijacking.** A portal that answers every query with its own IP and rewrites
+  destination :53 kills the DNS tunnel outright. Fundamental, no client fix.
+- **A throttled-DNS ceiling is not raisable client-side** (research-confirmed).
+  That is *why* Plan B is Essentials Mode (carry less), not a faster DNS carrier.
+- **macOS Captive Network Assistant** may gate app traffic while its login sheet is
+  up; cancelling the sheet releases it.
+
+## The old procedural note
+
+`cafe-diagnostic.sh` (single-transport egress timeline) still exists and works, but
+`cafe-run.sh` supersedes it for the survey — it covers all 8 carriers, the
+walled-garden, and the rooted handshakes in one self-contained run.

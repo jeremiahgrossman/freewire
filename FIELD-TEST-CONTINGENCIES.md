@@ -5,21 +5,31 @@ portal and match the result to a row.
 
 ## The one command
 
+At the café, run the self-contained wrapper — it does the battery, the
+walled-garden survey, and the rooted per-carrier handshakes in one shot and writes
+`/tmp/freewire-cafe-*.txt` (no internet needed):
+
+```
+bash testing/cafe-run.sh
+```
+
+The raw battery it wraps (rootless, non-routed, safe on a machine in use — probes
+all 8 carriers plus the UDP/123, IPv6 and CDN candidates against OUR server and
+names the verdict):
+
 ```
 tunnel/freewire-tunnel --probe-battery --server 52.203.246.145 --insecure --cdn d29cubp361kpm8.cloudfront.net
 ```
 
-Rootless, non-routed, safe on a machine in use. It probes every carrier plus the
-UDP/443, UDP/123, IPv6 and CDN candidates against OUR server and names the
-verdict. For the full real-WireGuard-handshake survey (incl. cdn_wss), also:
-`testing/probe-transports.sh` (run once on the hotspot first to cache a peer).
+See `testing/FIELD-TEST-RUNBOOK.md` for the full step-by-step (incl. the
+`cafe-measure.sh` DNS-usability grade, which is the primary open question).
 
 ## Pre-trip (2 minutes, only you can do)
 
 - **Reboot the Mac** — clears 8 stale utun interfaces from desk testing. The
   app's cached peer (UserDefaults) and the server peer (AWS) both survive it.
 - Nothing else. The distribution is up, ACME is live, cdn_host is advertised, the
-  app connects (verified), all 7 carriers reach the server.
+  app connects (verified), all 8 carriers reach the server.
 
 ## Result → what it means → what to build
 
@@ -34,7 +44,7 @@ Rows are ordered best-case to worst-case. "Built" = ships today, nothing to do.
 | 5 | UDP/123 passes, UDP/443 doesn't | Portal passes NTP-class UDP | **BUILD the UDP/123 carrier** (same shape as #4, lower priority). |
 | 6 | IPv6 egress present | v4-only portal leaks v6 | **Server is now v6-ready** (provisioned + advertises endpoint_host_v6). The client `wireguard6` carrier + its leak-safe routing is the one remaining build, and it must be verified ON a v6 network -- see IPV6-CARRIER-REMAINING.md. |
 | 7 | Only throttled DNS (the original café) | Hard destination gate, DNS is the floor | If UDP/443 also fails: **nothing client-side raises the ceiling** (research-confirmed). This is the characterized case. |
-| 8 | Everything fast fails, DNS works | Destination-gated hard captive portal | The 2026-08-25 café: TCP/443 SYN-RST (incl. CDN edge), UDP dropped, but DNS/53 works. **Supported via DNS (slow).** Desync CANNOT help a SYN-RST (no handshake to manipulate) -- it needs a `[reset]` content-gated portal, not yet seen. See DESYNC-CARRIER-SPEC.md. |
+| 8 | Everything fast fails, DNS works | Destination-gated hard captive portal | The 2026-08-25 café: TCP/443 SYN-RST (incl. CDN edge), UDP dropped, but DNS/53 works. **Supported via DNS (slow).** Desync CANNOT help a SYN-RST (no handshake to manipulate) -- it needs a `[reset]` content-gated portal, not yet seen. See DESYNC-CARRIER-SPEC.md. **Next: grade DNS usability (`cafe-measure.sh`) — usable-slow → build the Essentials-Mode IP-only MVP (`ESSENTIALS-MODE-SPEC.md`); unusable-slow → DNS is a liveness floor only.** Also read the walled-garden line: if a frontable provider is permitted while our edge is SYN-RST, a fronted-through-them carrier is the candidate build. |
 
 ## The builds, pre-scoped
 
