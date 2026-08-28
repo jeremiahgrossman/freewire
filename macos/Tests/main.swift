@@ -155,9 +155,34 @@ for t in TunnelTransport.allCases {
           "rawValue round-trips for \(t.rawValue)")
 }
 
+// MARK: - PRIVACY-1 DoH status parsing (the Go helper <-> app boundary)
+
+// Neither line: a transport that cannot carry DoH emits nothing here; that is
+// DNS-1, warned separately, so the leak state stays unknown (nil), not "leaking".
+check(DoHStatus.latestLeak(in: "ready utun6 10.0.0.2 tls443\n") == nil,
+      "no doh line -> nil (DNS-1 handled separately, not a false PRIVACY-1)")
+
+// Initial PRIVACY-1: the helper writes `doh down` during routing setup, before
+// `ready`. Parser must report leaking even with the ready line present.
+check(DoHStatus.latestLeak(in: "doh down\nready utun6 10.0.0.2 tls443\n") == true,
+      "doh down before ready -> leaking (PRIVACY-1 shown)")
+
+// Healthy path: `doh up` before `ready` -> not leaking.
+check(DoHStatus.latestLeak(in: "doh up\nready utun6 10.0.0.2 tls443\n") == false,
+      "doh up before ready -> not leaking")
+
+// Auto-dismiss: the 60s retry appends `doh up` after the initial `doh down`.
+// Newest wins, so the warning clears.
+check(DoHStatus.latestLeak(in: "doh down\nready utun6 10.0.0.2 tls443\ndoh up\n") == false,
+      "doh up after doh down -> not leaking (60s recovery dismisses the warning)")
+
+// A later regression to down would re-show it (newest wins both ways).
+check(DoHStatus.latestLeak(in: "doh up\ndoh down\n") == true,
+      "newest line wins in both directions")
+
 print("")
 if failures == 0 {
-    print("all KillSwitchRules + TunnelTransport assertions passed")
+    print("all KillSwitchRules + TunnelTransport + DoHStatus assertions passed")
     exit(0)
 } else {
     print("\(failures) assertion(s) failed")

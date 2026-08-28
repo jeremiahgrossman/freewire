@@ -852,12 +852,7 @@ final class TunnelManager: ObservableObject {
     nonisolated private static func readDoHLeak(from url: URL) async -> Bool? {
         await Task.detached(priority: .utility) {
             guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
-            var leak: Bool? = nil
-            for line in text.components(separatedBy: "\n") {
-                if line.hasPrefix("doh down") { leak = true }
-                else if line.hasPrefix("doh up") { leak = false }
-            }
-            return leak
+            return DoHStatus.latestLeak(in: text)
         }.value
     }
 
