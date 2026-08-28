@@ -97,6 +97,21 @@ final class StdinHolder {
 final class TunnelManager: ObservableObject {
     @Published private(set) var state: TunnelState = .disconnected
 
+    /// PRIVACY-1: true when the tunnel is up but encrypted DNS (DoH) is not, so
+    /// lookups reach the network's resolver in cleartext. The tunnel still
+    /// carries and encrypts traffic — only the lookups are exposed — so this
+    /// drives a soft warning *below* the connected status, never a replacement
+    /// for "Protected" (the same rendering rule DNS-1 follows). Published so the
+    /// connected panel re-renders; cleared automatically when the helper reports
+    /// DoH restored (it retries every 60s), and on teardown.
+    @Published private(set) var dohLeaking: Bool = false
+
+    /// The active tunnel's stdout file (where the helper writes "ready …" and
+    /// the "doh up"/"doh down" status lines), tailed by dohMonitorTask for later
+    /// DoH transitions. Removed and cleared on teardown.
+    private var dohStatusFileURL: URL?
+    private var dohMonitorTask: Task<Void, Never>?
+
     private let api: ServerAPI
     private let identity: DeviceIdentity
     let peerTokenBox = PeerTokenBox()
@@ -767,6 +782,10 @@ final class TunnelManager: ObservableObject {
     }
 
     private func killTunnel() async {
+        // Stop tailing the old tunnel's stdout and clear the PRIVACY-1 warning:
+        // a torn-down tunnel is not leaking DNS, and the next launch will report
+        // its own DoH state afresh.
+        stopDoHMonitor()
         // Primary teardown: close the helper's stdin. It exits on EOF and runs
         // its own cleanup, with no privilege needed -- so this works even when the
         // sudo `--stop` below cannot authenticate. The `--stop` stays as a backup
@@ -787,6 +806,59 @@ final class TunnelManager: ObservableObject {
             p.waitUntilExit()
         }.value
         try? await Task.sleep(nanoseconds: 300_000_000)
+    }
+
+    // MARK: - DoH status monitor (PRIVACY-1)
+
+    /// Tails the active tunnel's stdout file for the helper's "doh up"/"doh down"
+    /// status lines and mirrors them onto `dohLeaking`.
+    ///
+    /// The helper writes "doh down" during routing setup (before "ready") when
+    /// the DoH forwarder cannot start, and "doh up" again if its 60s background
+    /// retry restores encrypted DNS — so polling this one file surfaces both the
+    /// initial PRIVACY-1 state and its automatic dismissal without any second
+    /// channel. A transport that cannot carry DoH at all (dns/icmp) emits neither
+    /// line; that is DNS-1, warned separately, so `dohLeaking` stays false here.
+    private func startDoHMonitor(readyFile: URL) {
+        stopDoHMonitor()
+        dohStatusFileURL = readyFile
+        dohMonitorTask = Task { [weak self] in
+            // Read immediately, then every few seconds. The first read picks up
+            // the state the helper already wrote by the time "ready" arrived.
+            while !Task.isCancelled {
+                let leak = await Self.readDoHLeak(from: readyFile)
+                guard let self, !Task.isCancelled else { return }
+                if let leak, self.dohLeaking != leak {
+                    self.dohLeaking = leak
+                }
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+        }
+    }
+
+    private func stopDoHMonitor() {
+        dohMonitorTask?.cancel()
+        dohMonitorTask = nil
+        dohLeaking = false
+        if let url = dohStatusFileURL {
+            try? FileManager.default.removeItem(at: url)
+            dohStatusFileURL = nil
+        }
+    }
+
+    /// Reads the file off the main actor and returns the newest DoH state it
+    /// carries: true for "doh down" (leaking), false for "doh up", nil if the
+    /// helper has written neither line.
+    nonisolated private static func readDoHLeak(from url: URL) async -> Bool? {
+        await Task.detached(priority: .utility) {
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+            var leak: Bool? = nil
+            for line in text.components(separatedBy: "\n") {
+                if line.hasPrefix("doh down") { leak = true }
+                else if line.hasPrefix("doh up") { leak = false }
+            }
+            return leak
+        }.value
     }
 
     // MARK: - Tunnel launch
@@ -966,17 +1038,22 @@ final class TunnelManager: ObservableObject {
 
         do {
             let readyLine = try await pollReady(at: readyFile, timeout: 30)
-            try? FileManager.default.removeItem(at: readyFile)
 
             // Line format: "ready <ifName> <tunnelIP> <transport>"
             let parts = readyLine.split(separator: " ")
             guard parts.count >= 2, parts[0] == "ready", !parts[1].isEmpty else {
+                try? FileManager.default.removeItem(at: readyFile)
                 throw TunnelError.badReadyLine(readyLine)
             }
             let ifName = String(parts[1])
             let transport = parts.count >= 4
                 ? TunnelTransport(rawValue: String(parts[3])) ?? .wireguard
                 : .wireguard
+            // Keep the stdout file and tail it for PRIVACY-1: the helper writes
+            // "doh down"/"doh up" on this same channel, before "ready" for the
+            // initial state and again if a background retry restores DoH. The
+            // monitor owns the file's lifetime now and removes it on teardown.
+            startDoHMonitor(readyFile: readyFile)
             return (ifName, transport)
         } catch TunnelError.allPathsFailed {
             try? FileManager.default.removeItem(at: readyFile)

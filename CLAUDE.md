@@ -541,22 +541,29 @@ the moment anyone else connects.
 
 ### Known gaps that matter at any scale
 
-- **PRIVACY-1 (DoH-unreachable warning) is detected but not surfaced.** An
-  error-copy verbatim audit (2026-08-26, every `error-states-spec.md` string vs
-  the app) found ONE active, undeferred gap: when the DoH resolver is unreachable
-  the client falls back to the network's resolver, and the tunnel helper logs it
-  loudly (`dohNotice`, `tunnel/.../doh.go`) — but the macOS panel never shows the
-  spec's soft warning "Reduced privacy: DNS not encrypted" / "Freewire couldn't
-  reach its secure DNS resolver…". Building it is a feature (parse the helper
-  signal → panel warning → the spec's 60s auto-retry/auto-dismiss), not a copy
-  fix, so it is flagged not built. Every OTHER unbuilt spec string is legitimately
-  deferred: iOS states, Phase-3 self-hosted/QR/AWS-deploy copy, Sparkle UPDATE-1/2,
-  the post-helper kill-switch "traffic is blocked" variants, and the System
-  Extension PERM-3/4 copy (the macOS client uses utun + SMAppService, not a System
-  Extension, so that copy does not match the shipped architecture). **All
-  implemented active states are verbatim** — no paraphrased or invented copy —
-  so architecture rule 4 holds; many render as a label + caption split, which a
-  flat string search misses but concatenates to the exact spec sentence.
+- **PRIVACY-1 (DoH-unreachable warning) is now BUILT and surfaced (2026-08-28).**
+  Previously detected but never shown; the audit (2026-08-26) had it as the one
+  active, undeferred gap. Now wired end to end: the helper emits a structured
+  `doh down`/`doh up` status line on stdout — the same channel as `ready …` —
+  from `setupRouting` (initial state, before `ready`) and again if recovery
+  succeeds (`dohStatus`, `tunnel/.../doh.go`); the stderr `dohNotice` warning
+  stays as the operator log. `TunnelManager` tails that file into a published
+  `dohLeaking`, and `PanelView` shows the spec's soft warning VERBATIM below the
+  connected status (like DNS-1, not replacing "Protected"): "Reduced privacy: DNS
+  not encrypted" / "Freewire couldn't reach its secure DNS resolver. DNS queries
+  may be visible to your network provider until this resolves." The 60s
+  background retry (`startDoHRetry`/`tryDoHRecovery`) covers both failure modes
+  (forwarder never started; forwarder up but system-resolver takeover failed),
+  is serialized with teardown via `dohMu`/`dohTornDown`, and clears the warning
+  automatically on restore. Verified: `go test -race ./...`, `macos/Tests/run.sh`,
+  app build. Every OTHER unbuilt spec string is legitimately deferred: iOS states,
+  Phase-3 self-hosted/QR/AWS-deploy copy, Sparkle UPDATE-1/2, the post-helper
+  kill-switch "traffic is blocked" variants, and the System Extension PERM-3/4
+  copy (the macOS client uses utun + SMAppService, not a System Extension, so that
+  copy does not match the shipped architecture). **All implemented active states
+  are verbatim** — no paraphrased or invented copy — so architecture rule 4 holds;
+  many render as a label + caption split, which a flat string search misses but
+  concatenates to the exact spec sentence.
 - **`FreewireHelper` is written but cannot install.** `SMAppService` requires a
   Developer ID and this machine has no signing identity. The rule generation is
   done and tested (16 assertions); the packaging is not. The UI does not claim

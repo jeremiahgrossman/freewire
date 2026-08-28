@@ -219,6 +219,21 @@ private struct ConnectedBody: View {
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            // PRIVACY-1, per error-states-spec.md. Shown below the status, not
+            // replacing it: a DoH failure means DNS is visible, not that traffic
+            // is unprotected, so "Protected" stays. Same rendering rule as DNS-1.
+            // Clears itself when the helper's 60s retry restores encrypted DNS.
+            if tunnelManager.dohLeaking {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Reduced privacy: DNS not encrypted")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.orange)
+                    Text("Freewire couldn't reach its secure DNS resolver. DNS queries may be visible to your network provider until this resolves.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                .fixedSize(horizontal: false, vertical: true)
+            }
             Spacer().frame(height: 4)
             Button("Disconnect") {
                 Task { await tunnelManager.disconnect() }

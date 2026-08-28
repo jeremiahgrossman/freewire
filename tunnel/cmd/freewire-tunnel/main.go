@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -994,9 +995,6 @@ func setupRouting(tunName, bypassHost, carrierPeer string, carrierResolvers []st
 	// it is sent to is already answering.
 	fwd, dohErr := startDoHForwarder(dohEndpoints)
 	dohNotice(dohErr)
-	if dohErr == nil {
-		dohActive = fwd
-	}
 
 	// Move DNS last, once traffic is known to survive the tunnel. Pointing the
 	// system at a resolver that is only reachable through the tunnel before
@@ -1006,16 +1004,35 @@ func setupRouting(tunName, bypassHost, carrierPeer string, carrierResolvers []st
 		// system to 1.1.1.1 directly is the cleartext path this replaced, and
 		// leaving it alone keeps queries on the local network. The second is
 		// the status quo and the one the user was already told about.
+		//
+		// This is PRIVACY-1: the tunnel is up and traffic is still encrypted,
+		// but DNS is not. Tell the app on the ready channel so it can show the
+		// soft warning, and keep retrying every 60s so the warning clears itself
+		// when the resolver becomes reachable.
+		dohStatus(false)
+		startDoHRetry(dohEndpoints)
 		return nil
 	}
+	dohMu.Lock()
+	dohActive = fwd
+	dohMu.Unlock()
 	if err := setupDNS(); err != nil {
 		// Not fatal. A tunnel that carries traffic while DNS leaks is a real
 		// privacy loss and has to be said out loud, but refusing to connect
 		// over it leaves the user with neither protection nor a tunnel.
+		//
+		// The forwarder is up but the system was not pointed at it, so DNS still
+		// leaks -- PRIVACY-1. Report it and retry the takeover (the retry reuses
+		// the already-bound forwarder rather than binding a second one).
 		fmt.Fprintf(os.Stderr,
 			"freewire-tunnel: WARNING: could not take over DNS: %v\n"+
 				"freewire-tunnel: lookups may still go to the local network in cleartext\n", err)
+		dohStatus(false)
+		startDoHRetry(dohEndpoints)
+		return nil
 	}
+	// Encrypted DNS is in effect.
+	dohStatus(true)
 
 	return nil
 }
@@ -1170,7 +1187,16 @@ func interfaceForDest(dest string) (string, error) {
 // The system default route is never touched now, so there is nothing to
 // restore: removing the two halves hands traffic back to it automatically.
 // dohActive is the running forwarder, stopped on teardown.
-var dohActive *dohForwarder
+//
+// dohMu serializes the forwarder's lifecycle between the PRIVACY-1 background
+// retry (startDoHRetry) and teardown (cleanupRouting), so a retry firing during
+// teardown cannot re-point the system resolver at a forwarder that is about to
+// disappear. dohTornDown latches once teardown has begun.
+var (
+	dohMu       sync.Mutex
+	dohActive   *dohForwarder
+	dohTornDown bool
+)
 
 // transportCanCarryDoH reports whether a transport can serve system-wide DNS
 // over HTTPS without stalling the machine.
@@ -1191,12 +1217,20 @@ func cleanupRouting(tunName, bypassHost string) {
 	// DNS first. The resolvers it points at are only reachable through the
 	// tunnel, so restoring them after tearing the routes down would leave a
 	// window with no working name resolution.
+	//
+	// Held under dohMu, with dohTornDown latched first, so a PRIVACY-1 retry
+	// (startDoHRetry) that fires concurrently either commits fully before this
+	// restore or sees dohTornDown and abandons its takeover -- never re-points
+	// the resolver after we have restored it.
+	dohMu.Lock()
+	dohTornDown = true
 	cleanupDNS()
 	// Then the forwarder, once nothing is pointed at it.
 	if dohActive != nil {
 		dohActive.Close()
 		dohActive = nil
 	}
+	dohMu.Unlock()
 
 	for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
 		exec.Command(routeBin, "-q", "-n", "delete", "-inet", half).Run() //nolint:errcheck

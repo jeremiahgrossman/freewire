@@ -496,3 +496,104 @@ func dohNotice(err error) {
 		"freewire-tunnel: WARNING: DNS-over-HTTPS unavailable: %v\n"+
 			"freewire-tunnel: DNS is NOT being taken over; lookups use the network's resolver\n", err)
 }
+
+// dohStatus emits a machine-readable DoH state line on stdout -- the same
+// channel as the "ready" line -- so the controlling app can surface PRIVACY-1
+// without scraping the stderr prose above.
+//
+//	"doh down"  encrypted DNS is not running; lookups use the network's
+//	            resolver in cleartext (PRIVACY-1, a soft warning).
+//	"doh up"    encrypted DNS is running; the warning may be dismissed.
+//
+// The stderr notice stays as the operator-facing log; this is the structured
+// signal the UI consumes.
+func dohStatus(up bool) {
+	if up {
+		fmt.Println("doh up")
+	} else {
+		fmt.Println("doh down")
+	}
+	os.Stdout.Sync() //nolint:errcheck
+}
+
+// startDoHRetry re-attempts encrypted DNS every 60 seconds after it could not be
+// brought up, per PRIVACY-1's "retries the DoH resolver in the background every
+// 60 seconds; the warning dismisses automatically when DoH is restored". On the
+// first success it emits "doh up" so the app clears the warning, then stops. A
+// forwarder that later dies is not re-detected here -- the process is torn down
+// and rebuilt in that case.
+func startDoHRetry(endpoints []string) {
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if tryDoHRecovery(endpoints) {
+				return
+			}
+		}
+	}()
+}
+
+// tryDoHRecovery attempts one recovery: ensure a forwarder is running and the
+// system resolver points at it. Returns true when encrypted DNS is in effect
+// (or the tunnel has been torn down, so there is nothing left to recover).
+//
+// It handles both failure modes PRIVACY-1 can arrive from: the forwarder never
+// started (start one now), and the forwarder started but the system resolver
+// could not be pointed at it (reuse the running one, retry only the takeover).
+//
+// The commit -- record the forwarder and point the system at it -- is serialized
+// with teardown through dohMu, with dohTornDown checked inside the lock, so a
+// recovery that races teardown cannot re-take over DNS after the machine has
+// been restored. See cleanupRouting.
+func tryDoHRecovery(endpoints []string) bool {
+	dohMu.Lock()
+	if dohTornDown {
+		dohMu.Unlock()
+		return true // tunnel gone; stop retrying
+	}
+	fwd := dohActive
+	dohMu.Unlock()
+
+	// Start a forwarder only if one is not already bound. A takeover-only
+	// failure leaves the forwarder up, and binding loopback:53 twice would fail.
+	startedNow := false
+	if fwd == nil {
+		var err error
+		fwd, err = startDoHForwarder(endpoints)
+		if err != nil {
+			return false // still unreachable; try again next tick
+		}
+		startedNow = true
+	}
+
+	dohMu.Lock()
+	if dohTornDown {
+		dohMu.Unlock()
+		if startedNow {
+			fwd.Close()
+		}
+		return true
+	}
+	dohActive = fwd
+	if err := setupDNS(); err != nil {
+		// Could not point the system at the forwarder. Do not claim encrypted
+		// DNS we are not using. Tear down only a forwarder we started this pass;
+		// leave a pre-existing one bound for the next attempt.
+		if startedNow {
+			dohActive = nil
+			dohMu.Unlock()
+			fwd.Close()
+		} else {
+			dohMu.Unlock()
+		}
+		fmt.Fprintf(os.Stderr,
+			"freewire-tunnel: DoH recovery: DNS takeover failed: %v; retrying\n", err)
+		return false
+	}
+	dohMu.Unlock()
+
+	fmt.Fprintln(os.Stderr, "freewire-tunnel: DNS-over-HTTPS restored; DNS is encrypted again")
+	dohStatus(true)
+	return true
+}
