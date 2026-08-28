@@ -16,8 +16,8 @@ The client and server never need to agree on a user identity. All device identit
 
 ## Base URL
 
-**Managed servers:** `https://vpn.freewire.com/v1/`  
-**Self-hosted servers:** `https://<server-ip>/v1/` (self-signed TLS certificate; client must accept on import)
+**Managed servers:** `https://<server-ip>/v1/` (the dev/managed deployment is IP-addressed — currently `52.203.246.145`; `vpn.freewire.com` is an aspirational name, not the live host). The API port is 8080 (HTTPS). An ACME hostname `origin.pinghop.net` fronts the TLS *carriers* but is not the API base.  
+**Self-hosted servers:** `https://<server-ip>/v1/` (self-signed TLS certificate; client pins the server's WireGuard key trust-on-first-use)
 
 All endpoints are HTTPS only. HTTP requests are rejected with `301 Moved Permanently`.
 
@@ -49,36 +49,48 @@ Returns the server's WireGuard configuration that the client needs to establish 
 
 **Request:** No body.
 
-**Response `200 OK`:**
+**Response `200 OK`:** (field set as sent by `server/internal/api/config_handler.go`)
 ```json
 {
   "public_key": "base64-encoded-wireguard-public-key==",
-  "endpoint_host": "198.51.100.1",
+  "endpoint_host": "52.203.246.145",
   "endpoint_port": 51820,
-  "tls_endpoint_host": "vpn.freewire.com",
+  "tls_endpoint_host": "52.203.246.145",
   "tls_endpoint_port": 443,
+  "dns_tunnel_port": 53,
+  "icmp_udp_port": 4500,
   "dns_tunnel_domain": "tunnel.freewire.com",
+  "endpoint_host_v6": "2001:db8::1",
+  "cdn_host": "d29cubp361kpm8.cloudfront.net",
   "allowed_ips": ["0.0.0.0/0", "::/0"],
   "server_version": "1.4.2",
   "min_client_version": "1.0.0",
   "region": "us-east",
-  "capacity_available": true
+  "capacity_available": true,
+  "privacy_pass_key_n": "base64url-modulus",
+  "privacy_pass_key_e": 65537,
+  "privacy_pass_key_id": "base64url-key-id"
 }
 ```
 
 | Field | Description |
 |---|---|
 | `public_key` | Server's WireGuard public key. Client uses this to authenticate the tunnel. |
-| `endpoint_host` | Server IP for standard WireGuard UDP connection (open networks). |
+| `endpoint_host` | Server IP for standard WireGuard UDP connection (open networks). The deployment is IP-addressed; no DNS name is required. |
 | `endpoint_port` | UDP port for WireGuard (default 51820). |
-| `tls_endpoint_host` | Hostname for TLS/443 path. Must match the server's TLS certificate CN. |
-| `tls_endpoint_port` | Port for TLS/443 path (443). |
-| `dns_tunnel_domain` | Apex domain for DNS tunnel (always `tunnel.freewire.com` for managed servers). |
+| `tls_endpoint_host` | Host for the TLS carriers (tls443/wss443). **Currently MUST equal `endpoint_host`** — no client plumbs a distinct TLS host, so a divergent value is silently ignored and the TLS carriers would go unreachable. Advertised for a future deployment that fronts TLS on a separate host (e.g. an ACME hostname). See `server/internal/api/config_handler.go`. |
+| `tls_endpoint_port` | Port for the TLS carriers (443). |
+| `dns_tunnel_port` | UDP port for the DNS-tunnel carrier (default 53). |
+| `icmp_udp_port` | UDP port for the ICMP-tunnel carrier (default 4500). |
+| `dns_tunnel_domain` | Apex domain for DNS tunnel (`tunnel.freewire.com` for managed servers). Optional; the client falls back to its own default when empty. |
+| `endpoint_host_v6` | Server global IPv6 address, `omitempty`. Advertised for the IPv6 carrier (server-side ready; the leak-safe client routing is deferred — see `IPV6-CARRIER-REMAINING.md`). |
+| `cdn_host` | CDN hostname that fronts the server (e.g. a CloudFront distribution), `omitempty`. Enables the `cdn_wss` carrier client-side; empty disables it. |
 | `allowed_ips` | WireGuard AllowedIPs for full-tunnel mode. |
 | `server_version` | Current server software version. |
 | `min_client_version` | Oldest client version the server will accept. If client version is below this, return `SYS-1` error. |
 | `region` | Human-readable region label shown in the client UI. |
 | `capacity_available` | `false` if the server is at or near peer capacity. Client should surface `CONN-4` if false. |
+| `privacy_pass_key_n` / `privacy_pass_key_e` / `privacy_pass_key_id` | Privacy Pass issuer RSA public key (modulus, exponent, key id), `omitempty`. Absent on self-hosted servers with no issuer. The client pins this trust-on-first-use. |
 
 **Response `503 Service Unavailable`:** Server is in maintenance mode. Client should surface `CONN-3`.
 
@@ -93,17 +105,21 @@ Register a device as a WireGuard peer. The server adds the device's public key t
 **Request body:**
 ```json
 {
-  "public_key": "base64-encoded-device-wireguard-public-key==",
-  "client_version": "1.2.0",
-  "device_name": "iPhone 16 Pro"
+  "public_key": "base64-encoded-device-wireguard-public-key=="
 }
 ```
 
 | Field | Required | Description |
 |---|---|---|
 | `public_key` | Yes | Device's WireGuard public key (Base64, 44 chars) |
-| `client_version` | Yes | Client software version string |
-| `device_name` | No | Device model name (e.g. "iPhone 16 Pro", "MacBook Pro"). Only sent in the self-hosted QR scan flow when the user explicitly consents ("Share your device name with the server admin?"). Never sent for managed server connections. If omitted, the server does not store a device name. |
+
+> **`public_key` is the ONLY field.** `client_version` and `device_name` were
+> removed and MUST NOT be reintroduced: any caller attribute submitted alongside
+> a Privacy Pass token is a handle the anonymous issuance can be correlated
+> against, which breaks the redemption-anonymity guarantee (non-negotiable
+> constraint #3 in `CLAUDE.md`). The server (`server/internal/api/peers_handler.go`)
+> decodes `public_key` only. See also `data-model.md` and the redaction rationale
+> in the handler comment.
 
 **Response `201 Created`:**
 ```json
@@ -218,7 +234,17 @@ Returns server health and current load. Used by the client to display server sta
 
 ## Network Intelligence API
 
-These two endpoints power the crowdsourced captive portal hint feature. Both are **opt-in** — the client only calls them if the user has enabled "Help improve captive portal detection" in Settings. See `data-model.md` §network_path_hint and `privacy-policy.md` §network-intelligence.
+> ⚠️ **DECLINED — NOT BUILT, and not to be built.** These endpoints were
+> deliberately not implemented. Reconnect already remembers the last working
+> transport, so a crowdsourced hint would only help a first connection to an
+> unseen network, while a hashed BSSID is a location identifier public wardriving
+> databases can reverse. See `DECISIONS.md` §NETWORK-INTELLIGENCE and `CLAUDE.md`
+> ("Network intelligence is deliberately not built"). No server implements
+> `/v1/network/*`; no client calls it; the `network_path_hint` table does not
+> exist. The spec below is retained for history only. Do NOT add the preferences
+> toggle — a toggle for a feature that does nothing is its own false claim.
+
+These two endpoints WOULD power a crowdsourced captive portal hint feature, opt-in only. See `data-model.md` §network_path_hint and `privacy-policy.md` §network-intelligence.
 
 Self-hosted servers do not implement these endpoints. The client skips them when connected to a self-hosted server.
 
@@ -367,14 +393,14 @@ The self-hosted server's web dashboard (see `ux-workflows.md` §4.4) adds additi
 1. Call `GET /v1/server/config` — cache the response for 1 hour.
 
 ### On connect
-1. *(With network intelligence opt-in, on wifi)* Call `GET /v1/network/hint?bssid_hash=<hash>`. If a hint is returned, reorder the fallback chain accordingly.
+1. ~~*(network intelligence opt-in)* Call `GET /v1/network/hint`~~ — **DECLINED, not built** (see the Network Intelligence banner above). The client does NOT call this; instead reconnect remembers the last working transport locally.
 2. Check the cached `GET /v1/server/config` response. If `capacity_available` is `false`, surface `CONN-4` and stop.
 3. If `min_client_version` is above the current client version, surface `SYS-1` and stop.
 4. If token batch is empty or below 3 tokens, call `POST /v1/tokens/issue` first.
 5. Call `POST /v1/peers` with the device public key and one Privacy Pass token.
 6. Use the returned `tunnel_ip` and `peer_token` to configure the WireGuard interface.
 7. Send WireGuard keepalives at `keepalive_interval` seconds.
-8. *(With network intelligence opt-in)* After connection outcome (success or failure), call `POST /v1/network/report` with the result.
+8. ~~*(network intelligence opt-in)* call `POST /v1/network/report`~~ — **DECLINED, not built** (see banner above).
 
 ### On disconnect
 1. Call `DELETE /v1/peers/{peer_token}` as a best-effort fire-and-forget.

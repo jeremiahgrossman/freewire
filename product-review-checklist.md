@@ -857,13 +857,20 @@ macOS Preferences must include a "Connect automatically [ON]" toggle. Verify:
 ### 59. Verify Device Name Pre-Population in Self-Hosted QR Flow
 `Pre-engineering` | `P, E`
 
-When a user scans a self-hosted server QR code, the app may optionally share the device model name with the server admin. Verify:
+⚠️ **SUPERSEDED — do not verify this; the mechanism was removed.** `POST /v1/peers`
+now carries `public_key` ONLY. `device_name` (and `client_version`) were removed
+because any caller attribute alongside a Privacy Pass token is a correlation handle
+that breaks redemption anonymity (non-negotiable constraint #3; `server/internal/api/peers_handler.go`).
+There is no "share your device name" prompt and no `device_name` in the redemption
+request. The self-hosted dashboard/QR flow is Phase-3 deferred; if device labeling
+is ever built it must NOT ride on the anonymous redemption request. The original
+checklist items are struck below for history:
 
-- During the import confirmation screen, the user sees: "Share your device name with the server admin?" with a clear Yes / No choice — not a pre-checked box
-- If the user taps Yes, the device model (e.g., "iPhone 16 Pro") is included in the `POST /v1/peers` request and stored as `device_name` on the server
-- If the user taps No, no device name is transmitted — the field is absent from the request
-- The server dashboard shows the `device_name` in the device list when present, falls back to showing the key fingerprint when absent
-- This prompt appears only in the self-hosted QR scan flow, not in managed server onboarding
+- ~~The user sees "Share your device name with the server admin?" with Yes/No~~
+- ~~If Yes, the device model is included in `POST /v1/peers` as `device_name`~~
+- ~~If No, no device name is transmitted~~
+- ~~The dashboard shows `device_name` when present, else the key fingerprint~~
+- ~~This prompt appears only in the self-hosted QR scan flow~~
 
 ---
 

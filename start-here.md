@@ -8,7 +8,7 @@ Freewire is a free consumer VPN that works everywhere — including captive port
 
 - **Free to users.** No subscription, no paywall, no ads, no in-app donation mechanism.
 - **Hybrid server model.** Users choose between Freewire-managed servers or self-hosting on AWS.
-- **Captive portal bypass is the core technical differentiator.** Prioritized fallback chain: HTTP CONNECT → TLS/443 → DNS tunnel → ICMP tunnel. See `technical-architecture.md`.
+- **Captive portal bypass is the core technical differentiator.** Speed-ordered carrier chain (8 carriers): wireguard → udp443 → http_connect → tls443 → wss443 → cdn_wss → dns → icmp_udp. The client commits to the fastest that actually carries traffic. See `technical-architecture.md` §3.
 - **macOS at launch.** iOS, Android, and Windows are post-launch.
 - **Consumer-first UX.** Setup must require no technical knowledge.
 - **No user accounts. No identity required.** Each device generates a WireGuard keypair locally at first launch. The device's public key is its identity. No email, Apple ID, or login of any kind. This is the same principle as Signal: Freewire cannot answer questions it never collected data to answer.
@@ -16,7 +16,7 @@ Freewire is a free consumer VPN that works everywhere — including captive port
 - **One managed server region at launch.** More added post-launch based on demand.
 - **Self-hosted on AWS** via one-click deploy (Marketplace AMI or CloudFormation).
 - **Kill switch on by default.** Users may disable in settings.
-- **macOS client language: Swift**, using `wireguard-go` (userspace) via direct `utun` interface — no NetworkExtension. Kill switch via `pf` + `SMJobBless` privileged helper. Sparkle for auto-update.
+- **macOS client language: Swift**, using `wireguard-go` (userspace) via direct `utun` interface — no NetworkExtension. Kill switch via `pf` + `SMAppService` privileged helper. Sparkle for auto-update.
 - **Server language: Go.** WireGuard's reference userspace implementation (wireguard-go) is in Go; the authoritative DNS tunnel server and Privacy Pass token issuer are also Go. Deploys as a single static binary.
 - **macOS: direct download (signed + notarized DMG + Sparkle auto-update) at launch.** Mac App Store permanently incompatible with direct `utun` access.
 - **iOS: deferred.** Will use Swift + WireGuardKit + NetworkExtension (NEPacketTunnelProvider) when resumed. Apply for the NE entitlement when iOS work begins — approval takes days to weeks.

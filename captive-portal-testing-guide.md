@@ -280,7 +280,7 @@ sudo iptables -F FORWARD
 sudo iptables -P FORWARD DROP
 ```
 
-**Expected behavior:** All four paths fail. Captive portal probe (`GET http://captive.apple.com/hotspot-detect.html`) times out (1s timeout, no redirect returned — no captive portal is present, just a hard block). Client shows CONN-2b: "This network is blocking secure connections." with sub-text "Freewire tried every available method. This network may restrict all VPN traffic." Kill switch does not activate (no tunnel was established). Traffic continues to flow — unprotected — through the network.
+**Expected behavior:** All eight carriers fail. Captive portal probe (`GET http://captive.apple.com/hotspot-detect.html`) times out (1s timeout, no redirect returned — no captive portal is present, just a hard block). Client shows CONN-2b: "This network is blocking secure connections." with sub-text "Freewire tried every available method. This network may restrict all VPN traffic." Kill switch does not activate (no tunnel was established). Traffic continues to flow — unprotected — through the network.
 
 **Note:** To test CONN-2a instead (captive portal detected), run Configuration 5 but configure the gateway to intercept and redirect the HTTP probe request to a portal page. The client should open an in-app browser automatically instead of showing the CONN-2b hard error.
 

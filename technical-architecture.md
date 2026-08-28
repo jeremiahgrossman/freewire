@@ -31,41 +31,67 @@ Some captive portals run a **fully local DNS resolver** that returns NXDOMAIN fo
 
 ## 3. Protocol Fallback Chain
 
-The client attempts each path in order. The first successful path establishes the tunnel. Total time budget for the full chain: under 10 seconds.
+The client attempts carriers in **speed order**, fastest first, and commits to the
+first one that actually **carries traffic** (not merely handshakes — see the
+traffic-verified fall-through below). Total time budget for the full chain: under
+10 seconds. The canonical order is `defaultCandidates()` in
+`tunnel/cmd/freewire-tunnel/transport.go`; keep this diagram in sync with it.
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│  1. HTTP CONNECT probe (port 443)                           │
-│     Fast. Works on portals that expose HTTP CONNECT.        │
-│     ~5% of captive portal networks.                         │
-│     Time budget: 2s                                         │
-├─────────────────────────────────────────────────────────────┤
-│  2. TLS/443 direct                                          │
-│     Connect to Freewire server on port 443 with valid TLS.  │
-│     Works on portals that leave 443 open.                   │
-│     ~80% of captive portal networks.                        │
-│     Time budget: 3s                                         │
-├─────────────────────────────────────────────────────────────┤
-│  3. DNS tunnel                                              │
-│     Encode all traffic as DNS queries/responses.            │
-│     Works wherever DNS forwards unknown domains upstream.   │
-│     ~14% of remaining networks.                             │
-│     Time budget: 3s                                         │
-├─────────────────────────────────────────────────────────────┤
-│  4. ICMP tunnel                                             │
-│     Encode traffic in ICMP echo packets.                    │
-│     Last resort. ~1% of remaining networks.                 │
-│     Time budget: 2s                                         │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│  1. wireguard      WireGuard UDP direct to server:51820.                 │
+│                    Fastest; what an open network lands on immediately.   │
+├─────────────────────────────────────────────────────────────────────────┤
+│  2. udp443         WireGuard straight over UDP/443 (server relays to WG). │
+│                    SAME speed as direct (no TCP-over-TCP); a port portals │
+│                    pass far more often (blocking UDP/443 breaks HTTP/3).  │
+├─────────────────────────────────────────────────────────────────────────┤
+│  3. http_connect   CONNECT through the LOCAL gateway proxy (3128/8080/443)│
+│                    then TLS. Independent of our server; ~5% of portals.   │
+├─────────────────────────────────────────────────────────────────────────┤
+│  4. tls443         Raw TLS to server:443. Works where 443 is left open.   │
+├─────────────────────────────────────────────────────────────────────────┤
+│  5. wss443         WireGuard inside a WebSocket on TLS/443 — looks like a  │
+│                    website; passes "web-443-only" portals that reset raw  │
+│                    TLS. Same port/cert as tls443, one extra round trip.   │
+├─────────────────────────────────────────────────────────────────────────┤
+│  6. cdn_wss        Same WebSocket, but to a CDN edge (CloudFront) that     │
+│                    fronts the server. The ONLY carrier that beats          │
+│                    DESTINATION gating (portal allow-lists the CDN, not us).│
+│                    Skipped unless the server advertised `cdn_host`.        │
+├─────────────────────────────────────────────────────────────────────────┤
+│  7. dns            WireGuard inside DNS queries/responses to our           │
+│                    authoritative server. Survives hard portals that pass   │
+│                    only DNS pre-auth; throttled (~72 Kbps floor) but real. │
+├─────────────────────────────────────────────────────────────────────────┤
+│  8. icmp_udp       WireGuard in ICMP echo payloads. Last resort, for       │
+│                    networks with a fully-local DNS resolver.               │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
+
+Per-path handshake budgets (HTTP CONNECT 2s, TLS/443 3s, DNS 3s, ICMP 2s, plus
+the captive-portal probe) are in `CLAUDE.md` §"Fallback Chain Timeouts".
+
+### Traffic-verified fall-through
+
+Selection does not stop at the first carrier that *handshakes* — it verifies the
+carrier actually carries routed traffic (a real egress self-check). If a carrier
+handshakes but carries nothing once routed (the "connected but dead" failure this
+project lost weeks to), the client restores the machine, excludes that carrier,
+and falls through to the next-fastest. On an open network this fires never and the
+chain lands on `wireguard` immediately.
 
 ### Upgrade after establishment
 
-Once any path establishes a tunnel, the client tests whether faster paths are now reachable through the tunnel. If TLS/443 was blocked by the captive portal but becomes reachable via the DNS tunnel (because the initial DNS connection proved the network can reach Freewire's servers), the client upgrades transparently. The user is never aware of which path is active — they see "Connected."
+Once any path establishes a tunnel, the client tests whether faster paths are now
+reachable through the tunnel and upgrades transparently. The upgrade order is the
+same speed order (`TunnelTransport.priority` in `PathUpgradeManager.swift`, kept in
+lockstep with the Go chain). The user is never aware of which path is active — they
+see "Connected."
 
 ### Captive portal probe (when all paths fail)
 
-If all four paths fail, the client immediately probes whether the cause is an unauthenticated captive portal or a genuine network block. This determines the CONN-2a vs. CONN-2b error state (see `error-states-spec.md`).
+If all eight carriers fail, the client immediately probes whether the cause is an unauthenticated captive portal or a genuine network block. This determines the CONN-2a vs. CONN-2b error state (see `error-states-spec.md`).
 
 **Probe mechanism:**
 
@@ -81,7 +107,7 @@ GET http://captive.apple.com/hotspot-detect.html
 
 **Why `captive.apple.com`:** This is the same endpoint iOS uses internally for captive portal detection. It is well-known, always available, returns a predictable response, and captive portal implementations are already designed to intercept and redirect it.
 
-**Timing:** The probe runs only after all four fallback paths have been exhausted. It adds at most 1 second to the total failure time. It does not run on successful connections.
+**Timing:** The probe runs only after all eight carriers have been exhausted. It adds at most 1 second to the total failure time. It does not run on successful connections.
 
 ### NEHotspotHelper — fully automatic portal authentication
 
@@ -205,7 +231,8 @@ ICMP is the fallback for networks where DNS resolvers are fully local and do not
 │  User Device                                                        │
 │  ┌──────────────┐     ┌────────────────────────────────────────┐   │
 │  │  Freewire    │────►│  Path Selection & Upgrade Manager      │   │
-│  │  Client App  │     │  (HTTP CONNECT → TLS/443 → DNS → ICMP) │   │
+│  │  Client App  │     │  (wg → udp443 → http_connect → tls443   │   │
+│  │              │     │   → wss443 → cdn_wss → dns → icmp_udp)  │   │
 │  └──────────────┘     └──────────────────┬─────────────────────┘   │
 └─────────────────────────────────────────┬┼────────────────────────-┘
                                           ││

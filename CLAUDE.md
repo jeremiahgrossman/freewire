@@ -630,15 +630,17 @@ UserDefaults.standard.set(privateKey.rawRepresentation, forKey: "wg_private_key"
 Tokens are issued blind: the server signs without seeing the unblinded value. After unblinding, spent tokens are submitted with no accompanying device key, IP, or session identifier. The spent token hash record on the server cannot be linked to any device. Do not add any identifier to the redemption request.
 
 ```swift
-// Correct — token redemption carries only the token
+// Correct — token redemption carries only the token and the public key
 POST /v1/peers
-Authorization: PrivacyPass token="<unblinded-token>"
-{ "public_key": "...", "device_name": "..." }
+Authorization: PrivateToken token="<unblinded-token>"
+{ "public_key": "..." }   // public_key ONLY; device_name and client_version were removed
 
 // Wrong — never attach device identifiers to redemption
 POST /v1/peers
-Authorization: PrivacyPass token="<unblinded-token>"
+Authorization: PrivateToken token="<unblinded-token>"
 X-Device-ID: "abc123"  // NEVER — breaks anonymity guarantee
+// Also wrong: a device_name or client_version field in the body — any caller
+// attribute alongside a token is a handle the issuance half can be correlated against
 ```
 
 **4. Error state user-facing copy is specified — do not invent it**  
@@ -667,7 +669,7 @@ product-review-checklist.md       (QA/launch review process — not a coding spe
 | macOS client | Swift, wireguard-go (userspace via utun — no NetworkExtension), pf kill switch via an `SMAppService` privileged helper (**not built yet**; supersedes SMJobBless, deprecated in macOS 13), uTLS for TLS fingerprint rotation, NWPathMonitor for network change detection, Sparkle (auto-update) |
 | iOS client | **Deferred.** Will require Swift, WireGuardKit, NetworkExtension (NEPacketTunnelProvider), and Apple entitlement approval when resumed. |
 | Server | Go, wireguard-go (reference userspace implementation). Runs in Docker for development — see Current State |
-| DNS resolver | Cloudflare 1.1.1.1 (DoH, hardcoded — not user-configurable at launch) |
+| DNS resolver | Cloudflare 1.1.1.1 (DoH). Configurable via `Config.DoHEndpoints` (https-only, failover in order); the default is a Cloudflare failover pair — see "Known gaps". |
 | Hosting | AWS (EC2, CloudFormation, S3, Route 53) |
 | CI/CD | GitHub Actions |
 | macOS distribution | Signed + notarized DMG only. Mac App Store permanently incompatible with direct utun access. |

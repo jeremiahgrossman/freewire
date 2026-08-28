@@ -514,7 +514,7 @@ The fallback chain runs automatically during the Connecting state. The user sees
 
 **CONN-2a: Portal detected — in-app browser flow**
 
-When all four paths fail and the captive portal probe detects an unauthenticated portal (see `error-states-spec.md` §CONN-2a), the app automatically opens an in-app browser sheet showing the portal's authentication page. No error message is shown before the browser appears.
+When all eight carriers fail and the captive portal probe detects an unauthenticated portal (see `error-states-spec.md` §CONN-2a), the app automatically opens an in-app browser sheet showing the portal's authentication page. No error message is shown before the browser appears.
 
 ```
 ┌─────────────────────────────────┐

@@ -77,6 +77,12 @@ Abuse prevention for managed servers, implemented using **Privacy Pass** (RFC 95
 
 ### `network_path_hint`
 
+> ⚠️ **DECLINED — this table does not exist and is not to be built.** The network
+> intelligence feature was deliberately not implemented (a hashed BSSID is a
+> reversible location identifier, and reconnect already remembers the last working
+> transport). See `DECISIONS.md` §NETWORK-INTELLIGENCE and `CLAUDE.md`. Retained
+> below for history only.
+
 A crowdsourced, opt-in database mapping wifi networks to the tunnel path most likely to succeed. Enables the client to skip earlier fallback steps on known networks, reducing time-to-connected.
 
 **Collection is opt-in.** The client only submits a report if the user has enabled "Help improve captive portal detection" in Settings. This setting is off by default and requires an explicit user action to enable. See `privacy-policy.md` §network-intelligence.

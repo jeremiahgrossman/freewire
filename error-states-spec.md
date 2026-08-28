@@ -247,7 +247,7 @@ Errors that occur before a tunnel is established.
 
 Total: ≤11s to CONN-2a or CONN-2b.
 
-After all four paths fail, the client immediately runs a **captive portal probe**: it makes an HTTP request to a known plain-HTTP endpoint (`http://captive.apple.com` or `http://neverssl.com`). The response determines which of two sub-states applies.
+After all eight carriers fail, the client immediately runs a **captive portal probe**: it makes an HTTP request to a known plain-HTTP endpoint (`http://captive.apple.com` or `http://neverssl.com`). The response determines which of two sub-states applies.
 
 ---
 
@@ -417,6 +417,14 @@ Errors caused by missing or revoked OS permissions.
 - Type: **Hard block**
 
 ---
+
+> ⚠️ **PERM-3 and PERM-4 do not match the shipped macOS architecture.** The client
+> uses `wireguard-go` over `utun` directly plus an `SMAppService` privileged helper
+> — there is **no System Extension**, so there is no System-Extension approval or
+> revocation prompt. The real macOS permission surface is the SMAppService helper
+> approval (and it is currently blocked on a Developer ID — see `CLAUDE.md` "Known
+> gaps"). These two states are retained for a possible future NE-based design; do
+> not implement them against the current client.
 
 ### PERM-3 — macOS System Extension approval dismissed
 

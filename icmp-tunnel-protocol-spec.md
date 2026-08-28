@@ -323,15 +323,20 @@ conn, err := net.ListenPacket("ip4:icmp", "0.0.0.0")
 ```
 Requires `CAP_NET_RAW` on Linux. The CloudFormation AMI runs the server binary as root; for production, use `setcap cap_net_raw=ep /usr/local/bin/freewire-server` instead.
 
-### Receiving ICMP on client (iOS/macOS)
+### Receiving ICMP on client (macOS today; iOS deferred)
 
-iOS and macOS do not allow apps to open raw sockets for ICMP without a special entitlement. The NetworkExtension `NEPacketTunnelProvider` can send and receive arbitrary IP packets via the virtual tunnel interface — this is how the ICMP tunnel is implemented on the client side. The NE provider intercepts outbound packets, re-encodes them as ICMP payloads, and sends them via a UDP socket to the server (which then re-wraps them in true ICMP). See §ICMP-over-UDP fallback below.
+**Shipped macOS mechanism:** the client is the Go `freewire-tunnel` binary running
+as a userspace helper (wireguard-go over a `utun` interface, NOT NetworkExtension).
+The ICMP carrier lives in that binary (`tunnel/cmd/freewire-tunnel`, `icmp_client.go`)
+and uses the ICMP-over-UDP approach below — it does not open raw ICMP sockets and
+does not use a `NEPacketTunnelProvider`. (iOS, when resumed, WILL use
+`NEPacketTunnelProvider`; that path is deferred — see `CLAUDE.md` tech stack.)
 
-### ICMP-over-UDP fallback (client only)
+### ICMP-over-UDP (client)
 
-Because iOS/macOS NE providers cannot send raw ICMP directly, the client uses a **ICMP-over-UDP** approach:
+The client uses an **ICMP-over-UDP** approach so it needs no raw-socket entitlement:
 
-- Client sends UDP packets to `vpn.freewire.com:4500` (IKEv2 port, often open on captive portals)
+- Client sends UDP packets to the server's `icmp_udp_port` (default 4500, from `/v1/config`; IKEv2 port, often open on captive portals)
 - The UDP payload is a Freewire ICMP tunnel packet (same format as above)
 - The server receives UDP, extracts the Freewire ICMP payload, and responds in UDP
 

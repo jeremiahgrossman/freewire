@@ -94,7 +94,7 @@ Knowledge base, terminology, and document index for the Freewire VPN project.
 | `sparkle-update-feed-spec.md` | Sparkle appcast format, EdDSA signing, CDN hosting for macOS auto-update | macOS auto-update |
 | `certificate-management.md` | TLS certificate provisioning and renewal for all Freewire domains and signing identities | Certificate lifecycle |
 | `anycast-dns-infrastructure.md` | Anycast DNS PoP deployment, BGP configuration, health monitoring for tunnel.freewire.com | Post-launch DNS tunnel infrastructure |
-| `captive-portal-testing-guide.md` | How to simulate captive portal networks locally and test all four fallback paths | Captive portal testing |
+| `captive-portal-testing-guide.md` | How to simulate captive portal networks locally and test all eight fallback carriers | Captive portal testing |
 | `apple-entitlement-application.md` | Application guidance for the Apple NetworkExtension entitlement | App Store submission prerequisite |
 | `icmp-tunnel-protocol-spec.md` | ICMP tunnel wire protocol: packet format, handshake, encryption, sliding window, rate limiting | ICMP tunnel implementation |
 | `server-dashboard-api-spec.md` | HTTP API for the self-hosted server web dashboard: auth, device management, config/QR generation | Self-hosted dashboard implementation |

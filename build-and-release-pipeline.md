@@ -34,18 +34,19 @@ Example: version `1.2.3`, build `47`
 
 ## Repository Structure
 
+Actual structure (matches `CLAUDE.md` §"Repository Structure"). There is **no
+`ios/` directory and no `FreewireNE/` NetworkExtension target** — iOS and
+NetworkExtension are deferred; macOS uses `wireguard-go` over `utun` directly, with
+a Go helper binary for the transport carriers.
+
 ```
 freewire/
-├── ios/                    # iOS app (Swift)
-│   ├── Freewire/           # App target
-│   ├── FreewireNE/         # NetworkExtension target (NEPacketTunnelProvider)
-│   └── FreewireTests/
 ├── macos/                  # macOS app (Swift)
-│   ├── Freewire/
-│   ├── FreewireNE/
+│   ├── Freewire/           # App target (menu bar UI, settings, onboarding)
+│   ├── FreewireHelper/     # Privileged helper (SMAppService) — pf kill switch. NOT YET BUILT
 │   └── FreewireTests/
-├── shared/                 # Shared Swift package (tunnel logic, protocol, API client)
-│   └── Sources/
+├── tunnel/                 # Go transport helper (freewire-tunnel, freewire-tokens)
+│   └── cmd/
 ├── server/                 # Go server binary
 │   ├── cmd/freewire-server/
 │   ├── internal/
@@ -54,7 +55,9 @@ freewire/
     └── workflows/
 ```
 
-The `shared/` Swift package contains all platform-shared code: the WireGuardKit integration, fallback chain logic, Privacy Pass client, API client, and error state definitions. Both `ios/` and `macos/` import it as a local package.
+Platform-shared client logic (fallback chain, Privacy Pass, API client, error
+states) lives in the Go `tunnel/` helper and the Swift app, not a shared Swift
+package. A `shared/` package and an `ios/` target return only when iOS resumes.
 
 ---
 

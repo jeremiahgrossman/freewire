@@ -8,7 +8,7 @@
 
 ## ⚠️ Before you start
 
-**macOS-first build — NetworkExtension is deferred.** The macOS client uses `wireguard-go` + direct `utun` access instead of `NEPacketTunnelProvider`. No Apple entitlement is required for this path. The tradeoffs: distribution is signed DMG only (no Mac App Store), kill switch is implemented via `pf` firewall through an `SMJobBless` privileged helper, and network change handling uses `NWPathMonitor` instead of NE callbacks.
+**macOS-first build — NetworkExtension is deferred.** The macOS client uses `wireguard-go` + direct `utun` access instead of `NEPacketTunnelProvider`. No Apple entitlement is required for this path. The tradeoffs: distribution is signed DMG only (no Mac App Store), kill switch is implemented via `pf` firewall through an `SMAppService` privileged helper, and network change handling uses `NWPathMonitor` instead of NE callbacks.
 
 **iOS is deferred.** When iOS work resumes, apply for the `NEPacketTunnelProvider` entitlement at that time — approval takes days to weeks. See `apple-entitlement-application.md`.
 
@@ -48,7 +48,7 @@ Read these before writing code:
 | `sparkle-update-feed-spec.md` | Sparkle appcast format, signing, CDN hosting | Required for macOS auto-update |
 | `certificate-management.md` | TLS certificates and Developer ID lifecycle | Required for macOS + managed servers |
 | `anycast-dns-infrastructure.md` | Anycast DNS PoP deployment and BGP for tunnel.freewire.com | Post-launch — launch uses single unicast server in US-East |
-| `captive-portal-testing-guide.md` | Simulated captive portal test environments for all four fallback paths | Required for testing |
+| `captive-portal-testing-guide.md` | Simulated captive portal test environments for all eight carriers | Required for testing |
 | `apple-entitlement-application.md` | NE entitlement application guidance and recommended framing | Required before TestFlight distribution |
 | `icmp-tunnel-protocol-spec.md` | ICMP tunnel wire protocol — packet format, handshake, encryption, pipelining, rate limiting | Required for ICMP tunnel |
 | `server-dashboard-api-spec.md` | HTTP API for self-hosted server web dashboard — auth, device management, QR/config generation | Required for self-hosted dashboard |
@@ -65,7 +65,7 @@ Read these before writing code:
 - **Language:** Swift
 - **WireGuard layer:** `wireguard-go` (userspace) via direct `utun` interface — no WireGuardKit, no NetworkExtension
 - **VPN framework:** None. Tunnel opened via utun socket directly.
-- **Kill switch:** `pf` firewall rules managed by an `SMJobBless` privileged helper (installed once at first launch)
+- **Kill switch:** `pf` firewall rules managed by an `SMAppService` privileged helper (installed once at first launch)
 - **Network change detection:** `NWPathMonitor`
 - **DNS:** DNS over HTTPS (DoH), hardcoded to Cloudflare 1.1.1.1. DNS queries bypass Freewire servers entirely.
 - **TLS fingerprinting:** uTLS or equivalent — browser-mimicking TLS handshake on the TLS/443 path
@@ -172,7 +172,7 @@ All 11 questions are resolved below. Resolutions are also propagated to the rele
    - TLS/443: **3s** (TCP + TLS handshake + first keepalive response)
    - DNS tunnel: **3s** (3 DH handshake round trips at ~1s each)
    - ICMP: **2s** (enough for 3 echo request/reply cycles)
-   - Total: 10s exactly. After all four paths fail, the captive portal probe fires (1s timeout), totaling ≤11s to CONN-2a or CONN-2b.
+   - Total: 10s exactly. After all eight carriers fail, the captive portal probe fires (1s timeout), totaling ≤11s to CONN-2a or CONN-2b.
    - These values are added to `error-states-spec.md` §CONN-2 and `technical-architecture.md` §fallback chain.
 
 2. **"At capacity" signal** — **Resolved.** Already specified in `client-server-api-spec.md`:

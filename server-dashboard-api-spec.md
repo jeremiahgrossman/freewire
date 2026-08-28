@@ -283,7 +283,7 @@ freewire://connect?endpoint=54.210.13.7%3A51820
 
 The Freewire client app handles `freewire://` URI scheme deep links. Scanning the QR code opens the app directly into the self-host connection confirmation screen.
 
-**Device name pre-population:** When the client app completes registration after scanning the QR code, it may include its device model name in the `POST /v1/peers` request (opt-in, user-confirmed during the self-host import confirmation screen). If provided, the server stores it as the `device_name` for that peer in the dashboard device list, pre-populated as the label — so the admin sees "iPhone 16 Pro" instead of a raw key fingerprint. The user is shown "Share your device name with the server admin?" during the import confirmation step and can decline.
+**Device name pre-population:** ⚠️ **SUPERSEDED — this mechanism no longer exists.** `POST /v1/peers` was narrowed to carry `public_key` ONLY; `device_name` (and `client_version`) were removed because any caller attribute alongside a Privacy Pass token is a correlation handle that breaks redemption anonymity (non-negotiable constraint #3; see `server/internal/api/peers_handler.go`). So the redemption request can no longer carry a device name, and the `device_name` field in the device-list response above is unpopulated by any current path. This dashboard/QR flow is Phase-3 deferred; if device labeling is ever built it must use a channel that is NOT the anonymous redemption request (e.g. an admin-set label in the dashboard itself, never a value the client submits with its token).
 
 **Response (404 Not Found):** Config token does not exist.
 
