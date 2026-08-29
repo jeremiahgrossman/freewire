@@ -63,6 +63,35 @@ func TestEssentialsAllowlistAllInvalidIsInactive(t *testing.T) {
 	}
 }
 
+// The activation path the app uses: the allowlist arrives in the stdin config
+// (essentialsConfigAllowlist), which survives sudo unlike an env var.
+func TestEssentialsFromConfig(t *testing.T) {
+	t.Setenv(essentialsEnv, "") // env off, so config is the source
+	essentialsConfigAllowlist = []string{"17.0.0.0/8", "203.0.113.9"}
+	defer func() { essentialsConfigAllowlist = nil }()
+	nets, active := essentialsAllowlist()
+	if !active {
+		t.Fatal("config allowlist should activate essentials mode")
+	}
+	if got := essentialsCIDRs(nets); len(got) != 2 || got[0] != "17.0.0.0/8" || got[1] != "203.0.113.9/32" {
+		t.Fatalf("config allowlist parsed to %v, want [17.0.0.0/8 203.0.113.9/32]", got)
+	}
+}
+
+// The env var is a direct-binary test override: when both are set, env wins.
+func TestEssentialsEnvOverridesConfig(t *testing.T) {
+	t.Setenv(essentialsEnv, "198.51.100.0/24")
+	essentialsConfigAllowlist = []string{"17.0.0.0/8"}
+	defer func() { essentialsConfigAllowlist = nil }()
+	nets, active := essentialsAllowlist()
+	if !active {
+		t.Fatal("should be active")
+	}
+	if got := essentialsCIDRs(nets); len(got) != 1 || got[0] != "198.51.100.0/24" {
+		t.Fatalf("env should override config, got %v, want [198.51.100.0/24]", got)
+	}
+}
+
 func TestEssentialsProbeTarget(t *testing.T) {
 	t.Setenv(essentialsEnv, "17.0.0.0/8,203.0.113.9")
 	nets, _ := essentialsAllowlist()

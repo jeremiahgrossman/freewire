@@ -139,6 +139,22 @@ if [[ -n "${FREEWIRE_DNS_CARRIER_CAP:-}" ]]; then
   \"dns_test_carrier_cap\": ${FREEWIRE_DNS_CARRIER_CAP}"
   echo "    TEST carrier cap: ${FREEWIRE_DNS_CARRIER_CAP} q/s"
 fi
+# Essentials Mode allowlist. Rides in the config (survives sudo, unlike env). =1
+# uses the seed 17.0.0.0/8; otherwise a comma-list of CIDRs/IPs.
+if [[ -n "${FREEWIRE_ESSENTIALS:-}" ]]; then
+  case "$FREEWIRE_ESSENTIALS" in
+    1|default|on) ESS_LIST='"17.0.0.0/8"' ;;
+    *) IFS=',' read -ra ESS_ARR <<< "$FREEWIRE_ESSENTIALS"
+       ESS_LIST=""
+       for e in "${ESS_ARR[@]}"; do
+         e="$(echo "$e" | xargs)"; [ -z "$e" ] && continue
+         ESS_LIST="$ESS_LIST${ESS_LIST:+,}\"$e\""
+       done ;;
+  esac
+  PREFERRED="$PREFERRED,
+  \"essentials_allowlist\": [${ESS_LIST}]"
+  echo "    ESSENTIALS allowlist: ${FREEWIRE_ESSENTIALS}"
+fi
 
 cat > "$STATE/config.json" <<JSON
 {

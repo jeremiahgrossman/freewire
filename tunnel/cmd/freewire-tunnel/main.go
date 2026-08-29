@@ -80,6 +80,15 @@ type Config struct {
 	// field trip. 0 = off. Set only by the test harness; a real server never sends
 	// it.
 	DNSTestCarrierCap int `json:"dns_test_carrier_cap,omitempty"`
+	// EssentialsAllowlist activates Essentials Mode: a destination-allowlist split
+	// tunnel that routes ONLY these CIDRs/IPs into the tunnel and leaves everything
+	// else on the physical path (blackholed by a captive portal). For a
+	// hard-throttled DNS-only café where full-tunnel collapses. This rides in the
+	// CLIENT-assembled stdin config, NOT the server's /v1/config -- the app (or a
+	// test harness) sets it, so the server can never flip a client into reduced
+	// scope. The FREEWIRE_ESSENTIALS env var overrides this for direct binary runs.
+	// Empty = off (full tunnel). See ESSENTIALS-MODE-SPEC.md.
+	EssentialsAllowlist []string `json:"essentials_allowlist,omitempty"`
 	// HTTPProxy is an explicit "host:port" to attempt before probing the
 	// gateway.
 	//
@@ -202,6 +211,10 @@ func main() {
 		os.Exit(1)
 	}
 	cfg.applyDefaults()
+	// Essentials Mode allowlist rides in the client-assembled stdin config; stash
+	// it where setupRouting can read it (which is not passed the whole Config). The
+	// FREEWIRE_ESSENTIALS env var still overrides this for direct binary runs.
+	essentialsConfigAllowlist = cfg.EssentialsAllowlist
 
 	privKeyHex, err := b64ToHex(cfg.PrivateKey)
 	if err != nil {

@@ -30,25 +30,36 @@ const essentialsEnv = "FREEWIRE_ESSENTIALS"
 // netblock, which carries APNs push and iMessage and needs no DNS.
 var essentialsSeed = []string{"17.0.0.0/8"}
 
+// essentialsConfigAllowlist is the allowlist from the client-assembled stdin
+// config (Config.EssentialsAllowlist), set in main after the config is parsed.
+// This is the path the app uses; it survives sudo, unlike an env var, and is NOT
+// the server's /v1/config, so a server cannot flip a client into reduced scope.
+var essentialsConfigAllowlist []string
+
 // essentialsAllowlist returns the parsed CIDR allowlist and whether Essentials
-// Mode is active. Active when FREEWIRE_ESSENTIALS is non-empty:
+// Mode is active. Source order: the FREEWIRE_ESSENTIALS env var (a direct-binary
+// test override) wins; otherwise the stdin config's essentials_allowlist.
 //
 //	FREEWIRE_ESSENTIALS=1                       -> the seed (17.0.0.0/8)
 //	FREEWIRE_ESSENTIALS=17.0.0.0/8,203.0.113.9  -> exactly these (a bare IP = /32)
+//	(config) essentials_allowlist: ["17.0.0.0/8", ...]
 //
 // Invalid entries are reported and skipped; if none parse, the mode is inactive
 // (fail safe to full tunnel rather than silently tunnelling nothing).
 func essentialsAllowlist() (nets []*net.IPNet, active bool) {
-	raw := strings.TrimSpace(os.Getenv(essentialsEnv))
-	if raw == "" {
-		return nil, false
-	}
 	var specs []string
-	switch raw {
-	case "1", "default", "on":
-		specs = essentialsSeed
-	default:
-		specs = strings.Split(raw, ",")
+	if raw := strings.TrimSpace(os.Getenv(essentialsEnv)); raw != "" {
+		switch raw {
+		case "1", "default", "on":
+			specs = essentialsSeed
+		default:
+			specs = strings.Split(raw, ",")
+		}
+	} else {
+		specs = essentialsConfigAllowlist
+	}
+	if len(specs) == 0 {
+		return nil, false
 	}
 	for _, s := range specs {
 		s = strings.TrimSpace(s)
