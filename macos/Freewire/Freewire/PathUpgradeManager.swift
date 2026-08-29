@@ -24,13 +24,26 @@ final class PathUpgradeManager {
 
     private let serverHost: String
     private let wgPort: Int
+    /// DNS-tunnel zone, needed for the `.dns` upgrade probe (server-direct DNS
+    /// handshake). Nil falls back to the helper's default zone, which is correct
+    /// for the default deployment; a custom self-hosted zone left nil only makes
+    /// the probe a false negative (a missed DNS upgrade), never a bad one.
+    private let dnsTunnelDomain: String?
+    /// The rootless tunnel helper, used to run the `.dns` upgrade probe. Injected
+    /// (rather than resolved here) so this type has no dependency on TunnelManager
+    /// and stays compilable on its own for the standalone test harness. Nil
+    /// disables the DNS probe (it reports unreachable), which is safe.
+    private let helperURL: URL?
     private var probeTask: Task<Void, Never>?
     private var currentTransport: TunnelTransport
 
-    init(serverHost: String, wgPort: Int = 51820, currentTransport: TunnelTransport) {
+    init(serverHost: String, wgPort: Int = 51820, currentTransport: TunnelTransport,
+         dnsTunnelDomain: String? = nil, helperURL: URL? = nil) {
         self.serverHost = serverHost
         self.wgPort = wgPort
         self.currentTransport = currentTransport
+        self.dnsTunnelDomain = dnsTunnelDomain
+        self.helperURL = helperURL
     }
 
     func start() {
@@ -125,10 +138,73 @@ final class PathUpgradeManager {
         case .httpConnect:
             return await probeHTTPConnect()
         case .dns:
-            return false // DNS tunnel probe would require full handshake; skip in upgrade manager
+            return await probeDNS()
         case .icmpUDP:
+            // ICMP is the slowest path, so it is never a candidate here (the
+            // candidate filter keeps only paths faster than the current one, and
+            // nothing is slower than ICMP). This arm is unreachable in practice;
+            // it stays false so a future reordering cannot turn it into a probe
+            // that would need raw sockets (root) the app does not have anyway.
             return false
         }
+    }
+
+    /// Probes the DNS tunnel by running the helper's rootless `--dns-probe`,
+    /// which completes the full DNS-carrier handshake against the server plus a
+    /// post-handshake poll and changes no system state, so it is safe on a
+    /// machine in use.
+    ///
+    /// Server-direct (resolver = the server itself): the server IP is pinned
+    /// outside the tunnel, so the probe takes the real DIRECT path rather than
+    /// looping back through the active tunnel, and field testing showed
+    /// server-direct is the DNS path that actually carries traffic (the
+    /// public-recursor path throttles below usable). A full handshake, not a bare
+    /// UDP/53 reachability ping: a false positive tears down a working tunnel to
+    /// rebuild on a DNS path that then fails, so the probe must prove the carrier
+    /// is live, not merely that a datagram left the host.
+    ///
+    /// This is the one slow-path upgrade with a sufficient rootless probe, and it
+    /// fires only from the ICMP tunnel (the sole path slower than DNS). Every
+    /// faster slow-path target -- wireguard, udp443, wss443, cdn_wss -- still
+    /// declines above, because a cheap probe cannot predict whether they carry
+    /// traffic and the connect chain discovers them correctly instead.
+    private func probeDNS() async -> Bool {
+        guard let binary = helperURL else { return false }
+        var args = ["--dns-probe", "--resolver", serverHost]
+        if let zone = dnsTunnelDomain, !zone.isEmpty {
+            args.append(contentsOf: ["--domain", zone])
+        }
+        // The DNS handshake is three round trips at ~1s each; the fallback chain
+        // budgets it at 3s, so hold the probe to the same ceiling rather than the
+        // generic 2s the TCP probes use.
+        return await Self.runProbeBinary(binary, args: args, timeout: 3)
+    }
+
+    /// Runs a rootless helper subcommand off the main actor and reports whether
+    /// it exited 0 within `timeout`, terminating it if it overruns.
+    ///
+    /// Carrier handshake protocols (DNS, ICMP) live in the Go helper; driving its
+    /// `--dns-probe` reuses that tested code rather than reimplementing the
+    /// protocol in Swift. Output is discarded -- the exit status is the whole
+    /// signal, and the helper never logs a client IP.
+    nonisolated private static func runProbeBinary(_ url: URL, args: [String], timeout: TimeInterval) async -> Bool {
+        await Task.detached(priority: .utility) {
+            let p = Process()
+            p.executableURL = url
+            p.arguments = args
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            guard (try? p.run()) != nil else { return false }
+
+            // Enforce the deadline: terminate a probe that overruns rather than
+            // let a stalled handshake hold the upgrade round open. Cancelled if
+            // the process finishes first.
+            let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
+            p.waitUntilExit()
+            killer.cancel()
+            return p.terminationStatus == 0
+        }.value
     }
 
     /// HTTP CONNECT depends on a proxy running on the local gateway, not on the

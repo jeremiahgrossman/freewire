@@ -180,6 +180,20 @@ check(DoHStatus.latestLeak(in: "doh down\nready utun6 10.0.0.2 tls443\ndoh up\n"
 check(DoHStatus.latestLeak(in: "doh up\ndoh down\n") == true,
       "newest line wins in both directions")
 
+// MARK: - Path-upgrade candidate scope (probe .dns / .icmpUDP reasoning)
+
+// The upgrade manager probes only paths FASTER than the current one. That makes
+// DNS an upgrade target solely from ICMP, and ICMP a target from nobody -- which
+// is exactly why probe(.dns) is implemented and probe(.icmpUDP) stays false.
+// Pin it so a priority reorder cannot silently break that reasoning.
+func fasterThan(_ t: TunnelTransport) -> [TunnelTransport] {
+    TunnelTransport.allCases.filter { $0.priority < t.priority }
+}
+check(TunnelTransport.allCases.filter { fasterThan($0).contains(.dns) } == [.icmpUDP],
+      "DNS is a faster-path upgrade candidate only from ICMP")
+check(TunnelTransport.allCases.allSatisfy { !fasterThan($0).contains(.icmpUDP) },
+      "ICMP is never a faster-path upgrade candidate (nothing is slower)")
+
 print("")
 if failures == 0 {
     print("all KillSwitchRules + TunnelTransport + DoHStatus assertions passed")

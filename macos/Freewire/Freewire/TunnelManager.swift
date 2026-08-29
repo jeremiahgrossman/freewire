@@ -547,7 +547,16 @@ final class TunnelManager: ObservableObject {
         // switch away from it -- otherwise a forced DNS field test would drift to
         // TLS/443 the moment a probe found it reachable.
         if Preferences.shared.forceTransport != nil { return }
-        let mgr = PathUpgradeManager(serverHost: serverHost, currentTransport: transport)
+        // The DNS zone for the `.dns` upgrade probe. Read from the cache, which is
+        // saved before this runs on every connect path; nil is a safe fallback to
+        // the helper's default zone. Only relevant when upgrading off the ICMP
+        // tunnel (the sole path from which DNS is a faster target).
+        let mgr = PathUpgradeManager(
+            serverHost: serverHost,
+            currentTransport: transport,
+            dnsTunnelDomain: CachedConnection.load(host: serverHost)?.dnsTunnelDomain,
+            helperURL: Self.tunnelHelperURL
+        )
         mgr.onUpgradeAvailable = { [weak self] faster in
             guard let self else { return }
             self.upgradeTask?.cancel()

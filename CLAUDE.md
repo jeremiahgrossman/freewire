@@ -569,8 +569,19 @@ the moment anyone else connects.
   done and tested (16 assertions); the packaging is not. The UI does not claim
   the kill switch — see `error-states-spec.md` §"Interim". **Resolved:**
   `SMAppService`, and **fail closed**.
-- `PathUpgradeManager` returns false for the DNS and ICMP paths; probing either
-  needs a full handshake.
+- `PathUpgradeManager` now probes the DNS path (2026-08-28): `probe(.dns)` runs
+  the helper's rootless `--dns-probe` (full DNS-carrier handshake + poll,
+  server-direct so it takes the pinned direct path, no system-state change),
+  which fires only when connected on ICMP — the sole path from which DNS is a
+  faster target (asserted in `macos/Tests`). `probe(.icmpUDP)` stays false: ICMP
+  is the slowest path so it is never an upgrade candidate, and an ICMP probe
+  needs raw sockets (root) anyway. The faster slow-path targets — wireguard,
+  udp443, wss443, cdn_wss — still decline by design: a cheap probe cannot predict
+  whether they carry traffic, and the connect chain discovers them correctly.
+  Desk-verified (build + assertions); the live ICMP→DNS upgrade is
+  field-unconfirmed (sessions rarely land on ICMP). NOTE: a real WireGuard/udp443
+  handshake probe would help the COMMON slow-path case (DNS/TLS→fastest) and is
+  the higher-value follow-up; it needs the peer keys the manager does not hold.
 - The kill-switch cluster is real and untouched: the helper replaces the whole
   pf ruleset instead of loading its anchor, `release()` runs `pfctl -F all`,
   `isEngaged()` infers state from a file, and `sanitize()` strips hostile
