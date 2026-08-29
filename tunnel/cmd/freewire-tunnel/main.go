@@ -681,6 +681,11 @@ func isPinned(ip string) bool {
 // remove exactly what was added.
 var bypassRoutes []string
 
+// essentialsRoutes records the allowlist CIDRs routed into the tunnel in
+// Essentials Mode, so cleanup removes exactly what was added (in place of the
+// 0/1+128/1 split-default).
+var essentialsRoutes []string
+
 // pinnedRoutesFile records pinned host routes so a run that dies without
 // cleaning up can be repaired by the next one.
 //
@@ -895,15 +900,36 @@ func setupRouting(tunName, bypassHost, carrierPeer string, carrierResolvers []st
 		return fmt.Errorf("disable ipv6: %w", err)
 	}
 
-	// Cover everything with two halves rather than replacing the default route.
-	for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
-		// -ifscope keeps the entry tied to the tunnel; delete first so a stale
-		// entry from an unclean exit cannot make the add fail.
-		exec.Command(routeBin, "-q", "-n", "delete", "-inet", half).Run() //nolint:errcheck
-		if out, err := exec.Command(routeBin, "-q", "-n", "add", "-inet", half,
-			"-interface", tunName).CombinedOutput(); err != nil {
-			return fmt.Errorf("add %s via %s: %w — %s", half, tunName, err,
-				strings.TrimSpace(string(out)))
+	essNets, essActive := essentialsAllowlist()
+	if essActive {
+		// Essentials Mode: route ONLY the allowlist prefixes into the tunnel, not
+		// 0/1+128/1. Everything else stays on the physical default, where a captive
+		// portal blackholes it -- so a throttled carrier is never asked to carry the
+		// whole machine (the café #3 collapse). See ESSENTIALS-MODE-SPEC.md.
+		essentialsRoutes = nil
+		for _, cidr := range essentialsCIDRs(essNets) {
+			exec.Command(routeBin, "-q", "-n", "delete", "-inet", cidr).Run() //nolint:errcheck
+			if out, err := exec.Command(routeBin, "-q", "-n", "add", "-inet", cidr,
+				"-interface", tunName).CombinedOutput(); err != nil {
+				return fmt.Errorf("essentials: add %s via %s: %w — %s", cidr, tunName, err,
+					strings.TrimSpace(string(out)))
+			}
+			essentialsRoutes = append(essentialsRoutes, cidr)
+		}
+		fmt.Fprintf(os.Stderr,
+			"freewire-tunnel: ESSENTIALS MODE — tunnelling only %v; everything else uses the physical path (blackholed by the portal)\n",
+			essentialsRoutes)
+	} else {
+		// Cover everything with two halves rather than replacing the default route.
+		for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
+			// -ifscope keeps the entry tied to the tunnel; delete first so a stale
+			// entry from an unclean exit cannot make the add fail.
+			exec.Command(routeBin, "-q", "-n", "delete", "-inet", half).Run() //nolint:errcheck
+			if out, err := exec.Command(routeBin, "-q", "-n", "add", "-inet", half,
+				"-interface", tunName).CombinedOutput(); err != nil {
+				return fmt.Errorf("add %s via %s: %w — %s", half, tunName, err,
+					strings.TrimSpace(string(out)))
+			}
 		}
 	}
 
@@ -942,7 +968,23 @@ func setupRouting(tunName, bypassHost, carrierPeer string, carrierResolvers []st
 	// tunnel, and probing one of them would read the bypass route and wrongly
 	// report that routing did not take effect.
 	const routeCheckHost = "192.0.2.1"
-	if iface, err := interfaceForDest(routeCheckHost); err != nil {
+	if essActive {
+		// Scope must be correct BOTH ways: an allowlisted address goes INTO the
+		// tunnel, and a non-allowlisted one stays on the physical path. If a
+		// non-allowlisted address leaked into the tunnel we would be full-tunnelling
+		// under another name, and the throttled carrier would collapse as before.
+		target := essentialsProbeTarget(essNets)
+		if iface, err := interfaceForDest(target); err != nil {
+			return fmt.Errorf("essentials: verify allowlist route: %w", err)
+		} else if iface != tunName {
+			return fmt.Errorf("essentials: allowlisted %s did not route into the tunnel (uses %s, not %s)",
+				target, iface, tunName)
+		}
+		if iface, err := interfaceForDest(routeCheckHost); err == nil && iface == tunName {
+			return fmt.Errorf("essentials: non-allowlisted %s routed INTO the tunnel (uses %s) — scope leak; the whole machine would hit the throttled carrier",
+				routeCheckHost, iface)
+		}
+	} else if iface, err := interfaceForDest(routeCheckHost); err != nil {
 		return fmt.Errorf("verify tunnel route: %w", err)
 	} else if iface != tunName {
 		return fmt.Errorf("tunnel routes did not take effect: traffic to %s still uses %s, not %s",
@@ -971,6 +1013,17 @@ func setupRouting(tunName, bypassHost, carrierPeer string, carrierResolvers []st
 		// release build cannot leave the machine routed through a dead tunnel.
 		fmt.Fprintln(os.Stderr,
 			"freewire-tunnel: --route-no-verify — routes installed, egress self-check SKIPPED (diagnostic)")
+	} else if essActive {
+		// Essentials Mode does not gate on the whole-machine egress probe. That
+		// probe dials a public host on 443 (probeAddr) that is deliberately OUTSIDE
+		// the allowlist, so it is blackholed by design -- failing it would be
+		// correct, not a tunnel fault. And tearing a low-load tunnel down on a
+		// strict deadline IS the full-tunnel collapse this mode exists to avoid.
+		// The status is "Limited connectivity," never "Protected" (see the ready
+		// line below), so there is no false-protection claim to guard against. A
+		// scoped, in-allowlist egress probe is a follow-up, not MVP.
+		fmt.Fprintln(os.Stderr,
+			"freewire-tunnel: essentials — routes installed; NOT gating on the whole-machine egress probe (allowlisted traffic only)")
 	} else if err := verifyTunnelCarriesTraffic(); err != nil {
 		return fmt.Errorf("tunnel routes installed but carry no traffic: %w", err)
 	}
@@ -1201,6 +1254,23 @@ func cleanupRouting(tunName, bypassHost string) {
 	for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
 		exec.Command(routeBin, "-q", "-n", "delete", "-inet", half).Run() //nolint:errcheck
 	}
+
+	// Essentials Mode's allowlist routes, if any. Remove the tracked set from this
+	// run, and -- for a --restore that repairs a crashed run in the same shell --
+	// also re-derive the current env's allowlist so a stale entry cannot survive.
+	toDrop := map[string]bool{}
+	for _, cidr := range essentialsRoutes {
+		toDrop[cidr] = true
+	}
+	if nets, active := essentialsAllowlist(); active {
+		for _, cidr := range essentialsCIDRs(nets) {
+			toDrop[cidr] = true
+		}
+	}
+	for cidr := range toDrop {
+		exec.Command(routeBin, "-q", "-n", "delete", "-inet", cidr).Run() //nolint:errcheck
+	}
+	essentialsRoutes = nil
 
 	// Give IPv6 back. Left off, a crashed tunnel would silently cost the user
 	// v6 connectivity with nothing on screen to explain it.
