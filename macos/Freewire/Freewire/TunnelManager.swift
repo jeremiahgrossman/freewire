@@ -104,13 +104,39 @@ final class TunnelManager: ObservableObject {
     /// instead of "Protected" when this is set. Reset in killTunnel.
     @Published private(set) var essentialsActive = false
 
-    /// The allowlist to send the helper when Essentials Mode is on, else nil (full
-    /// tunnel). Records `essentialsActive` so the connected panel reflects the real
+    /// A one-shot Essentials Mode request from the in-flow offer (the "try
+    /// messaging & email only" button on a portal block), so a user can try it on
+    /// this network without turning the Settings toggle on for every network. Set
+    /// by connectEssentials(); cleared on disconnect (killTunnel).
+    private var tryEssentialsOnce = false
+
+    /// Whether the LAST connect attempt was built in Essentials Mode. The in-flow
+    /// offer hides itself when the failed attempt already tried essentials, so the
+    /// user is not offered the same thing that just failed.
+    @Published private(set) var lastAttemptUsedEssentials = false
+
+    /// The allowlist to send the helper when Essentials Mode is on (the Settings
+    /// toggle OR a one-shot in-flow request), else nil (full tunnel). Records
+    /// `essentialsActive`/`lastAttemptUsedEssentials` so the panel reflects the real
     /// scope and never falsely shows "Protected."
     private func essentialsConfig() -> [String]? {
-        guard Preferences.shared.essentialsMode else { essentialsActive = false; return nil }
-        essentialsActive = true
-        return Preferences.shared.essentialsAllowlist
+        let on = Preferences.shared.essentialsMode || tryEssentialsOnce
+        essentialsActive = on
+        lastAttemptUsedEssentials = on
+        return on ? Preferences.shared.essentialsAllowlist : nil
+    }
+
+    /// True when the in-flow "try messaging & email only" offer is worth showing:
+    /// the last attempt was NOT already essentials (else it just failed), and the
+    /// Settings toggle is off (else every connect already tries it).
+    var canOfferEssentials: Bool {
+        !lastAttemptUsedEssentials && !Preferences.shared.essentialsMode
+    }
+
+    /// One-shot: retry the connection in Essentials Mode for this network only.
+    func connectEssentials() async {
+        tryEssentialsOnce = true
+        await connect()
     }
 
     private let api: ServerAPI
@@ -788,7 +814,10 @@ final class TunnelManager: ObservableObject {
     private func killTunnel() async {
         // The next connection re-derives essentials scope from its own config; a
         // stale flag here would mislabel a later full-tunnel connection as limited.
+        // Clear the one-shot too: a fresh disconnect ends the "essentials on this
+        // network" session, so the next manual connect starts as full tunnel.
         essentialsActive = false
+        tryEssentialsOnce = false
         // Primary teardown: close the helper's stdin. It exits on EOF and runs
         // its own cleanup, with no privilege needed -- so this works even when the
         // sudo `--stop` below cannot authenticate. The `--stop` stays as a backup

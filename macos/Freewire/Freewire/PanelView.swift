@@ -410,6 +410,17 @@ private struct CaptivePortalBody: View {
             }
             .buttonStyle(PrimaryButtonStyle())
             .frame(maxWidth: .infinity)
+            // In-flow Essentials offer: on a portal that leaves only a throttled
+            // carrier, the user can get messaging + email through WITHOUT logging
+            // in to the network. Offered only when this attempt was not already
+            // essentials.
+            if tunnelManager.canOfferEssentials {
+                Button("Try messaging & email only") {
+                    Task { await tunnelManager.connectEssentials() }
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                .frame(maxWidth: .infinity)
+            }
             Button("Cancel") {
                 Task { await tunnelManager.disconnect() }
             }
@@ -439,6 +450,16 @@ private struct NetworkBlockBody: View {
             }
             .buttonStyle(PrimaryButtonStyle())
             .frame(maxWidth: .infinity)
+            // In-flow Essentials offer: a network that blocks a full VPN may still
+            // pass a throttled carrier that can carry messaging + email. Offered
+            // only when the failed attempt was not already essentials.
+            if tunnelManager.canOfferEssentials {
+                Button("Try messaging & email only") {
+                    Task { await tunnelManager.connectEssentials() }
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                .frame(maxWidth: .infinity)
+            }
             Button("Disconnect") {
                 Task { await tunnelManager.disconnect() }
             }
