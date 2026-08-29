@@ -3,8 +3,11 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
@@ -121,6 +124,16 @@ func probeBattery(args []string) int {
 		func() (net.Conn, error) { return tryHTTPConnect(cfg) },
 		"asks the LOCAL gateway for a CONNECT proxy; independent of our server"), true})
 
+	// 3b. TCP/80: a CANDIDATE (not built). Worth a line for a reason peculiar to
+	// captive portals: a portal MUST do something with :80 to serve its own
+	// redirect, and one that transparently PROXIES it rather than dropping it
+	// will forward a Host-carrying request to our origin -- which a WebSocket
+	// upgrade away is a carrier. The probe fetches a magic path and checks the
+	// echoed nonce, so a portal's own login page answering on :80 reads as a
+	// miss, not a pass.
+	rows = append(rows, row{"TCP/80 (HTTP, candidate)", reportHTTP80(server),
+		false})
+
 	// 4. tls443: a raw TLS session to our IP on 443.
 	rows = append(rows, row{"raw TLS/443", reportCarrier("raw TLS/443",
 		func() (net.Conn, error) { return tryTLS443(cfg) },
@@ -152,6 +165,24 @@ func probeBattery(args []string) int {
 	// queries). ICMP needs raw sockets (root), so it is NOT in this battery -- run
 	// probe-transports.sh with the passwordless-sudo rule for the ICMP carrier.
 	rows = append(rows, row{"DNS/53 (server-direct)", reportDNS(cfg, server), true})
+
+	// 7b. TCP/53: a CANDIDATE (not built) and the highest-value unanswered
+	// question in this battery. Our DNS carrier is UDP-only on both ends, and
+	// what throttles it is a QUERY rate -- the client's AIMD limiter and a
+	// recursor's unique-name forwarding cap both meter queries, not bytes, and
+	// café #3 died at queue 256/256 with the carrier itself showing headroom.
+	// DNS-over-TCP (RFC 7766) carries 64KB messages against ~1232 usable bytes
+	// per EDNS0 UDP exchange, so it moves far more payload per query. Whether a
+	// portal that allow-lists UDP/53 also passes TCP/53 has never been measured.
+	rows = append(rows, row{"TCP/53 (DNS-over-TCP)",
+		reportTCPProbe("TCP/53 (DNS-over-TCP)", net.JoinHostPort(server, "53"),
+			"~50x payload per query vs UDP/53; the query rate is what throttles us"), false})
+
+	// 7c. TCP/853: a CANDIDATE (not built). DoT's port, which walled gardens
+	// sometimes pass because Android Private DNS breaks without it.
+	rows = append(rows, row{"TCP/853 (DoT-class)",
+		reportTCPProbe("TCP/853 (DoT-class)", net.JoinHostPort(server, "853"),
+			"portals sometimes pass it so Android Private DNS keeps working"), false})
 
 	// IPv6 egress: a whole-address-family bypass IF a v4-only portal leaks v6. The
 	// client carrier (leak-safe v6 routing) is NOT built yet, so this is a
@@ -227,6 +258,16 @@ func probeBattery(args []string) int {
 		case "IPv6 egress":
 			if r.open {
 				fmt.Fprintln(os.Stderr, "  *** IPv6 egress reaches our server: a v6 WireGuard endpoint would run at full speed here. ***")
+			}
+		case "TCP/53 (DNS-over-TCP)":
+			if r.open {
+				fmt.Fprintln(os.Stderr, "  *** TCP/53 reaches our server: a DNS-over-TCP carrier would move far more per query")
+				fmt.Fprintln(os.Stderr, "      than the UDP/53 carrier, whose ceiling is the QUERY rate, not the byte rate. ***")
+			}
+		case "TCP/80 (HTTP, candidate)":
+			if r.open {
+				fmt.Fprintln(os.Stderr, "  *** TCP/80 reaches OUR origin: this portal proxies or passes :80, so a plain-HTTP")
+				fmt.Fprintln(os.Stderr, "      WebSocket carrier would work here even though 443 does not. ***")
 			}
 		}
 	}
@@ -497,4 +538,143 @@ func noteOrBlocked(err error) string {
 		return trimErr(err)
 	}
 	return "blocked (no reply)"
+}
+
+// reportTCPProbe opens a TCP connection to addr and runs the same magic probe
+// the UDP lines run, against the server's TCP ProbeResponder.
+//
+// Why the magic exchange and not a bare connect: a captive portal that
+// intercepts a port answers the SYN itself, so a successful dial proves only
+// that SOMETHING accepted, not that we reached our server. Echoing our nonce is
+// what distinguishes our origin from the portal. This is the same reason
+// reportDNS runs a full handshake rather than a reachability ping.
+func reportTCPProbe(label, addr, note string) bool {
+	rtt, ok, err := tcpReachProbe(addr, 3*time.Second)
+	if !ok {
+		// Deliberately NOT recorded in the block accounting, matching the other
+		// candidate probes (UDP/123, IPv6). These ports are answered only by a
+		// server built after 2026-08-28, so before a redeploy they fail on OUR
+		// side, and counting them would print "hard L3 ACL" on an open network.
+		// The inline tag still reports how each was blocked.
+		fmt.Fprintf(os.Stderr, "  %-24s %-11s %s%s\n", label, "-- no", blockTag(err), noteOrBlocked(err))
+		return false
+	}
+	fmt.Fprintf(os.Stderr, "  %-24s %-11s %s\n", label,
+		fmt.Sprintf("OK %dms", rtt.Milliseconds()), note)
+	return true
+}
+
+// tcpReachProbe sends probeMagic+nonce (padded to the responder's minimum) over
+// TCP and waits for the echoed nonce.
+//
+// A reply that does not echo our nonce is NOT a pass: it means something other
+// than our server accepted the connection, which on a captive portal is the
+// expected interception, not reachability. That case returns a nil error, since
+// "answered by the wrong host" is a portal behaviour rather than a transport
+// error, and classifying it as a block kind would misreport what happened.
+func tcpReachProbe(addr string, timeout time.Duration) (time.Duration, bool, error) {
+	conn, err := net.DialTimeout("tcp", addr, timeout)
+	if err != nil {
+		return 0, false, err
+	}
+	defer conn.Close()
+
+	nonce := make([]byte, probeNonceLen)
+	if _, err := rand.Read(nonce); err != nil {
+		return 0, false, err
+	}
+	req := make([]byte, 0, probeMinRequest)
+	req = append(req, probeMagic...)
+	req = append(req, nonce...)
+	for len(req) < probeMinRequest {
+		req = append(req, 0)
+	}
+
+	start := time.Now()
+	conn.SetDeadline(time.Now().Add(timeout)) //nolint:errcheck
+	if _, err := conn.Write(req); err != nil {
+		// A write that fails after a successful dial is a mid-stream reject,
+		// which classifyBlock reads as content gating -- worth surfacing.
+		return 0, false, err
+	}
+	want := len(probeMagic) + probeNonceLen
+	resp := make([]byte, want)
+	if _, err := io.ReadFull(conn, resp); err != nil {
+		// A portal that accepts the SYN and then says nothing (or resets) lands
+		// here. Return the error so the block kind is classified.
+		return 0, false, err
+	}
+	if bytes.HasPrefix(resp, probeMagic) && bytes.Equal(resp[len(probeMagic):want], nonce) {
+		return time.Since(start), true, nil
+	}
+	return 0, false, nil
+}
+
+// httpProbePath must match server/internal/transport/probe.go's HTTPProbePath.
+const httpProbePath = "/.freewire-probe"
+
+// reportHTTP80 fetches the magic path over plain HTTP on port 80 and checks the
+// echoed nonce.
+//
+// Port 80 cannot use the raw magic protocol: on an ACME deployment autocert owns
+// that port for the HTTP-01 challenge, so our responder rides along as its
+// fallback handler and speaks HTTP. That is also the right shape for the
+// question being asked -- a portal that transparently proxies :80 forwards HTTP,
+// not arbitrary bytes, so an HTTP request is what would actually get through.
+func reportHTTP80(server string) bool {
+	const label = "TCP/80 (HTTP, candidate)"
+	start := time.Now()
+	ok, detail := httpProbe(net.JoinHostPort(server, "80"))
+	if !ok {
+		fmt.Fprintf(os.Stderr, "  %-24s %-11s %s\n", label, "-- no", detail)
+		return false
+	}
+	fmt.Fprintf(os.Stderr, "  %-24s %-11s %s\n", label,
+		fmt.Sprintf("OK %dms", time.Since(start).Milliseconds()),
+		"the portal passes or proxies :80 to us; a plain-HTTP WS carrier would work")
+	return true
+}
+
+// httpProbeOK is httpProbe's boolean half, for tests.
+func httpProbeOK(hostport string) bool {
+	ok, _ := httpProbe(hostport)
+	return ok
+}
+
+// httpProbe fetches the magic path from hostport and reports whether OUR origin
+// answered, plus a human-readable reason when it did not.
+func httpProbe(hostport string) (bool, string) {
+	nonce := make([]byte, probeNonceLen)
+	if _, err := rand.Read(nonce); err != nil {
+		return false, trimErr(err)
+	}
+	url := fmt.Sprintf("http://%s%s?nonce=%s", hostport, httpProbePath, hex.EncodeToString(nonce))
+
+	// No redirect following: a portal's answer to :80 is a redirect to its login
+	// page, and chasing it would turn an interception into a 200 that looks like
+	// a pass. The nonce check would still catch it, but not following makes the
+	// intent explicit and keeps the probe from touching the portal's login host.
+	client := &http.Client{
+		Timeout:       3 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	resp, err := client.Get(url)
+	if err != nil {
+		// Not recorded in the block accounting: see reportTCPProbe. Port 80
+		// answers the probe only on a server built after 2026-08-28.
+		return false, blockTag(err) + trimErr(err)
+	}
+	defer resp.Body.Close()
+
+	want := len(probeMagic) + probeNonceLen
+	body := make([]byte, want)
+	if _, err := io.ReadFull(resp.Body, body); err != nil ||
+		!bytes.HasPrefix(body, probeMagic) || !bytes.Equal(body[len(probeMagic):want], nonce) {
+		// Reached something on :80, but not us. On a captive portal this is the
+		// normal case (the login page), so it is reported as a miss with the
+		// reason rather than as a transport error -- it is portal behaviour, not
+		// a block kind, and counting it as one would skew the verdict.
+		return false, fmt.Sprintf("answered by something else (HTTP %d), not our origin", resp.StatusCode)
+	}
+	return true, ""
 }

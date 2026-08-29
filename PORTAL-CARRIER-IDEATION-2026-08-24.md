@@ -328,6 +328,58 @@ Reflection/triangular-routing is a real technique class for covert *signaling*
 physics (NAT + anti-spoofing) and on the unidirectional-blind property, not on
 portal policy.
 
+## Addendum (2026-08-28): three ports the sweep never asked about
+
+The two research waves above were thorough on *technique* and exhausted the
+published field for content evasion. They were not exhaustive on *measurement*:
+three TCP ports were never probed, and the highest-value one was never even
+noticed as a gap.
+
+- **TCP/53 (DNS-over-TCP, RFC 7766).** The DNS carrier is UDP-only on both ends
+  and always has been. This is the gap that matters, because everything that
+  throttles the DNS carrier meters **queries, not bytes**: the client's AIMD
+  limiter paces in-flight queries, and a recursor's documented cap is on unique
+  names forwarded per second. Café #3 confirmed the shape — `queue 256/256`,
+  tail-drop, while the carrier itself showed ~27 KB/s and `err 0/s`. DNS-over-TCP
+  carries 64KB messages behind a 2-byte length prefix against ~1232 usable bytes
+  per EDNS0 UDP exchange, and drops most of the base32 QNAME inflation. Same
+  round trips, far more payload. Whether portals that allow-list UDP/53 also pass
+  TCP/53 is a **policy question, Class B above: probe, do not assume.**
+- **TCP/853 (DoT-class).** Sometimes passed so Android Private DNS keeps working.
+- **TCP/80.** A portal MUST do something with :80 to serve its own redirect. One
+  that transparently PROXIES rather than drops it will forward a Host-carrying
+  request to our origin, which is a WebSocket upgrade away from a carrier. The
+  battery probed `http_connect` (an explicit proxy on the gateway) but never
+  plain :80 to us.
+
+All three now have probe lines and a server-side responder, deployed and
+verified passing on an open network. The `--walled-garden` survey remains
+TCP/443-only and could usefully be extended to 80 and 53.
+
+**A correction to how this doc talks about rate limits.** "No published
+technique raises a recursor's forwarding rate" is true and stays true, but it
+should not be read as "the cap cannot be got around." A limiter is never
+widenable and is often *escapable*, because it is always keyed on something:
+
+| keyed on | escapable? |
+|---|---|
+| client (MAC/IP) | no — MAC cloning is macOS-broken and steals a paid session |
+| destination / flow | yes — the multi-IP diversity lead above |
+| protocol (a DNS ALG counting queries) | yes — TCP/53 may not be counted at all |
+| packets/sec rather than bits/sec | yes — fewer, larger packets |
+
+Café #3's signature (0% loss to a queue-full cliff at ~27 KB/s) fits every row,
+so which key is in use is unmeasured. Three of the four escape routes run
+through the new probe lines.
+
+**Also recorded, not built: TC-bit-forced recursor TCP fallback.** On the
+recursor path the ceiling caps *query rate*, not response size. An authoritative
+answer with TC=1 makes the recursor re-ask over TCP/53 to us, which can return up
+to 64KB in that one exchange. Downstream capacity per permitted query rises by
+roughly 50x with the query rate untouched. Upstream stays capped, but an
+asymmetric carrier is fine for browsing. Testable at the desk against a public
+recursor, no field trip needed.
+
 ## The honest meta-point
 
 Prevalence on the specific venues we visit is **unmeasured for every idea**, and

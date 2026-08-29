@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -61,10 +62,17 @@ func main() {
 	// One TLS configuration for the whole process, shared by the API and the
 	// TLS/443 transport. Building it twice would start two ACME managers racing
 	// for the port-80 challenge responder.
+	//
+	// The probe responder is built here rather than at its own wiring below
+	// because the ACME manager needs its port-80 handler: autocert owns :80 for
+	// the HTTP-01 challenge, so the only way the TCP/80 reachability probe can
+	// be answered on an ACME server is as autocert's fallback handler.
+	probe := transport.NewProbeResponder(log)
 	tlsCfg, err := certs.Build(cfg.TLSCertFile, cfg.TLSKeyFile, certs.ACMEOptions{
-		Domain:   cfg.ACMEDomain,
-		Email:    cfg.ACMEEmail,
-		CacheDir: cfg.ACMECacheDir,
+		Domain:       cfg.ACMEDomain,
+		Email:        cfg.ACMEEmail,
+		CacheDir:     cfg.ACMECacheDir,
+		HTTPFallback: probe.HTTPProbeHandler(),
 	}, log)
 	if err != nil {
 		log.Fatal("build tls config", zap.Error(err))
@@ -157,10 +165,44 @@ func main() {
 	// listener above -- including UDP/443, now owned by the carrier above -- are
 	// dropped rather than fought over.
 	if probePorts := safeProbePorts(cfg, log); len(probePorts) > 0 {
-		probe := transport.NewProbeResponder(log)
 		go func() {
 			if err := probe.Run(ctx, probePorts); err != nil {
 				log.Error("probe responder error", zap.Error(err))
+			}
+		}()
+	}
+
+	// The TCP half of the same survey. TCP/53 and TCP/853 are ports the field
+	// has never been asked about: the DNS carrier is UDP-only on both ends, and
+	// whether a portal that allow-lists UDP/53 also passes TCP/53 decides
+	// whether a much higher-payload-per-query DNS carrier is even possible here.
+	if probeTCPPorts := safeProbeTCPPorts(cfg, log); len(probeTCPPorts) > 0 {
+		go func() {
+			if err := probe.RunTCP(ctx, probeTCPPorts); err != nil {
+				log.Error("probe responder error (tcp)", zap.Error(err))
+			}
+		}()
+	}
+
+	// Port 80 answers the probe too. With ACME on, that is autocert's fallback
+	// handler wired above; with ACME off nothing listens there at all, so the
+	// responder brings up its own server -- otherwise the TCP/80 line would read
+	// "blocked" on every self-hosted deployment regardless of the portal.
+	if cfg.ACMEDomain == "" {
+		go func() {
+			srv := &http.Server{
+				Addr:              ":80",
+				Handler:           probe.HTTPProbeHandler(),
+				ReadHeaderTimeout: 10 * time.Second,
+			}
+			go func() {
+				<-ctx.Done()
+				srv.Close() //nolint:errcheck
+			}()
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				// Port 80 needs privilege and is optional; a failure costs one
+				// probe line, not the server.
+				log.Warn("probe responder :80 unavailable", zap.Error(err))
 			}
 		}()
 	}
@@ -198,6 +240,31 @@ func safeProbePorts(cfg *config.Config, log *zap.Logger) []int {
 	for _, p := range *cfg.ProbePorts {
 		if reserved[p] {
 			log.Warn("probe port collides with an existing UDP listener; skipping", zap.Int("port", p))
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// safeProbeTCPPorts returns the configured TCP probe ports minus any that would
+// collide with a TCP listener the server already runs. TLS/443 serves the
+// tls443 and wss443 carriers and the API's TLS port, and :80 is the ACME
+// HTTP-01 responder (which answers the probe via HTTPProbeHandler instead), so
+// both are dropped with a warning rather than fought over.
+func safeProbeTCPPorts(cfg *config.Config, log *zap.Logger) []int {
+	if cfg.ProbeTCPPorts == nil {
+		return nil
+	}
+	reserved := map[int]bool{
+		cfg.TLSPort: true, // TCP/443: tls443 + wss443 carriers
+		cfg.APIPort: true,
+		80:          true, // ACME HTTP-01 / the HTTP probe handler
+	}
+	var out []int
+	for _, p := range *cfg.ProbeTCPPorts {
+		if reserved[p] {
+			log.Warn("tcp probe port collides with an existing TCP listener; skipping", zap.Int("port", p))
 			continue
 		}
 		out = append(out, p)

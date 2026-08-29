@@ -26,6 +26,16 @@ const DefaultDNSTunnelDomain = "t.pinghop.net"
 // probes through that carrier instead). See PORTAL-CARRIER-IDEATION-2026-08-24.md.
 var DefaultProbePorts = []int{443, 123}
 
+// DefaultProbeTCPPorts are the TCP ports the reachability responder answers on
+// when a config names none. Both are unmeasured questions the field has never
+// been asked: TCP/53 is DNS-over-TCP (RFC 7766), whose 64KB messages would move
+// far more payload per query than the UDP carrier's ~1232 bytes -- and both our
+// AIMD limiter and a recursor's forwarding cap meter queries, not bytes. TCP/853
+// is the DoT port, which walled gardens sometimes pass because Android Private
+// DNS breaks without it. Neither collides with an existing TCP listener (TLS
+// owns 443; ACME owns 80). See PORTAL-CARRIER-IDEATION-2026-08-24.md.
+var DefaultProbeTCPPorts = []int{53, 853}
+
 type Config struct {
 	PrivateKey       string `json:"private_key"`
 	PublicKey        string `json:"public_key"`
@@ -51,6 +61,13 @@ type Config struct {
 	// served by another listener must not appear here. nil -> the default set
 	// (DefaultProbePorts); an explicit [] disables the responder.
 	ProbePorts *[]int `json:"probe_ports"`
+
+	// ProbeTCPPorts are TCP ports on which the server answers the same
+	// magic-gated reachability probe, so a client can learn whether a portal
+	// passes TCP to THIS server there. Ports already served by another listener
+	// must not appear here. nil -> DefaultProbeTCPPorts; an explicit [] disables
+	// the TCP responder.
+	ProbeTCPPorts *[]int `json:"probe_tcp_ports"`
 
 	// DNSTunnelDomain is the authoritative zone this server answers for and
 	// advertises to clients. It must be delegated to this host's public IP (an
@@ -166,6 +183,10 @@ func (c *Config) applyDefaults() {
 	if c.ProbePorts == nil {
 		d := append([]int(nil), DefaultProbePorts...)
 		c.ProbePorts = &d
+	}
+	if c.ProbeTCPPorts == nil {
+		d := append([]int(nil), DefaultProbeTCPPorts...)
+		c.ProbeTCPPorts = &d
 	}
 	if c.DNSTunnelDomain == "" {
 		c.DNSTunnelDomain = DefaultDNSTunnelDomain

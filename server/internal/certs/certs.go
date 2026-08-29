@@ -29,6 +29,12 @@ type ACMEOptions struct {
 	Domain   string
 	Email    string
 	CacheDir string
+
+	// HTTPFallback, when set, handles requests on port 80 that are NOT ACME
+	// HTTP-01 challenges. It exists so the reachability probe can answer on
+	// port 80, which autocert would otherwise own outright on an ACME server.
+	// nil keeps autocert's default (redirect to HTTPS).
+	HTTPFallback http.Handler
 }
 
 // Build returns the TLS configuration for all listeners.
@@ -50,7 +56,7 @@ func Build(certFile, keyFile string, acme ACMEOptions, log *zap.Logger) (*tls.Co
 		go func() {
 			srv := &http.Server{
 				Addr:              ":80",
-				Handler:           m.HTTPHandler(nil),
+				Handler:           m.HTTPHandler(acme.HTTPFallback),
 				ReadHeaderTimeout: 10 * time.Second,
 			}
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

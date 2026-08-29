@@ -128,6 +128,52 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   IP-only MVP against the `FREEWIRE_DNS_CARRIER_CAP` desk throttle repro (no café
   needed); (3) field-validate. Do not build blind — routing changes have broken
   the machine before.
+- **THREE NEW PROBE LINES ADDED AND DEPLOYED (2026-08-28): TCP/53, TCP/853,
+  TCP/80.** Live on the server; all three verified passing end to end from the
+  client on an open network, so a `-- no` at a café is now the portal's answer
+  and not ours. The DNS
+  carrier is UDP-only on both ends (client `net.DialTimeout("udp", ...)`,
+  `dns_client.go`; server `net.ListenPacket("udp", ...)`, `dns_server.go`), and
+  TCP/53 had never been tried or even probed. It matters because **what throttles
+  the DNS carrier is a QUERY rate, not a byte rate** — the client's AIMD limiter
+  paces in-flight *queries*, and a recursor's cap is on *unique names forwarded*.
+  Café #3 died at `queue 256/256` with the carrier itself showing headroom
+  (~27 KB/s, `err 0/s`). DNS-over-TCP (RFC 7766) carries 64KB messages against
+  ~1232 usable bytes per EDNS0 UDP exchange, so it moves far more payload per
+  query. TCP/853 is the DoT port (portals sometimes pass it so Android Private
+  DNS keeps working). TCP/80 is worth a line because a portal MUST do something
+  with :80 to serve its redirect, and one that transparently PROXIES it forwards
+  a Host-carrying request to our origin.
+  **Server side (built, untested in the field):** `ProbeResponder.RunTCP` answers
+  the same magic-gated probe over TCP on `DefaultProbeTCPPorts = {53, 853}`;
+  `HTTPProbeHandler` answers `/.freewire-probe?nonce=` on :80, wired as
+  autocert's fallback handler (autocert owns :80 for HTTP-01) and as a standalone
+  :80 server when ACME is off. `launch-aws.sh` opens tcp/53 + tcp/853 (v4 and v6).
+  **Client side:** three candidate rows in `--probe-battery`. Each verifies the
+  echoed nonce rather than accepting a bare connect, so a portal intercepting the
+  port reads as a MISS — this is why TCP/80 against the current live server
+  correctly reports `answered by something else (HTTP 302), not our origin`.
+  Candidate rows deliberately do NOT feed the block accounting (matching UDP/123
+  and IPv6): before the redeploy they fail on OUR side, and counting them printed
+  a false "hard L3 ACL" verdict on an open network.
+  **Deployed 2026-08-28 via `deploy/launch-aws.sh` (pinned key unchanged,
+  `4MZT9TPG…S2DA=`).** Verified after the redeploy: `ss` shows TCP 53/80/853
+  bound by freewire-server; the battery returns `TCP/53 OK 67ms`,
+  `TCP/853 OK 65ms`, `TCP/80 OK 143ms`; the Let's Encrypt cert on
+  `origin.pinghop.net` is intact (valid to 2026-11-23) and the probe path echoes
+  correctly on the ACME host, so wiring the probe handler as autocert's fallback
+  did not disturb HTTP-01; and `cdn_wss` still completes through CloudFront
+  (edge 3.163.157.40). Also verified pre-deploy: `-race` tests in both modules
+  and wire-contract parity tests pinning `/.freewire-probe` and the magic
+  constants across the two modules.
+  **Why TCP/53 matters more than "more bytes per query":** a portal's cap is
+  never widenable, but it is often ESCAPABLE, because every limiter is keyed on
+  something. Keyed per-client (MAC/IP) it is closed to us. Keyed per-destination
+  or per-flow, multi-IP diversity escapes it. Keyed per-protocol (a DNS ALG
+  counting queries) or on packets/sec rather than bits/sec, TCP/53 escapes it
+  outright rather than merely carrying more. Our café data does not distinguish
+  which key is in use — 0% loss to a queue-full cliff fits all of them — so this
+  is a measurement question the new lines now answer.
 - **Every field test runs the full carrier battery.** `testing/cafe-run.sh`
   surveys ALL 8 shipped carriers so a portal's support map is complete: the
   rootless probe battery covers 7/8 (wireguard, http_connect, tls443, wss443,
