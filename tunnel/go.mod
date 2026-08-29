@@ -3,6 +3,7 @@ module github.com/freewire/tunnel
 go 1.25.0
 
 require (
+	github.com/cloudflare/circl v1.6.5
 	github.com/refraction-networking/utls v1.8.2
 	golang.org/x/crypto v0.54.0
 	golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446
@@ -10,7 +11,6 @@ require (
 
 require (
 	github.com/andybalholm/brotli v1.0.6 // indirect
-	github.com/cloudflare/circl v1.6.5 // indirect
 	github.com/klauspost/compress v1.17.4 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
