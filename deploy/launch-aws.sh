@@ -103,10 +103,18 @@ open_port udp 4500  'ICMP/UDP tunnel'
 # probes, so an open port here is not an NTP or QUIC service.
 open_port udp 443   'probe responder (would-be QUIC carrier)'
 open_port udp 123   'probe responder (would-be NTP carrier)'
-# ACME HTTP-01 challenge. Only used when acme_domain is configured (needed for a
-# publicly trusted origin certificate, which CloudFront requires); the server
-# does not listen on 80 otherwise, so the rule is inert until then.
-open_port tcp 80    'ACME HTTP-01 challenge'
+# ACME HTTP-01 challenge (needed for a publicly trusted origin certificate,
+# which CloudFront requires). Port 80 also answers the TCP/80 reachability probe
+# -- as autocert's fallback handler when ACME is on, and as a standalone
+# responder when it is off -- so the rule is live either way now.
+open_port tcp 80    'ACME HTTP-01 challenge (also answers the TCP/80 probe)'
+# TCP probe responder. The DNS carrier is UDP-only on both ends, so whether a
+# portal that allow-lists UDP/53 also passes TCP/53 has never been measured --
+# and DNS-over-TCP moves far more payload per query, which is what throttles us.
+# Same rule as the UDP probe ports: without the ingress rule the battery reports
+# these blocked everywhere and the carrier decision turns on a false negative.
+open_port tcp 53    'probe responder (would-be DNS-over-TCP carrier)'
+open_port tcp 853   'probe responder (would-be DoT-class carrier)'
 
 # IPv6 ingress, mirroring the v4 ports, so a client on a v6-capable network can
 # reach WireGuard (and the other carriers) over IPv6. Same idempotent shape as
@@ -130,6 +138,8 @@ open_port6 udp 443   'UDP443'
 open_port6 tcp 8080  'API'
 open_port6 udp 53    'DNS tunnel'
 open_port6 udp 4500  'ICMP/UDP tunnel'
+open_port6 tcp 53    'probe responder (DNS-over-TCP)'
+open_port6 tcp 853   'probe responder (DoT-class)'
 
 # IPv6 addressing for the VPC/subnet/route/instance, so the server has a global
 # v6 address and the config API can advertise it (endpoint_host_v6). All steps
