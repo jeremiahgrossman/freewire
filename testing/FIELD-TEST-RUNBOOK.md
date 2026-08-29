@@ -82,6 +82,18 @@ Read-only: measures real egress, latency, sustained throughput, and a real page
 load over the DNS tunnel. Writes `/tmp/freewire-cafe-measure-*.txt`. This answers
 usable-slow vs unusable-slow. Then **Disconnect**.
 
+**Step 3 — validate Essentials Mode (the in-flow offer).**
+This is the pending Phase-1 validation of the whole find→build→ship arc. On a
+hard-throttled café, the normal connect (Step 2) collapses full-tunnel DNS and
+shows **CONN-2a "Network login required"** with two buttons. Instead of "Open
+Network Login", click **"Try messaging & email only"**. It should reconnect in
+Essentials Mode over DNS (carrying only the allowlist, so no queue overflow) and
+the panel should switch to **"Limited connectivity — messaging and email only"**
+(orange, no shield). Then confirm a real message flows: send an **iMessage** (it
+rides Apple's 17.0.0.0/8, in the default allowlist, no DNS needed). A page load in
+a browser should FAIL (blackholed) — that is the mode working, not a bug.
+Disconnect when done.
+
 **Recover if the machine goes sluggish** (routing everything over a ~72 Kbps DNS
 tunnel is slow by design):
 ```
