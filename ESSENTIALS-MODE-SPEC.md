@@ -180,6 +180,26 @@ Against the throttle repro `FREEWIRE_DNS_CARRIER_CAP`:
 - **Phase-2 scoped resolver** — the cleanest answer to domain-based entries, but it
   is real work; the IP-only MVP proves the model first.
 
+## Phase 2 scoped-resolver known limitations (from the 2026-08-28 review)
+
+Minor, deliberately not fixed in the MVP; recorded so they are not rediscovered:
+
+- **No response caching.** Every allowlisted lookup does a fresh upstream round trip
+  through the tunnel. Fine at essentials' low volume; could reuse `doh.go`'s cache.
+- **AAAA answers are returned but not routed.** IPv6 is switched off for the tunnel's
+  lifetime, so the resolver hands back AAAA records but does not route them; an app
+  may try v6 first and fall back to v4 (happy-eyeballs). Minor added latency.
+- **UDP-only forward, no TCP retry.** A truncated (TC-bit) upstream reply is not
+  retried over TCP. A/AAAA answers for messaging/mail are small, so this is rare;
+  the 4096-byte buffer covers common EDNS sizes.
+- **Plain DNS to the upstream, not DoH.** Queries are cleartext from our server to
+  the upstream (1.1.1.1/8.8.8.8/9.9.9.9), but tunnelled from the client to the
+  server — the local network cannot see them. This is the DNS-1 tradeoff, accepted
+  for a slow carrier where DoH's per-lookup HTTPS cost is unaffordable.
+- **Benign teardown race.** A resolver goroutine in flight when cleanup runs may add
+  one more `-interface` route after the tracked set is cleared; the OS drops routes
+  to a vanished utun, so it self-heals.
+
 ## Relationship to existing decisions
 
 - Supersedes, for the hard-throttled case, the need to finish Stage-2 backpressure
