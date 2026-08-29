@@ -1,8 +1,32 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
 )
+
+// The Swift app sends the allowlist as the JSON key "essentials_allowlist"
+// (TunnelConfig CodingKey). This pins that the Go Config decodes that exact key
+// into EssentialsAllowlist and that it flows through to essentialsAllowlist() --
+// a rename on either side of the boundary would silently disable Phase 2.
+func TestConfigDecodesEssentialsAllowlist(t *testing.T) {
+	const js = `{"private_key":"x","server_public_key":"y","essentials_allowlist":["17.0.0.0/8","signal.org"]}`
+	var cfg Config
+	if err := json.Unmarshal([]byte(js), &cfg); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(cfg.EssentialsAllowlist) != 2 || cfg.EssentialsAllowlist[1] != "signal.org" {
+		t.Fatalf("EssentialsAllowlist = %v, want [17.0.0.0/8 signal.org]", cfg.EssentialsAllowlist)
+	}
+	// And it flows to the parser via the package var main() sets after decode.
+	t.Setenv(essentialsEnv, "") // config is the source, not the env
+	essentialsConfigAllowlist = cfg.EssentialsAllowlist
+	defer func() { essentialsConfigAllowlist = nil }()
+	nets, domains, active := essentialsAllowlist()
+	if !active || len(nets) != 1 || len(domains) != 1 || domains[0] != "signal.org" {
+		t.Fatalf("from decoded config: active=%v nets=%v domains=%v", active, nets, domains)
+	}
+}
 
 func TestEssentialsAllowlistInactiveWhenUnset(t *testing.T) {
 	t.Setenv(essentialsEnv, "")
