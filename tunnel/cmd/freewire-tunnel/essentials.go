@@ -101,6 +101,27 @@ func normalizeEssentialsDomain(s string) string {
 	return d
 }
 
+// essentialsUpstream picks a public resolver for the scoped resolver to forward
+// allowlisted lookups to. Its IP is routed INTO the tunnel, so it must NOT be one
+// the carrier pinned OUTSIDE the tunnel (the DNS carrier's own recursor): routing
+// the same address both ways would break whichever lost the tie. Returns "ip:53".
+func essentialsUpstream(carrierResolvers []string) string {
+	pinned := map[string]bool{}
+	for _, cr := range carrierResolvers {
+		ip := cr
+		if h, _, e := net.SplitHostPort(cr); e == nil {
+			ip = h
+		}
+		pinned[ip] = true
+	}
+	for _, ip := range []string{"1.1.1.1", "8.8.8.8", "9.9.9.9"} {
+		if !pinned[ip] {
+			return ip + ":53"
+		}
+	}
+	return "1.1.1.1:53" // every candidate is a carrier resolver (unlikely)
+}
+
 // domainAllowed reports whether qname is an allowlisted domain or a subdomain of
 // one. "signal.org" matches "signal.org" and "chat.signal.org", but NOT
 // "notsignal.org" (a suffix match on a label boundary, not a substring).

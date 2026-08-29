@@ -95,6 +95,22 @@ func TestRefuseReplies(t *testing.T) {
 	}
 }
 
+// The scoped resolver's upstream must never be a carrier resolver (which is
+// pinned OUTSIDE the tunnel), or routing the same IP INTO the tunnel breaks the
+// carrier.
+func TestEssentialsUpstreamAvoidsCarrierResolver(t *testing.T) {
+	if got := essentialsUpstream(nil); got != "1.1.1.1:53" {
+		t.Errorf("no carrier resolvers -> %q, want 1.1.1.1:53", got)
+	}
+	if got := essentialsUpstream([]string{"1.1.1.1:53"}); got != "8.8.8.8:53" {
+		t.Errorf("carrier=1.1.1.1 -> %q, want 8.8.8.8:53 (avoid collision)", got)
+	}
+	// Bare IPs (no port) are matched too.
+	if got := essentialsUpstream([]string{"1.1.1.1", "8.8.8.8"}); got != "9.9.9.9:53" {
+		t.Errorf("carrier=1.1.1.1,8.8.8.8 -> %q, want 9.9.9.9:53", got)
+	}
+}
+
 // --- DNS wire-format builders for the tests ---
 
 func encodeName(name string) []byte {

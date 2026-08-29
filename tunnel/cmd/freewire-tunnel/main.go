@@ -993,12 +993,18 @@ func setupRouting(tunName, bypassHost, carrierPeer string, carrierResolvers []st
 		// tunnel, and a non-allowlisted one stays on the physical path. If a
 		// non-allowlisted address leaked into the tunnel we would be full-tunnelling
 		// under another name, and the throttled carrier would collapse as before.
-		target := essentialsProbeTarget(essNets)
-		if iface, err := interfaceForDest(target); err != nil {
-			return fmt.Errorf("essentials: verify allowlist route: %w", err)
-		} else if iface != tunName {
-			return fmt.Errorf("essentials: allowlisted %s did not route into the tunnel (uses %s, not %s)",
-				target, iface, tunName)
+		//
+		// The positive check needs a static prefix to look up; a domain-only
+		// allowlist has none (its routes are added dynamically by the scoped
+		// resolver as names resolve), so it is skipped there. The negative check
+		// always runs -- that is the one that catches a scope leak.
+		if target := essentialsProbeTarget(essNets); target != "" {
+			if iface, err := interfaceForDest(target); err != nil {
+				return fmt.Errorf("essentials: verify allowlist route: %w", err)
+			} else if iface != tunName {
+				return fmt.Errorf("essentials: allowlisted %s did not route into the tunnel (uses %s, not %s)",
+					target, iface, tunName)
+			}
 		}
 		if iface, err := interfaceForDest(routeCheckHost); err == nil && iface == tunName {
 			return fmt.Errorf("essentials: non-allowlisted %s routed INTO the tunnel (uses %s) — scope leak; the whole machine would hit the throttled carrier",
@@ -1057,8 +1063,13 @@ func setupRouting(tunName, bypassHost, carrierPeer string, carrierResolvers []st
 	// and falls through to the DNS-1 "leave the resolver alone" path below.
 	if essActive && len(essDomains) > 0 {
 		// Route an upstream resolver INTO the tunnel so allowlisted lookups egress
-		// from our server, not the local (blackholing) network.
-		const essUpstream = "1.1.1.1:53"
+		// from our server, not the local (blackholing) network. Chosen to avoid the
+		// carrier's own resolver, which is pinned OUTSIDE the tunnel.
+		essUpstream := essentialsUpstream(carrierResolvers)
+		essUpstreamIP := essUpstream
+		if h, _, e := net.SplitHostPort(essUpstream); e == nil {
+			essUpstreamIP = h
+		}
 		essAddRoute := func(cidr string) {
 			exec.Command(routeBin, "-q", "-n", "delete", "-inet", cidr).Run() //nolint:errcheck
 			if out, err := exec.Command(routeBin, "-q", "-n", "add", "-inet", cidr,
@@ -1071,7 +1082,7 @@ func setupRouting(tunName, bypassHost, carrierPeer string, carrierResolvers []st
 			essentialsRoutes = append(essentialsRoutes, cidr)
 			essentialsRoutesMu.Unlock()
 		}
-		essAddRoute("1.1.1.1/32") // the upstream itself
+		essAddRoute(essUpstreamIP + "/32") // the upstream itself
 		r, err := startEssentialsResolver(essDomains, essUpstream, func(ip string) {
 			if strings.Contains(ip, ":") {
 				return // v6 is switched off for the tunnel's lifetime; do not route it
@@ -1088,6 +1099,18 @@ func setupRouting(tunName, bypassHost, carrierPeer string, carrierResolvers []st
 					"freewire-tunnel: essentials: could not take over DNS: %v — allowlisted domains may not resolve\n", err)
 			}
 		}
+		return nil
+	}
+
+	// IP-only Essentials Mode (active, no domains) does NOT take over DNS at all.
+	// Non-allowlisted apps are blackholed regardless of what they resolve, and the
+	// IP allowlist (Apple 17/8) needs no DNS, so a takeover would only push DoH
+	// queries out the PHYSICAL path (the allowlist, not the DoH endpoints, is what
+	// is tunnelled) for no benefit. Domain Essentials is handled above and has
+	// already returned. Leave the resolver alone, like the slow-carrier path.
+	if essActive {
+		fmt.Fprintln(os.Stderr,
+			"freewire-tunnel: essentials (IP-only) — leaving the system resolver alone (allowlist needs no DNS)")
 		return nil
 	}
 
