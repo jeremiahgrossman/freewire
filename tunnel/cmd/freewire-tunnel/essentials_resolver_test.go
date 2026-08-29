@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/binary"
+	"net"
+	"sync"
+	"sync/atomic"
 	"testing"
 )
 
@@ -92,6 +95,87 @@ func TestRefuseReplies(t *testing.T) {
 	}
 	if refusedReply(q)[3]&0x0F != 5 {
 		t.Error("refused rcode should be 5")
+	}
+}
+
+// handle() is the resolver's core: allowlisted names are forwarded to the
+// upstream and their IPs routed; everything else is NXDOMAIN with no forward and
+// no route. Tested against a mock upstream, no listener/root/tunnel needed.
+func TestResolverHandleAllowAndRefuse(t *testing.T) {
+	// Mock upstream: answers every query with A 1.2.3.4 (+ an AAAA), and records
+	// whether it was hit, so we can assert a refused name is never forwarded.
+	up, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer up.Close()
+	var hits int32
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, from, err := up.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			atomic.AddInt32(&hits, 1)
+			name, _ := essentialsQueryName(buf[:n])
+			up.WriteTo(buildReply(name, [4]byte{1, 2, 3, 4},
+				[16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}), from) //nolint:errcheck
+		}
+	}()
+
+	var routed []string
+	var rmu sync.Mutex
+	r := &essentialsResolver{
+		domains:  []string{"signal.org"},
+		upstream: up.LocalAddr().String(),
+		routed:   map[string]bool{},
+		addRoute: func(ip string) { rmu.Lock(); routed = append(routed, ip); rmu.Unlock() },
+	}
+
+	// Allowlisted: forwarded, answered, and the A IP routed.
+	reply := r.handle(buildQuery("chat.signal.org")) // a subdomain
+	if reply[3]&0x0F != 0 {
+		t.Fatalf("allowlisted query got rcode %d, want NOERROR", reply[3]&0x0F)
+	}
+	if got := extractAnswerIPs(reply); len(got) == 0 || got[0] != "1.2.3.4" {
+		t.Fatalf("allowlisted answer = %v, want it to include 1.2.3.4", got)
+	}
+	rmu.Lock()
+	sawA := false
+	for _, ip := range routed {
+		if ip == "1.2.3.4" {
+			sawA = true
+		}
+	}
+	rmu.Unlock()
+	if !sawA {
+		t.Errorf("allowlisted resolve did not route 1.2.3.4 into the tunnel; routed=%v", routed)
+	}
+	if atomic.LoadInt32(&hits) == 0 {
+		t.Error("allowlisted query was not forwarded to the upstream")
+	}
+
+	// Non-allowlisted: NXDOMAIN, and the upstream is NOT hit.
+	before := atomic.LoadInt32(&hits)
+	deny := r.handle(buildQuery("tracker.evil.com"))
+	if deny[3]&0x0F != 3 {
+		t.Errorf("non-allowlisted query rcode = %d, want NXDOMAIN(3)", deny[3]&0x0F)
+	}
+	if atomic.LoadInt32(&hits) != before {
+		t.Error("a non-allowlisted query was forwarded to the upstream (should be refused locally)")
+	}
+
+	// routeOnce dedups: a second resolve of the same IP does not re-route.
+	rmu.Lock()
+	n1 := len(routed)
+	rmu.Unlock()
+	r.handle(buildQuery("signal.org"))
+	rmu.Lock()
+	n2 := len(routed)
+	rmu.Unlock()
+	if n2 != n1 {
+		t.Errorf("re-resolving an already-routed IP added routes again (%d -> %d); dedup broken", n1, n2)
 	}
 }
 
