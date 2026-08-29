@@ -1,34 +1,53 @@
 # Field-test runbook — real captive portal (current plan)
 
-**Updated 2026-08-28.** This is THE plan for the next café visit. Pair it with
+**Updated 2026-08-29** (added the `dns_tcp` / TCP/53 primary thread; nine carriers
+now ship). This is THE plan for the next café visit. Pair it with
 `FIELD-TEST-CONTINGENCIES.md` (result → what to build) and, for the throttled-DNS
 outcome, `ESSENTIALS-MODE-SPEC.md` (Plan B).
 
-Everything else is proven at the desk (all 8 carriers carry traffic on an open
-network — `testing/validate-all-carriers.sh`, 7/7 routed; delegation live; cache
+Everything else is proven at the desk (all nine carriers carry traffic on an open
+network — `testing/validate-all-carriers.sh` proved 7/7 pre-`dns_tcp`, and
+`dns_tcp` is separately routed-verified at 32 Mbps; delegation live; cache
 fallback works; false-Protected fixed; disconnect tears down on stdin EOF). The
 field answers only what simulation cannot: **which carriers a real portal allows**,
 and **whether the DNS floor is actually usable**.
 
 ## What this next test decides (in priority order)
 
-1. **PRIMARY — is throttled DNS at café #2 *usable*, or does it only handshake?**
-   This is the one open thread. Café #2 is a hard destination-gated portal where
-   only server-direct DNS/53 escapes (~72 Kbps floor). We know it *handshakes*; we
-   do not know if it carries a real message/page at a tolerable speed. The answer
-   gates whether **Essentials Mode** (`ESSENTIALS-MODE-SPEC.md`) is worth building:
-   usable-slow → build it; unusable-slow → DNS is only a liveness floor and that
-   café is effectively unsupported for real use. Tool: `cafe-measure.sh`.
-2. **Complete the portal's 8-carrier support map.** Which of wireguard, udp443,
-   http_connect, tls443, wss443, cdn_wss, dns, icmp_udp the portal allows. Tool:
-   `cafe-run.sh` (the full battery). Match the result to a `FIELD-TEST-CONTINGENCIES.md`
-   row.
-3. **Walled-garden survey.** Which third-party destinations the portal permits on
+**What changed since this test was last planned.** Café #3 (2026-08-28) already
+settled the old primary question — at a hard destination-gated café, full-tunnel
+UDP-DNS *collapses* under whole-machine load (`queue 256/256` → tail-drop →
+egress-check teardown → CONN-2a) even though the carrier itself had **~27 KB/s of
+headroom** (`err 0/s` before the queue filled). The carrier was fine; the offered
+load overwhelmed a pipe with no backpressure. Two things landed to attack exactly
+that, and **both are field-unconfirmed** — this test exists to confirm them.
+
+1. **PRIMARY — does `dns_tcp` survive full-tunnel where UDP-DNS collapsed?**
+   `dns_tcp` (shipped 2026-08-28) is WireGuard over a TCP connection to the
+   server's port 53. TCP has flow control by construction, so a throttled path
+   *paces the sender* instead of tail-dropping into a teardown — the precise
+   failure that killed café #3. It sits in the chain **before** the UDP `dns`
+   carrier, so if this café passes TCP/53 the app should select `dns_tcp` on its
+   own and **hold** where UDP-DNS fell over. The gating field fact: **does a portal
+   that passes UDP/53 also pass TCP/53?** The battery's `TCP/53 (dns_tcp carrier)`
+   line answers reachability; a routed connect answers whether it carries and
+   survives. If it works, a "supported but unusably slow" café becomes genuinely
+   usable (~56× the UDP DNS tunnel, measured 32 Mbps at the desk).
+2. **FALLBACK — Essentials Mode (the in-flow offer).** If TCP/53 is blocked (so
+   `dns_tcp` is unavailable) or `dns_tcp` still can't carry a full tunnel here,
+   validate Plan B: carry only a low-bandwidth allowlist so the pipe is never
+   overwhelmed. This is the pending Phase-1 validation of the whole
+   find→build→ship arc (`ESSENTIALS-MODE-SPEC.md`).
+3. **Complete the portal's 9-carrier support map.** Which of wireguard, udp443,
+   http_connect, tls443, wss443, cdn_wss, dns_tcp, dns, icmp_udp the portal allows.
+   Tool: `cafe-run.sh` (the full battery). Match the result to a
+   `FIELD-TEST-CONTINGENCIES.md` row.
+4. **Walled-garden survey.** Which third-party destinations the portal permits on
    443 (Apple/Google/Cloudflare/Fastly/a *different* CloudFront edge). If a
    frontable provider is open while our edge is not, a carrier fronted through it
    could beat this café — where our own `cdn_wss` failed. Tool: `cafe-run.sh`
    (`--walled-garden` line).
-4. **Classify each block: `[SYN-RST]` vs `[reset]` vs `[timeout]`.** A `[reset]`
+5. **Classify each block: `[SYN-RST]` vs `[reset]` vs `[timeout]`.** A `[reset]`
    (post-handshake SNI reset) is the only thing that makes desync viable; no café
    has shown one yet. The battery tags each automatically.
 
@@ -67,20 +86,34 @@ Join the café wifi. If the OS login sheet appears, **Cancel it — do not log i
 ```
 bash testing/cafe-run.sh
 ```
-This runs, in one shot: the 8-carrier probe battery (reachability of all carriers
+This runs, in one shot: the 9-carrier probe battery (reachability of all carriers
 + UDP/123 and IPv6 candidates, RST/timeout classification), the walled-garden
 survey, and — if you give it your password once — the rooted per-carrier real-WG
 handshake (`probe-transports.sh`, covering `icmp_udp` too). Writes `/tmp/freewire-cafe-*.txt`.
 
-**Step 2 — grade the DNS floor (the primary question).**
-Launch `Freewire.app`, Cancel the login sheet, click **Connect**. It falls through
-the chain to DNS (the only carrier this café allows). Once it shows connected:
-```
-bash testing/cafe-measure.sh
-```
-Read-only: measures real egress, latency, sustained throughput, and a real page
-load over the DNS tunnel. Writes `/tmp/freewire-cafe-measure-*.txt`. This answers
-usable-slow vs unusable-slow. Then **Disconnect**.
+**Step 2 — connect, and watch WHICH carrier the chain settles on (the primary question).**
+Launch `Freewire.app`, Cancel the login sheet, click **Connect**. On a DNS-only
+café the chain now falls past the fast carriers to `dns_tcp` **before** the UDP
+`dns` carrier, so the carrier it lands on is the headline result:
+- **If it settles on `dns_tcp`** (TCP/53 is open here): this is the win we built —
+  it should stay connected and **Protected** where café #3 collapsed. Measure it:
+  ```
+  bash testing/cafe-measure.sh
+  ```
+  Read-only: real egress, latency, sustained throughput, a real page load. Writes
+  `/tmp/freewire-cafe-measure-*.txt`. Expect it to hold under load (TCP
+  backpressure) rather than tear down. **Disconnect** when done.
+- **If it settles on the UDP `dns` carrier** (TCP/53 blocked but UDP/53 open): this
+  is the café #3 repro. Full-tunnel will likely collapse to **CONN-2a** under
+  whole-machine load. Still run `cafe-measure.sh` if it stays up long enough to
+  grade usable-slow vs unusable-slow, then go to **Step 3** (Essentials Mode is the
+  answer for this café).
+- **If it shows CONN-2a immediately**: the fast carriers and both DNS carriers all
+  failed — go straight to **Step 3**.
+
+The `cafe-run.sh` battery from Step 1 already recorded whether TCP/53 is open, so
+the selected carrier and the battery line should agree; if they disagree, that
+disagreement is itself worth capturing.
 
 **Step 3 — validate Essentials Mode (the in-flow offer).**
 This is the pending Phase-1 validation of the whole find→build→ship arc. On a
@@ -104,6 +137,10 @@ sudo tunnel/freewire-tunnel --restore
 
 ## Reading the result → what it gates
 
+- **TCP/53 (the primary result)** (from `cafe-run.sh`'s `TCP/53 (dns_tcp carrier)`
+  line, confirmed by the carrier the app selects in Step 2): open → `dns_tcp` is the
+  fast, backpressured path and likely makes this café usable; blocked → fall back to
+  the UDP `dns` carrier (probably collapses) and Essentials Mode.
 - **Carrier support map** (from `cafe-run.sh`): match to a `FIELD-TEST-CONTINGENCIES.md`
   row (1 = permissive, … 8 = destination-gated DNS-only). Café #2 was row 8.
 - **Walled-garden**: if Cloudflare/Fastly/a generic CloudFront edge is permitted
@@ -126,13 +163,19 @@ sudo tunnel/freewire-tunnel --restore
   Server-direct DNS is the path with real speed; café #2 allowed it.
 - **DNS hijacking.** A portal that answers every query with its own IP and rewrites
   destination :53 kills the DNS tunnel outright. Fundamental, no client fix.
-- **A throttled-DNS ceiling is not raisable client-side** (research-confirmed).
-  That is *why* Plan B is Essentials Mode (carry less), not a faster DNS carrier.
+- **A throttled-DNS *throughput* ceiling is not raisable client-side**
+  (research-confirmed) — no client change makes a recursor forward unique names
+  faster. But café #3 did not die on the throughput ceiling; it died on **no
+  backpressure** (queue overflow → teardown) with headroom to spare. `dns_tcp`
+  attacks that failure directly (TCP flow control) and, being server-direct, has no
+  recursor in the path at all. So the two answers are complementary: `dns_tcp` for
+  "the pipe collapses under load," Essentials Mode for "the pipe is genuinely too
+  small to carry a full tunnel." Try `dns_tcp` first; fall back to carrying less.
 - **macOS Captive Network Assistant** may gate app traffic while its login sheet is
   up; cancelling the sheet releases it.
 
 ## The old procedural note
 
 `cafe-diagnostic.sh` (single-transport egress timeline) still exists and works, but
-`cafe-run.sh` supersedes it for the survey — it covers all 8 carriers, the
+`cafe-run.sh` supersedes it for the survey — it covers all 9 carriers, the
 walled-garden, and the rooted handshakes in one self-contained run.

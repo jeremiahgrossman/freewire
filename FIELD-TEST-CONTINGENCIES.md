@@ -1,7 +1,10 @@
 # Field test: readiness + what each result means to build
 
-**Date:** 2026-08-24. Everything below is desk-verified; run the probe at a real
-portal and match the result to a row.
+**Date:** 2026-08-24, rows 7–8 refreshed 2026-08-29 for the `dns_tcp` carrier /
+TCP/53. Everything below is desk-verified; run the probe at a real portal and
+match the result to a row. For the step-by-step, see
+`testing/FIELD-TEST-RUNBOOK.md` (the `dns_tcp` survival test is now the primary
+thread).
 
 ## The one command
 
@@ -43,8 +46,8 @@ Rows are ordered best-case to worst-case. "Built" = ships today, nothing to do.
 | 4 | **UDP/443 passes to our server** | Portal passes QUIC-class UDP | **BUILT** (`udp443`, pre-built 2026-08-25) — validates on the spot, no field build. Near line-rate, no TCP-over-TCP; 307ms handshake, routed 6/6 TUNNELLED. |
 | 5 | UDP/123 passes, UDP/443 doesn't | Portal passes NTP-class UDP | **BUILD the UDP/123 carrier** (same shape as #4, lower priority). |
 | 6 | IPv6 egress present | v4-only portal leaks v6 | **Server is now v6-ready** (provisioned + advertises endpoint_host_v6). The client `wireguard6` carrier + its leak-safe routing is the one remaining build, and it must be verified ON a v6 network -- see IPV6-CARRIER-REMAINING.md. |
-| 7 | Only throttled DNS (the original café) | Hard destination gate, DNS is the floor | If UDP/443 also fails: **nothing client-side raises the ceiling** (research-confirmed). This is the characterized case. |
-| 8 | Everything fast fails, DNS works | Destination-gated hard captive portal | The 2026-08-25 café: TCP/443 SYN-RST (incl. CDN edge), UDP dropped, but DNS/53 works. **Supported via DNS (slow).** Desync CANNOT help a SYN-RST (no handshake to manipulate) -- it needs a `[reset]` content-gated portal, not yet seen. See DESYNC-CARRIER-SPEC.md. **Next: grade DNS usability (`cafe-measure.sh`) — usable-slow → build the Essentials-Mode IP-only MVP (`ESSENTIALS-MODE-SPEC.md`); unusable-slow → DNS is a liveness floor only.** Also read the walled-garden line: if a frontable provider is permitted while our edge is SYN-RST, a fronted-through-them carrier is the candidate build. |
+| 7 | Only throttled DNS (the original café) | Hard destination gate, DNS is the floor | **FIRST check the `TCP/53 (dns_tcp carrier)` battery line.** If TCP/53 is open, `dns_tcp` (SHIPPED 2026-08-28) is the answer — WireGuard over TCP/53, ~56× the UDP DNS tunnel, and TCP flow control gives real backpressure so the pipe paces instead of collapsing. It sits in the chain before the UDP `dns` carrier, so a routed connect should select and hold it. Only if TCP/53 is ALSO blocked does "nothing client-side raises the ceiling" apply — then it's Essentials Mode (row 8). |
+| 8 | Everything fast fails, DNS works | Destination-gated hard captive portal | The 2026-08-25 café: TCP/443 SYN-RST (incl. CDN edge), UDP dropped, but DNS/53 works. **Order of attack (new since dns_tcp): (1) TCP/53 open → `dns_tcp`, fast + backpressured, likely makes the café usable; (2) TCP/53 blocked, UDP/53 open → the UDP `dns` carrier (café #3 showed full-tunnel collapses here under load) → grade with `cafe-measure.sh`, then Essentials-Mode IP-only MVP (`ESSENTIALS-MODE-SPEC.md`) to carry less; (3) DNS hijacked → liveness floor only.** Desync CANNOT help a SYN-RST (no handshake to manipulate) -- it needs a `[reset]` content-gated portal, not yet seen. See DESYNC-CARRIER-SPEC.md. Also read the walled-garden line: if a frontable provider is permitted while our edge is SYN-RST, a fronted-through-them carrier is the candidate build. |
 
 ## The builds, pre-scoped
 
