@@ -146,3 +146,57 @@ func TestAddPeerRejectsAtCapacity(t *testing.T) {
 		t.Error("registration succeeded on a server already at capacity")
 	}
 }
+
+// restorePeer must reject the same malformed keys AddPeer does, and must do so
+// before touching the (nil, in this test) WireGuard device -- restore runs at
+// startup over a file nothing has validated since it was written.
+func TestRestorePeerRejectsMalformedKeys(t *testing.T) {
+	m := rejectionManager(t, nil)
+
+	for name, key := range map[string]string{
+		"not base64": "!!!!not-base64!!!!",
+		"too short":  base64.StdEncoding.EncodeToString(make([]byte, 16)),
+		"too long":   base64.StdEncoding.EncodeToString(make([]byte, 64)),
+		"empty":      "",
+		"all zero":   base64.StdEncoding.EncodeToString(make([]byte, 32)),
+	} {
+		rp := persistedPeer{PeerToken: "tok-" + name, PublicKey: key, TunnelIP: "10.0.0.50"}
+		if err := m.restorePeer(rp); err == nil {
+			t.Errorf("%s: accepted an invalid public key", name)
+		}
+	}
+	if got := m.PeerCount(); got != 0 {
+		t.Errorf("a rejected restore left %d peers behind, want 0", got)
+	}
+}
+
+// A peers-file entry claiming an address another restored peer (or a live
+// registration) already holds must be skipped, not silently steal the
+// address.
+func TestRestorePeerRejectsAddressCollision(t *testing.T) {
+	key := randKeyB64(t)
+	m := rejectionManager(t, map[string]string{"existing-token": key})
+	takenIP := m.peers["existing-token"].TunnelIP
+
+	rp := persistedPeer{PeerToken: "new-token", PublicKey: randKeyB64(t), TunnelIP: takenIP}
+	if err := m.restorePeer(rp); err == nil {
+		t.Error("restorePeer accepted an address already held by another peer")
+	}
+	if got := m.PeerCount(); got != 1 {
+		t.Errorf("peer count = %d after a rejected restore, want 1 (unchanged)", got)
+	}
+}
+
+// The pool reservation for a rejected restore must not leak: a run of bad
+// entries must not exhaust addresses that legitimate registrations need.
+func TestRestorePeerLeavesNoResidueOnRejection(t *testing.T) {
+	m := rejectionManager(t, nil)
+	before := m.pool.Size()
+
+	for i := 0; i < 5; i++ {
+		m.restorePeer(persistedPeer{PeerToken: "bad", PublicKey: "!!!not valid!!!", TunnelIP: "10.0.0.60"}) //nolint:errcheck
+	}
+	if got := m.pool.Size(); got != before {
+		t.Errorf("pool allocations moved from %d to %d on rejected restores", before, got)
+	}
+}

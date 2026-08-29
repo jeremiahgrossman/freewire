@@ -113,6 +113,16 @@ type Config struct {
 	// restart does not make every outstanding token spendable again. It holds
 	// nonce hashes and nothing else. Defaults to "./spent-tokens".
 	SpentStoreFile string `json:"spent_store_file"`
+
+	// PeersStoreFile records registered peers (public key, tunnel IP, peer
+	// token) so a restart -- a redeploy, a crash, an EC2 reboot -- does not
+	// silently orphan every client relying on a cached identity. That is
+	// exactly the situation a captive portal creates: the client cannot
+	// re-register because the API is blocked, so a peer the server no longer
+	// recognizes has no way back in -- every carrier connects at the transport
+	// layer and then fails at the WireGuard handshake, indistinguishable from
+	// the portal blocking everything. Defaults to "./peers.json".
+	PeersStoreFile string `json:"peers_store_file"`
 }
 
 // SpentStorePath is where redeemed token hashes are kept between restarts.
@@ -121,6 +131,14 @@ func (c *Config) SpentStorePath() string {
 		return "./spent-tokens"
 	}
 	return c.SpentStoreFile
+}
+
+// PeersStorePath is where registered peers are kept between restarts.
+func (c *Config) PeersStorePath() string {
+	if c.PeersStoreFile == "" {
+		return "./peers.json"
+	}
+	return c.PeersStoreFile
 }
 
 // ParseRSAPrivateKey decodes a PEM-encoded RSA private key.

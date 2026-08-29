@@ -236,3 +236,60 @@ func TestNewIPPoolAcceptsIPv4(t *testing.T) {
 		}
 	}
 }
+
+// reserveSpecific is used only at startup, to re-claim an address a peer held
+// before whatever restarted the process. It must succeed for a genuinely free
+// address and take it out of Allocate()'s free list.
+func TestReserveSpecificClaimsAFreeAddress(t *testing.T) {
+	_, network, err := net.ParseCIDR("10.0.0.0/24")
+	if err != nil {
+		t.Fatalf("parse cidr: %v", err)
+	}
+	p := newIPPool(network, "10.0.0.1")
+
+	if !p.reserveSpecific("10.0.0.50") {
+		t.Fatal("reserveSpecific refused a free address")
+	}
+	if got := p.Size(); got != 2 { // the server IP plus this one
+		t.Errorf("pool size = %d, want 2", got)
+	}
+	// The address must not be handed out again by Allocate.
+	for i := 0; i < 300; i++ {
+		if ip, err := p.Allocate(); err == nil && ip == "10.0.0.50" {
+			t.Fatal("Allocate handed out an address already reserved")
+		}
+	}
+}
+
+// A duplicate or corrupt peers-file entry must not silently steal an address
+// out from under a peer that already holds it.
+func TestReserveSpecificRejectsAlreadyAllocated(t *testing.T) {
+	_, network, err := net.ParseCIDR("10.0.0.0/24")
+	if err != nil {
+		t.Fatalf("parse cidr: %v", err)
+	}
+	p := newIPPool(network, "10.0.0.1")
+
+	if !p.reserveSpecific("10.0.0.50") {
+		t.Fatal("first reservation was refused")
+	}
+	if p.reserveSpecific("10.0.0.50") {
+		t.Error("a second reservation of the same address was allowed")
+	}
+}
+
+// An address outside the pool's current range (e.g. the tunnel CIDR shrank
+// since it was issued) must be skipped, not crash the restore.
+func TestReserveSpecificRejectsOutOfRange(t *testing.T) {
+	_, network, err := net.ParseCIDR("10.0.0.0/24")
+	if err != nil {
+		t.Fatalf("parse cidr: %v", err)
+	}
+	p := newIPPool(network, "10.0.0.1")
+
+	for _, bad := range []string{"192.168.1.5", "not-an-ip", ""} {
+		if p.reserveSpecific(bad) {
+			t.Errorf("%q: reserved an address outside the pool", bad)
+		}
+	}
+}

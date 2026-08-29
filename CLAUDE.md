@@ -17,7 +17,52 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 > Do not add multi-user machinery without checking that decision has changed.
 
 - **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
-- **In progress:** nothing
+- **In progress:** peer-table persistence fix built and unit-tested (committed
+  locally, not yet deployed to the live server — see below); a repeat café
+  visit is needed once it's deployed, to actually validate `dns_tcp`/TCP-53
+  end to end (this trip's app-level connect failed for an unrelated reason).
+- **FIELD TEST (2026-08-29, café #3 repeat). `dns_tcp`/TCP-53 answer confirmed;
+  the app itself failed to connect for a DIFFERENT reason — a real reliability
+  bug found and fixed.** The probe battery (rootless, not app-dependent)
+  confirmed the trip's headline question: **TCP/53 reaches our server here**
+  (`OK 153ms`, alongside `DNS/53 OK 214ms`), same destination-gated shape as
+  café #2/#3 (every fast carrier `[SYN-RST]`, IPv6 absent, TCP/80 intercepted).
+  So `dns_tcp` is a real candidate at this café. **But the app never connected
+  on ANY carrier** — not because of the café: `freewire-tunnel-stderr.log`
+  showed every carrier the chain tried, including `dns_tcp` and the UDP `dns`
+  carrier (both of which the probe just proved reach the server), failing with
+  "connected but no WireGuard handshake" — the transport arrived, the crypto
+  handshake never did. A **freshly-registered** peer, tried immediately
+  afterward from the hotspot, handshook cleanly against the same live server —
+  so the server's WireGuard listener itself was healthy. **Root cause:** the
+  server's peer table (`server/internal/tunnel/manager.go`) was a bare
+  in-memory `map[string]*Peer` with **no persistence and no restart-survival**.
+  Any restart of the `freewire` process (redeploy, crash — the EC2 instance
+  itself hasn't rebooted since 2026-08-22, so a service-level restart is the
+  likely path) silently forgets every registered peer, while the app's cached
+  identity (Keychain + UserDefaults) survives untouched and unaware. This is
+  maximally damaging specifically behind a captive portal: that's the one
+  situation where the client *can't* re-register (the API is blocked), so a
+  server that no longer recognizes the peer has no path back — every carrier
+  fails identically at the handshake step, which is indistinguishable from the
+  portal blocking everything and wasted this test's app-level validation.
+  **Fixed:** peer registrations now persist to `/var/lib/freewire/peers.json`
+  (default `./peers.json`, resolved against the systemd unit's
+  `WorkingDirectory=/var/lib/freewire` — same convention the existing
+  `spent_store_file` already uses, so no deploy-script change was needed).
+  `AddPeer`/`RemovePeer` rewrite the file (temp-file-then-rename, matching the
+  Privacy Pass spent-token journal's durability pattern) after every successful
+  mutation; `NewManager` restores every entry into the running WireGuard device
+  before the API starts serving. A new `ipPool.reserveSpecific` claims a
+  restored peer's exact address (skips it, doesn't crash startup, if the
+  address collides or is now out of range). Unit-tested (file round-trip,
+  corrupt-file tolerance, pool reservation/collision, restore-path key
+  validation) — full `go test ./... -race` green. **Not yet deployed to the
+  live server** (deploying is itself a restart, and this session held off
+  redeploying without asking first). Once deployed, the CURRENT stranded app
+  session still needs one fresh open-network reconnect (there's nothing to
+  restore from — the old in-memory-only peer predates this fix and was never
+  written to disk), but every restart after that one should be transparent.
 - **LATEST (2026-08-28, end of session). Everything below is landed on `main`
   (tree clean, all suites green: tunnel+server `-race`, Swift harness, app build).**
   This session, in order:

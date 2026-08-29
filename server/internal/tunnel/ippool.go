@@ -74,6 +74,37 @@ func (p *ipPool) Allocate() (string, error) {
 	return uint32ToIPStr(n), nil
 }
 
+// reserveSpecific claims ip for a peer being restored from disk, rather than
+// letting Allocate() pick one. Used only at startup, before the API can
+// receive any requests, when the address is already known (it was handed out
+// before the restart) and must not go to anyone else. Returns false if ip is
+// already allocated (a duplicate or corrupt entry) or outside the pool's
+// current free range (e.g. the tunnel CIDR shrank since the address was
+// issued) -- either way the caller skips that one entry rather than failing
+// the whole restore.
+func (p *ipPool) reserveSpecific(ip string) bool {
+	parsed := net.ParseIP(ip)
+	if parsed == nil || parsed.To4() == nil {
+		return false
+	}
+	n := ipToUint32(parsed.To4())
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if _, ok := p.allocated[n]; ok {
+		return false
+	}
+	for i, f := range p.free {
+		if f == n {
+			p.free = append(p.free[:i], p.free[i+1:]...)
+			p.allocated[n] = struct{}{}
+			return true
+		}
+	}
+	return false
+}
+
 func (p *ipPool) Release(ip string) {
 	parsed := net.ParseIP(ip)
 	if parsed == nil || parsed.To4() == nil {
