@@ -27,6 +27,7 @@ struct PreferencesView: View {
     @State private var launchAtLogin    = Preferences.shared.launchAtLogin
     @State private var netIntelligence  = Preferences.shared.networkIntelligenceEnabled
     @State private var essentialsMode   = Preferences.shared.essentialsMode
+    @State private var essentialsList   = Preferences.shared.essentialsAllowlist.joined(separator: ", ")
     @State private var fingerprint      = (try? DeviceIdentity())?.fingerprint ?? "—"
     @State private var showPrivacyDetail = false
 
@@ -62,7 +63,19 @@ struct PreferencesView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if essentialsMode {
-                        Text("Currently allowed: \(Preferences.shared.essentialsAllowlist.joined(separator: ", ")) (Apple 17.0.0.0/8 = iMessage + push).")
+                        Text("Allowed destinations (comma-separated IPs, CIDRs, or domains):")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        TextField("17.0.0.0/8, signal.org", text: $essentialsList)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.caption)
+                            .onChange(of: essentialsList) { _, v in
+                                let items = v.split(separator: ",")
+                                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                                    .filter { !$0.isEmpty }
+                                Preferences.shared.essentialsAllowlist = items
+                            }
+                        Text("Default: Apple 17.0.0.0/8 (iMessage + push, needs no DNS). Add a domain like signal.org or your mail server; domains resolve through the tunnel. Clearing this restores the default.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
