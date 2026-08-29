@@ -26,6 +26,7 @@ struct PreferencesView: View {
     @State private var autoConnect      = Preferences.shared.autoConnect
     @State private var launchAtLogin    = Preferences.shared.launchAtLogin
     @State private var netIntelligence  = Preferences.shared.networkIntelligenceEnabled
+    @State private var essentialsMode   = Preferences.shared.essentialsMode
     @State private var fingerprint      = (try? DeviceIdentity())?.fingerprint ?? "—"
     @State private var showPrivacyDetail = false
 
@@ -50,6 +51,21 @@ struct PreferencesView: View {
                     Text("Not available yet. When the VPN drops, traffic is not blocked. Coming in a future release.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Restrictive networks") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("Essentials Mode", isOn: $essentialsMode)
+                        .onChange(of: essentialsMode) { _, v in Preferences.shared.essentialsMode = v }
+                    Text("On networks too restrictive for a full VPN (some hotel and café wifi), carry only messaging, email, and push notifications, and block everything else. Most traffic will not go through Freewire. Off by default.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if essentialsMode {
+                        Text("Currently allowed: \(Preferences.shared.essentialsAllowlist.joined(separator: ", ")) (Apple 17.0.0.0/8 = iMessage + push).")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
 

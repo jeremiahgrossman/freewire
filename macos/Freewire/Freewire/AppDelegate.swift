@@ -160,9 +160,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .disconnected:             return "Freewire — Not connected"
         case .connecting:               return "Freewire — Connecting..."
         case .connected:
-            // Matches the panel's DEBUG-1 headline. The tooltip is what the
-            // user sees without opening anything, so a shield claim here would
-            // be the same lie the panel no longer tells.
+            // Matches the panel's headline. The tooltip is what the user sees
+            // without opening anything, so a shield claim here would be the same
+            // lie the panel no longer tells (ESSENTIALS-1 and DEBUG-1 both replace
+            // "Protected" because most / all traffic is not protected).
+            if tunnelManager?.essentialsActive == true {
+                return "Freewire — Limited connectivity (messaging & email only)"
+            }
             return UserDefaults.standard.bool(forKey: "skipRouting")
                 ? "Freewire — Debug mode: routing off. Traffic is NOT protected."
                 : "Freewire — Protected"

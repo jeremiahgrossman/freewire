@@ -49,6 +49,30 @@ The reasoning is recorded in `DECISIONS.md` under DNS-ON-SLOW-TRANSPORTS, with
 the alternatives, because it trades a stated privacy guarantee for a usable
 machine and should be revisited if either side changes.
 
+### Essentials Mode — limited-scope connectivity (ESSENTIALS-1)
+
+On a hard-throttled captive portal where only a slow DNS carrier escapes,
+full-tunnel routing collapses (the whole machine overflows the ~72 Kbps pipe).
+Essentials Mode is the opt-in answer: route only a low-bandwidth destination
+allowlist (messaging, push, email) through the tunnel and leave everything else
+on the physical path, where the portal blackholes it. See `ESSENTIALS-MODE-SPEC.md`.
+
+Because most traffic is NOT carried — only the allowlist is — this REPLACES the
+"Protected" headline rather than sitting beneath it. This is the DEBUG-1/UPGRADE-1
+call, not the DNS-1 one: the honest statement is "some things work, most do not,"
+so "Protected" must not appear.
+
+| ID | Condition | User-visible message | Type |
+|---|---|---|---|
+| ESSENTIALS-1 | Connected in Essentials Mode (allowlist split tunnel) | "Limited connectivity — messaging and email only." | Replaces the connected headline |
+
+Sub-text, shown below the headline: "This network is too restrictive for full
+browsing. Freewire is carrying only the destinations you allow-listed; everything
+else is blocked." Essentials Mode is never entered without the user turning it on
+(a Settings toggle, or accepting the offer when a portal leaves only a throttled
+carrier), so the reduced scope is always a choice the user made, never a silent
+downgrade.
+
 ### Path upgrade window (UPGRADE-1)
 
 When a faster transport becomes available the client tears the tunnel down and

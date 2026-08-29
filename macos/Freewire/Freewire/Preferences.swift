@@ -13,8 +13,34 @@ final class Preferences {
         static let pinnedServerKey = "pinnedServerKey"
         static let autoConnect = "autoConnect"
         static let networkIntelligence = "networkIntelligence"
+        static let essentialsMode = "essentialsMode"
+        static let essentialsAllowlist = "essentialsAllowlist"
         static let initialized = "prefsInitialized"
         static let onboardingDone = "onboardingDone"
+    }
+
+    /// Essentials Mode: on a network so restrictive that only a slow carrier
+    /// escapes, carry ONLY the allowlist (messaging/email/push) and blackhole the
+    /// rest, instead of a full tunnel that collapses under the throttle. Opt-in and
+    /// off by default -- it reduces what is protected, so the user must choose it.
+    /// See ESSENTIALS-MODE-SPEC.md and error-states-spec.md (ESSENTIALS-1).
+    var essentialsMode: Bool {
+        get { UserDefaults.standard.bool(forKey: Key.essentialsMode) }
+        set { UserDefaults.standard.set(newValue, forKey: Key.essentialsMode) }
+    }
+
+    /// Destination allowlist for Essentials Mode: the CIDRs/IPs routed into the
+    /// tunnel while everything else stays on the physical path. Defaults to Apple's
+    /// 17.0.0.0/8 (push + iMessage, needs no DNS). Sent to the helper as
+    /// `essentials_allowlist`; empty falls back to the default rather than
+    /// tunnelling nothing.
+    var essentialsAllowlist: [String] {
+        get {
+            let v = UserDefaults.standard.stringArray(forKey: Key.essentialsAllowlist) ?? []
+            let cleaned = v.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            return cleaned.isEmpty ? ["17.0.0.0/8"] : cleaned
+        }
+        set { UserDefaults.standard.set(newValue, forKey: Key.essentialsAllowlist) }
     }
 
     /// Resolver the DNS tunnel should query instead of the system one.

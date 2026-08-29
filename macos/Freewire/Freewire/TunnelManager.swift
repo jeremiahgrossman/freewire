@@ -42,10 +42,12 @@ enum TunnelState {
         case .noNetwork:               return "network.slash"
         case .connecting, .upgrading:  return "network.badge.shield.half.filled"
         case .connected:
-            // DEBUG-1: with routing skipped nothing is protected, and the menu
-            // bar icon is the signal most users act on without opening the
-            // panel. A shield there would be the same lie in a smaller space.
-            return UserDefaults.standard.bool(forKey: "skipRouting")
+            // DEBUG-1 / ESSENTIALS-1: with routing skipped nothing is protected,
+            // and in Essentials Mode only the allowlist is — the menu bar icon is
+            // the signal most users act on without opening the panel, so a shield
+            // there would be the same lie in a smaller space.
+            return (UserDefaults.standard.bool(forKey: "skipRouting")
+                    || UserDefaults.standard.bool(forKey: "essentialsMode"))
                 ? "exclamationmark.triangle.fill"
                 : "checkmark.shield.fill"
         case .reconnecting:            return "exclamationmark.triangle.fill"
@@ -96,6 +98,20 @@ final class StdinHolder {
 @MainActor
 final class TunnelManager: ObservableObject {
     @Published private(set) var state: TunnelState = .disconnected
+
+    /// True when the current connection was built in Essentials Mode (allowlist
+    /// split tunnel). The panel shows ESSENTIALS-1 ("Limited connectivity")
+    /// instead of "Protected" when this is set. Reset in killTunnel.
+    @Published private(set) var essentialsActive = false
+
+    /// The allowlist to send the helper when Essentials Mode is on, else nil (full
+    /// tunnel). Records `essentialsActive` so the connected panel reflects the real
+    /// scope and never falsely shows "Protected."
+    private func essentialsConfig() -> [String]? {
+        guard Preferences.shared.essentialsMode else { essentialsActive = false; return nil }
+        essentialsActive = true
+        return Preferences.shared.essentialsAllowlist
+    }
 
     private let api: ServerAPI
     private let identity: DeviceIdentity
@@ -290,7 +306,8 @@ final class TunnelManager: ObservableObject {
                 preferredTransport: Preferences.shared.forceTransport,
                 dnsResolver: Preferences.shared.dnsResolverOverride,
                 dnsTunnelDomain: server.dnsTunnelDomain,
-                cdnHost: server.cdnHost
+                cdnHost: server.cdnHost,
+                essentialsAllowlist: essentialsConfig()
             )
 
             // CONN-5: the control plane answered above, so this is a normal
@@ -496,7 +513,8 @@ final class TunnelManager: ObservableObject {
                     preferredTransport: Preferences.shared.forceTransport ?? lastGoodTransport?.rawValue,
                     dnsResolver: Preferences.shared.dnsResolverOverride,
                     dnsTunnelDomain: server.dnsTunnelDomain,
-                    cdnHost: server.cdnHost
+                    cdnHost: server.cdnHost,
+                    essentialsAllowlist: essentialsConfig()
                 )
 
                 let (ifName, transport) = try await launchTunnel(config: cfg)
@@ -619,7 +637,8 @@ final class TunnelManager: ObservableObject {
                 preferredTransport: nil, // fastest-first chain, up to WireGuard-direct
                 dnsResolver: Preferences.shared.dnsResolverOverride,
                 dnsTunnelDomain: server.dnsTunnelDomain,
-                cdnHost: server.cdnHost
+                cdnHost: server.cdnHost,
+                essentialsAllowlist: essentialsConfig()
             )
             let (ifName, newTransport) = try await launchTunnel(config: cfg)
 
@@ -767,6 +786,9 @@ final class TunnelManager: ObservableObject {
     }
 
     private func killTunnel() async {
+        // The next connection re-derives essentials scope from its own config; a
+        // stale flag here would mislabel a later full-tunnel connection as limited.
+        essentialsActive = false
         // Primary teardown: close the helper's stdin. It exits on EOF and runs
         // its own cleanup, with no privilege needed -- so this works even when the
         // sudo `--stop` below cannot authenticate. The `--stop` stays as a backup
@@ -848,7 +870,8 @@ final class TunnelManager: ObservableObject {
             preferredTransport: Preferences.shared.forceTransport ?? lastGoodTransport?.rawValue,
             dnsResolver:     Preferences.shared.dnsResolverOverride,
             dnsTunnelDomain: cached.dnsTunnelDomain,
-            cdnHost: cached.cdnHost
+            cdnHost: cached.cdnHost,
+            essentialsAllowlist: essentialsConfig()
         )
         guard let (ifName, transport) = try? await launchTunnel(config: cfg), !Task.isCancelled else {
             await killTunnel()
@@ -1022,6 +1045,9 @@ private struct TunnelConfig: Encodable {
     let dnsResolver:        String?
     let dnsTunnelDomain:    String?
     let cdnHost:            String?
+    // Essentials Mode allowlist; nil = full tunnel. Client-assembled, never from
+    // the server's /v1/config, so the server can't force reduced scope.
+    let essentialsAllowlist: [String]?
 
     enum CodingKeys: String, CodingKey {
         case privateKey      = "private_key"
@@ -1039,6 +1065,7 @@ private struct TunnelConfig: Encodable {
         case dnsResolver        = "dns_resolver"
         case dnsTunnelDomain    = "dns_tunnel_domain"
         case cdnHost            = "cdn_host"
+        case essentialsAllowlist = "essentials_allowlist"
     }
 }
 

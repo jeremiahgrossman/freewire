@@ -201,6 +201,16 @@ private struct ConnectedBody: View {
                 Text("Your traffic is NOT going through the VPN.")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
+            } else if tunnelManager.essentialsActive {
+                // ESSENTIALS-1, per error-states-spec.md. Replaces the "Protected"
+                // headline: only the allowlist is carried and most traffic is
+                // blocked, so "Protected" would be false. Same call as DEBUG-1.
+                StatusRow(symbol: "exclamationmark.triangle.fill",
+                          label: "Limited connectivity — messaging and email only", color: .orange)
+                Text("This network is too restrictive for full browsing. Freewire is carrying only the destinations you allow-listed; everything else is blocked.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 StatusRow(symbol: "checkmark.shield.fill", label: "Protected", color: .green)
             }
@@ -213,7 +223,10 @@ private struct ConnectedBody: View {
             // DNS-1, per error-states-spec.md. Shown below the status rather
             // than replacing it, because the status is true: the tunnel is
             // carrying traffic and encrypting it. Only the lookups are exposed.
-            if transport.leaksDNSToNetwork {
+            // Suppressed in Essentials Mode, where the headline is already
+            // "Limited connectivity" (not "protected"), so a "your traffic is
+            // protected, but..." line would contradict it.
+            if transport.leaksDNSToNetwork && !tunnelManager.essentialsActive {
                 Text("Your traffic is protected, but this network can see which sites you visit.")
                     .font(.system(size: 12))
                     .foregroundStyle(.orange)
