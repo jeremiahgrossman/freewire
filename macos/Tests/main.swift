@@ -194,9 +194,31 @@ check(TunnelTransport.allCases.filter { fasterThan($0).contains(.dns) } == [.icm
 check(TunnelTransport.allCases.allSatisfy { !fasterThan($0).contains(.icmpUDP) },
       "ICMP is never a faster-path upgrade candidate (nothing is slower)")
 
+// MARK: - MagicProbe wire codec (udp443 upgrade probe <-> server responder)
+
+// The client's udp443 probe must speak the server's exact magic-UDP format
+// (probe.go / udp443.go: FWPROBE1, 16-byte nonce, 64-byte floor). A drift makes
+// the probe silently never pass, so udp443 upgrades would stop.
+check(MagicProbe.magic == Array("FWPROBE1".utf8), "probe magic matches server probeMagic")
+check(MagicProbe.nonceLen == 16, "nonce length matches server probeNonceLen")
+check(MagicProbe.minRequest == 64, "request floor matches server probeMinRequest")
+
+let n0 = [UInt8](repeating: 0xAB, count: MagicProbe.nonceLen)
+let req = MagicProbe.request(nonce: n0)
+check(req.count == MagicProbe.minRequest, "request is padded up to the 64-byte floor")
+check(Array(req.prefix(8)) == MagicProbe.magic, "request opens with the magic")
+check(Array(req[8 ..< 8 + MagicProbe.nonceLen]) == n0, "request carries the nonce after the magic")
+
+// A well-formed reply (magic + our nonce) passes; a wrong nonce or a short
+// datagram does not -- an unrelated packet on the port must not read as a pass.
+check(MagicProbe.replyMatches(MagicProbe.magic + n0, nonce: n0), "reply echoing our nonce passes")
+let n1 = [UInt8](repeating: 0xCD, count: MagicProbe.nonceLen)
+check(!MagicProbe.replyMatches(MagicProbe.magic + n1, nonce: n0), "reply with a different nonce fails")
+check(!MagicProbe.replyMatches(MagicProbe.magic, nonce: n0), "reply too short to carry a nonce fails")
+
 print("")
 if failures == 0 {
-    print("all KillSwitchRules + TunnelTransport + DoHStatus assertions passed")
+    print("all KillSwitchRules + TunnelTransport + DoHStatus + MagicProbe assertions passed")
     exit(0)
 } else {
     print("\(failures) assertion(s) failed")

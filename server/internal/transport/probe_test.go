@@ -36,6 +36,23 @@ func sendProbe(t *testing.T, addr string, magic []byte, nonce []byte, pad int) (
 	return buf[:n], nil
 }
 
+// The macOS client's udp443 upgrade probe (macos/.../PathUpgradeManager.swift,
+// enum MagicProbe) hardcodes these exact values. They are the wire contract
+// between the two languages; changing one side without the other silently makes
+// the client's probe never pass, so udp443 upgrades stop with no error. If this
+// test changes, update MagicProbe.magic / .nonceLen / .minRequest to match.
+func TestProbeWireConstantsMatchClient(t *testing.T) {
+	if string(probeMagic) != "FWPROBE1" {
+		t.Errorf("probeMagic = %q, want FWPROBE1 (macOS MagicProbe.magic)", probeMagic)
+	}
+	if probeNonceLen != 16 {
+		t.Errorf("probeNonceLen = %d, want 16 (macOS MagicProbe.nonceLen)", probeNonceLen)
+	}
+	if probeMinRequest != 64 {
+		t.Errorf("probeMinRequest = %d, want 64 (macOS MagicProbe.minRequest)", probeMinRequest)
+	}
+}
+
 func TestProbeResponderEchoesNonce(t *testing.T) {
 	port := freePortUDP(t)
 	r := NewProbeResponder(zap.NewNop())

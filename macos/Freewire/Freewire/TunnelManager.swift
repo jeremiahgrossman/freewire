@@ -551,11 +551,13 @@ final class TunnelManager: ObservableObject {
         // saved before this runs on every connect path; nil is a safe fallback to
         // the helper's default zone. Only relevant when upgrading off the ICMP
         // tunnel (the sole path from which DNS is a faster target).
+        let cached = CachedConnection.load(host: serverHost)
         let mgr = PathUpgradeManager(
             serverHost: serverHost,
             currentTransport: transport,
-            dnsTunnelDomain: CachedConnection.load(host: serverHost)?.dnsTunnelDomain,
-            helperURL: Self.tunnelHelperURL
+            dnsTunnelDomain: cached?.dnsTunnelDomain,
+            helperURL: Self.tunnelHelperURL,
+            udp443Port: cached?.tlsPort ?? 443
         )
         mgr.onUpgradeAvailable = { [weak self] faster in
             guard let self else { return }
@@ -595,11 +597,15 @@ final class TunnelManager: ObservableObject {
         // and let the fastest-first chain choose. It aims at WireGuard-direct and
         // falls through to whatever is fastest-available, so a portal-login that
         // opens the network upgrades DNS all the way to WireGuard, not just to the
-        // one path the probe happened to confirm. (forceTransport is nil here --
-        // the upgrade manager is suppressed while it is set -- so connectFromCache
-        // runs the fastest-first chain.)
+        // one path the probe happened to confirm.
+        //
+        // `fastestFirst: true` is load-bearing: connectFromCache otherwise prefers
+        // lastGoodTransport, which here is the SLOW carrier being left, so
+        // orderCandidates would move it to the front and the rebuild would settle
+        // right back on it -- making every upgrade a no-op. (forceTransport is nil
+        // here anyway; the upgrade manager is suppressed while it is set.)
         if let cached = CachedConnection.load(host: api.serverHost),
-           let result = await connectFromCache(cached) {
+           let result = await connectFromCache(cached, fastestFirst: true) {
             guard !Task.isCancelled else { await killTunnel(); return }
             lastGoodTransport = result.transport
             peerToken = cached.peerToken
@@ -899,8 +905,20 @@ final class TunnelManager: ObservableObject {
     /// connected to this server before. Returns nil if no transport carries the
     /// tunnel (e.g. the peer is no longer registered), leaving the caller to fall
     /// back to captive-portal handling.
-    private func connectFromCache(_ cached: CachedConnection) async -> (ifName: String, transport: TunnelTransport)? {
+    ///
+    /// `fastestFirst` distinguishes the two callers. Reconnect (false) prefers
+    /// the carrier that last carried traffic, so a café where only a late-chain
+    /// carrier works does not re-walk all eight on every drop. A path upgrade
+    /// (true) must NOT prefer the current carrier -- that is the slow one it is
+    /// trying to leave -- so it passes no preference and runs the true
+    /// fastest-first chain, climbing to the fastest the network now allows.
+    private func connectFromCache(_ cached: CachedConnection, fastestFirst: Bool = false) async -> (ifName: String, transport: TunnelTransport)? {
         state = .connecting(status: "Using your saved connection for this network.")
+        // Upgrade: no preference (fastest-first). Reconnect: prefer the last
+        // working carrier. A pinned forceTransport always wins for field tests.
+        let preferred = fastestFirst
+            ? Preferences.shared.forceTransport
+            : (Preferences.shared.forceTransport ?? lastGoodTransport?.rawValue)
         let cfg = TunnelConfig(
             privateKey:      identity.privateKeyBase64,
             serverPublicKey: cached.serverPublicKey,
@@ -920,8 +938,10 @@ final class TunnelManager: ObservableObject {
             // API path handles good networks), so preferring the last winner
             // cannot slow an open network onto a slower carrier. On the first
             // connect of a session lastGoodTransport is nil and the chain walks
-            // normally to discover what works.
-            preferredTransport: Preferences.shared.forceTransport ?? lastGoodTransport?.rawValue,
+            // normally to discover what works. During an upgrade `preferred` is
+            // nil (fastest-first) so the rebuild does not settle back on the slow
+            // carrier it is leaving.
+            preferredTransport: preferred,
             dnsResolver:     Preferences.shared.dnsResolverOverride,
             dnsTunnelDomain: cached.dnsTunnelDomain,
             cdnHost: cached.cdnHost

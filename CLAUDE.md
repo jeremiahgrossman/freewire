@@ -578,10 +578,29 @@ the moment anyone else connects.
   needs raw sockets (root) anyway. The faster slow-path targets — wireguard,
   udp443, wss443, cdn_wss — still decline by design: a cheap probe cannot predict
   whether they carry traffic, and the connect chain discovers them correctly.
+- **`PathUpgradeManager` now probes udp443, and path-upgrade actually upgrades
+  now (2026-08-28).** `probe(.udp443)` sends the server's magic UDP probe to
+  `serverHost:443` (native Swift, `enum MagicProbe`; the udp443 listener echoes
+  magic+nonce — the same signal the connect-time battery uses). udp443 is
+  WireGuard over UDP/443 at ~line rate, so this is the high-value upgrade: it
+  fires from every slower carrier (tls443/wss443/cdn_wss/dns) and carries no
+  WireGuard identity, so unlike a real WG handshake it cannot roam the active
+  session's endpoint. `probe(.wireguard)` stays false on purpose: a real 51820
+  handshake would use the device key and make the server roam the peer to the
+  direct path, tearing down the active carrier session; there is no magic
+  responder on 51820 (WireGuard owns it), and a network passing UDP/51820 almost
+  always passes UDP/443, so udp443 captures the win safely. **Companion bug fix
+  (was making ALL upgrades no-ops):** `performPathUpgrade` rebuilt via
+  `connectFromCache`, which preferred `lastGoodTransport` — the SLOW carrier being
+  left — so `orderCandidates` moved it to the front and the rebuild settled right
+  back on it. Added `fastestFirst:` to `connectFromCache`; the upgrade path passes
+  no preference and climbs to the fastest carrier the network now allows.
+  Cross-language wire contract pinned both sides (`macos/Tests` MagicProbe +
+  server `TestProbeWireConstantsMatchClient`). Desk-verified (server+tunnel race
+  tests, Swift harness, app build); live upgrade is field-unconfirmed. Direct
+  wireguard-51820 probing remains unavailable by design (the roaming hazard).
   Desk-verified (build + assertions); the live ICMP→DNS upgrade is
-  field-unconfirmed (sessions rarely land on ICMP). NOTE: a real WireGuard/udp443
-  handshake probe would help the COMMON slow-path case (DNS/TLS→fastest) and is
-  the higher-value follow-up; it needs the peer keys the manager does not hold.
+  field-unconfirmed (sessions rarely land on ICMP).
 - The kill-switch cluster is real and untouched: the helper replaces the whole
   pf ruleset instead of loading its anchor, `release()` runs `pfctl -F all`,
   `isEngaged()` infers state from a file, and `sanitize()` strips hostile
