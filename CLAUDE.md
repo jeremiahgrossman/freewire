@@ -44,13 +44,24 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   (post-handshake SNI reset), which no café has shown. The probe now splits
   `[SYN-RST]` (destination, desync futile) from `[reset]` (content, desync
   viable) from `[timeout]` (hard drop) so this is decided by measurement.
-- **PENDING FIELD DATA (the one open thread): is DNS *usable* here, or does it
-  just handshake?** Launch the Freewire app on the café wifi (it falls through to
-  DNS), then run `testing/cafe-measure.sh` (read-only: egress, latency,
-  throughput, a real page load) and read the file back. Expect ~72 Kbps (the DNS
-  floor); the question is usable-slow vs unusable-slow. No client change raises a
-  throttled-DNS ceiling (research-confirmed), so this grades the experience, it
-  does not gate a build.
+- **DNS-USABILITY QUESTION ANSWERED (2026-08-28, café #3, same shape as #2).**
+  The connect log settled it without `cafe-measure`: the app selected DNS and it
+  **came up**, then the full-tunnel collapse played out live in the stats —
+  `dns send 46/s, tail-drop 21/s (queue 256/256); downstream 29256 B/s` →
+  `tail-drop 68/s, downstream 13696 B/s` → `egress did not sustain: 0/2 to
+  1.1.1.1:53: dial tcp 1.1.1.1:443: i/o timeout` → DNS excluded → **CONN-2a**. So:
+  **(1) full-tunnel over this café's DNS is NOT viable** — whole-machine load
+  overflows the queue (256/256) and tears the tunnel down, exactly as theorized;
+  **(2) the carrier itself has real headroom** — ~27 KB/s downstream (~220 Kbps,
+  *faster* than café #2), `err 0/s` before the queue filled. The carrier is fine;
+  the OFFERED LOAD is the problem. This is the strongest possible justification for
+  Essentials Mode: reduce what enters the pipe and this café becomes usable for
+  messaging/email. Walled garden was fully sealed again (every provider `[SYN-RST]`
+  — fronting dead, desync futile).
+- **BUILDING NOW: Essentials Mode IP-only MVP** (`ESSENTIALS-MODE-SPEC.md`).
+  Destination-allowlist split tunnel: route only a low-bandwidth IP allowlist
+  (Apple `17.0.0.0/8`, operator mail IP) into the DNS carrier, blackhole the rest
+  on the physical path. Testable at the desk against `FREEWIRE_DNS_CARRIER_CAP`.
 - **PLAN B for the throttled-DNS-only café is specced: `ESSENTIALS-MODE-SPEC.md`
   (2026-08-28, not built).** When only throttled DNS escapes, full-tunnel (`0/0`)
   collapses under whole-machine load — so instead carry only a low-bandwidth

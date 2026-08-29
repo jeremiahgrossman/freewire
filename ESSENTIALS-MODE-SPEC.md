@@ -16,7 +16,28 @@ real (0% loss in isolation, `--dns-throughput`), but the current **full tunnel**
 the egress self-check's own packets die with them → the tunnel tears itself down.
 
 The failure is a **load mismatch, not a carrier failure.** The fix is to offer the
-carrier less traffic — specifically, only the traffic that *fits* in ~9 KB/s.
+carrier less traffic — specifically, only the traffic that *fits*.
+
+### Field evidence (2026-08-28, café #3 — the collapse, on camera)
+
+The app's normal connect at a hard destination-gated café selected DNS, brought it
+up, then collapsed under whole-machine load — captured live in the helper stats:
+
+```
+dns send 35/s, tail-drop  0/s (queue 192/256); downstream 27607 B/s   ← ~27 KB/s, err 0/s
+dns send 46/s, tail-drop 21/s (queue 256/256); downstream 29256 B/s   ← QUEUE FULL
+dns send 28/s, tail-drop 69/s (queue 256/256); downstream 16705 B/s   ← loss collapse
+dns send 35/s, tail-drop 68/s (queue 255/256); downstream 13696 B/s   ← falling
+→ egress did not sustain: 0/2 to 1.1.1.1:53: dial tcp 1.1.1.1:443: i/o timeout
+→ DNS excluded → CONN-2a (portal login prompt)
+```
+
+This proves both halves of the thesis at once: **full-tunnel over this café's DNS
+is not viable** (the queue overflows and the egress self-check's own packets are
+tail-dropped, tearing the tunnel down), **and the carrier has real headroom** —
+~27 KB/s downstream (~220 Kbps, faster than café #2's ~72 Kbps floor), with zero
+errors before the queue filled. The carrier is fine; the offered load is the
+problem. Scoping the offered load to an allowlist is what turns this café usable.
 
 ## The decision: admission control by SCOPE, not by pacing
 
