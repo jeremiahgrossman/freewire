@@ -326,3 +326,51 @@ func TestBuildersTolerateAnIDOnlyRequest(t *testing.T) {
 		}
 	}
 }
+
+// The forged-fragment reassembly is only safe while maxReassemblyTries covers
+// EVERY combination the retained candidates can form. With conflicts capped at
+// maxFragConflicts (each on a distinct index, since maxFragCandidates=2 bounds an
+// index to 2), the worst case is 2^maxFragConflicts combinations. If tries fall
+// below that, candidates() truncates the tail -- and the all-real combination sits
+// at the tail -- so an on-path attacker forging the first arrival of enough
+// fragments could push the real packet out of the tried set and DoS it. This
+// pins the invariant so a future bump to maxFragConflicts cannot silently break it.
+func TestReassemblyTriesCoverAllConflictCombinations(t *testing.T) {
+	need := 1
+	for i := 0; i < maxFragConflicts; i++ {
+		need *= 2
+	}
+	if maxReassemblyTries < need {
+		t.Fatalf("maxReassemblyTries=%d < 2^maxFragConflicts=%d: candidates() would truncate the "+
+			"all-real combination, letting on-path fragment forgery DoS a packet. Raise maxReassemblyTries "+
+			"to at least %d, or lower maxFragConflicts.", maxReassemblyTries, need, need)
+	}
+}
+
+// candidates() must place the all-first-seen combination at index 0 (the common
+// no-conflict path costs one AEAD open) and, under the max conflicts, still return
+// every combination (so the real one is never dropped).
+func TestCandidatesCoverAllUnderMaxConflicts(t *testing.T) {
+	// Build an assembly of maxFragConflicts indices, each with 2 candidates.
+	a := &dnsFragAssembly{
+		total:  maxFragConflicts,
+		chunks: make([][][]byte, maxFragConflicts),
+	}
+	for i := 0; i < maxFragConflicts; i++ {
+		a.chunks[i] = [][]byte{{byte(i), 0xAA}, {byte(i), 0xBB}} // first-seen, conflict
+	}
+	got := a.candidates()
+	want := 1
+	for i := 0; i < maxFragConflicts; i++ {
+		want *= 2
+	}
+	if len(got) != want {
+		t.Fatalf("candidates() returned %d combinations, want %d (all must be tried)", len(got), want)
+	}
+	// Index 0 is all-first-seen (every chunk's second byte 0xAA).
+	for i := 0; i < maxFragConflicts; i++ {
+		if got[0][i*2+1] != 0xAA {
+			t.Fatalf("index-0 combination is not all-first-seen at chunk %d", i)
+		}
+	}
+}

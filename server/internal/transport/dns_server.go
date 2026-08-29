@@ -130,6 +130,13 @@ func chunkKnown(alts [][]byte, chunk []byte) bool {
 // Bounds on candidate retention. Two candidates per index and eight total
 // combinations mean an attacker can force at most eight AEAD opens per packet,
 // while a client whose fragments all arrive intact still costs exactly one.
+//
+// INVARIANT: maxReassemblyTries >= 2^maxFragConflicts. candidates() truncates the
+// combination list at maxReassemblyTries, and the all-real combination is at the
+// tail under conflict, so if tries fell below 2^conflicts an on-path attacker
+// forging first-arrivals could push the real packet out of the tried set and DoS
+// it. Currently 8 == 2^3, exactly. Pinned by TestReassemblyTriesCoverAllConflictCombinations;
+// raise both together.
 const (
 	maxFragCandidates  = 2
 	maxFragConflicts   = 3
