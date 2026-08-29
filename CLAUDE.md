@@ -191,6 +191,23 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   (edge 3.163.157.40). Also verified pre-deploy: `-race` tests in both modules
   and wire-contract parity tests pinning `/.freewire-probe` and the magic
   constants across the two modules.
+  **TC-bit recursor experiment: RUN 2026-08-28 (desk, public recursors, no server
+  changes). Mechanism CONFIRMED, size gain UNRESOLVED.** All three recursors
+  (1.1.1.1/8.8.8.8/9.9.9.9) follow TC=1 to TCP and relay 5209 bytes intact; the
+  same answer is truncated over UDP at bufsize 1232 AND 4096, so the gain is
+  structurally TCP-only and not reachable by advertising a bigger EDNS buffer.
+  **Correction to an earlier claim in this file: the "~50x" figure was wrong.**
+  Our carrier does not sit at the generic ~1232 UDP default — it advertises EDNS0
+  4096 and targets ~4096 wire (~2400 plaintext after base32 8/5) — and 64KB is a
+  protocol maximum, not a measured recursor limit. Against the measured 5209 the
+  gain is ~1.3x. But 5209 is the largest PUBLIC RRset that exists to test with,
+  not a ceiling: a sweep of DNSKEY sets and big-SPF domains found nothing above
+  ~1KB otherwise. **The deciding experiment needs our own authoritative server
+  emitting progressively larger TXT answers over TCP** (UDP TC=1 for an
+  experiment name + DNS-over-TCP on our TCP/53). 1.3x is not worth a carrier;
+  10x+ clearly is. Design note found while scoping it: TCP/53 is now the probe
+  responder, so DNS-over-TCP must dispatch on the first two bytes — probe magic
+  starts `FW` (0x4657, an absurd DNS length prefix), so it separates cleanly.
   **Why TCP/53 matters more than "more bytes per query":** a portal's cap is
   never widenable, but it is often ESCAPABLE, because every limiter is keyed on
   something. Keyed per-client (MAC/IP) it is closed to us. Keyed per-destination

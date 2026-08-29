@@ -372,13 +372,38 @@ Café #3's signature (0% loss to a queue-full cliff at ~27 KB/s) fits every row,
 so which key is in use is unmeasured. Three of the four escape routes run
 through the new probe lines.
 
-**Also recorded, not built: TC-bit-forced recursor TCP fallback.** On the
-recursor path the ceiling caps *query rate*, not response size. An authoritative
-answer with TC=1 makes the recursor re-ask over TCP/53 to us, which can return up
-to 64KB in that one exchange. Downstream capacity per permitted query rises by
-roughly 50x with the query rate untouched. Upstream stays capped, but an
-asymmetric carrier is fine for browsing. Testable at the desk against a public
-recursor, no field trip needed.
+**TC-bit-forced recursor TCP fallback: MEASURED 2026-08-28, mechanism confirmed,
+size gain unresolved.** The idea: on the recursor path the cap is on *query
+rate*, not response size, so an authoritative answer with TC=1 makes the recursor
+re-ask over TCP/53 and return a bigger answer in that one exchange.
+
+What the desk measurement (public recursors, no server changes) settled:
+
+| question | result |
+|---|---|
+| Do recursors follow TC=1 to TCP? | **Yes**, 1.1.1.1 / 8.8.8.8 / 9.9.9.9 all do |
+| Do they relay a large answer over TCP? | **Yes**, 5209 bytes measured intact through all three |
+| Could a bigger EDNS buffer get it over UDP instead? | **No.** The same answer is truncated at bufsize 1232 AND 4096 (39-byte TC reply). TCP is the only route |
+
+So the mechanism is real and the gain is structurally TCP-only. **But the size
+gain is much smaller than first claimed, and the earlier "~50x" figure in this
+doc was wrong** on both sides of the ratio: our carrier does not sit at the
+generic ~1232 UDP default (it advertises EDNS0 4096 and targets ~4096 wire,
+`dnsEDNS0PayloadSize` / `downstreamDrainThresh`, so ~2400 bytes of plaintext
+after base32's 8/5 inflation), and the TCP side's 64KB is a protocol maximum, not
+a measured recursor limit. Against the measured 5209 the gain is only ~1.3x.
+
+That 5209 is a **lower bound, not a ceiling** — it is simply the largest public
+RRset found (amazon.com TXT; a sweep of DNSKEY sets and big-SPF domains produced
+nothing above ~1KB otherwise). Establishing the real ceiling needs our own
+authoritative server emitting progressively larger TXT answers over TCP, which is
+the deciding experiment: 1.3x is not worth a carrier, 10x+ clearly is.
+
+**Design note discovered while scoping it:** our TCP/53 is now the probe
+responder, so a DNS-over-TCP carrier (or this experiment) must dispatch on the
+first two bytes — the probe magic starts `FW` (0x4657, an absurd DNS length
+prefix), so probe-vs-DNS separates cleanly, the same peek trick `wss443` already
+uses.
 
 ## The honest meta-point
 
