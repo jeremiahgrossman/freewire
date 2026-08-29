@@ -14,16 +14,27 @@ jobs:
 
       # Constraint 1: client IPs must never reach a log line. The data must not
       # exist, so the check is on the symbol appearing at all in server code.
-      - name: No RemoteAddr in server or tunnel code
+      #
+      # Scope is server/ only, mirroring the authoritative Go test
+      # TestServerSourceNeverUsesRemoteAddr (server/internal/transport/
+      # privacy_lint_test.go), which is the source of truth for this constraint.
+      # The privacy guarantee is that the SERVER never records a client's source
+      # IP. On the client (tunnel/) RemoteAddr() reads the address the client
+      # dials OUT to -- our own server or carrier edge -- which it pins outside
+      # the tunnel (carrier peer pinning) and probes; that is not a user IP and
+      # not sensitive. _test.go is excluded for the same reason the Go test skips
+      # it: tests name the symbol on purpose (this file, and fakes that implement
+      # net.Conn.RemoteAddr()).
+      - name: No RemoteAddr in server code
         run: |
           # Strip // comments before matching so the rule can be discussed in
           # prose without tripping itself.
-          if grep -rn --include='*.go' 'RemoteAddr' server/ tunnel/ \
+          if grep -rn --include='*.go' --exclude='*_test.go' 'RemoteAddr' server/ \
              | grep -v -E ':[0-9]+:\s*//'; then
-            echo "::error::RemoteAddr is banned — client IPs must never enter a code path that could log them."
+            echo "::error::RemoteAddr is banned in server code — client IPs must never enter a code path that could log them."
             exit 1
           fi
-          echo "ok: no RemoteAddr references"
+          echo "ok: no RemoteAddr references in server source"
 
       # Constraint 2: the WireGuard private key never leaves the device. Catch
       # the obvious regression of logging or persisting it server-side.
