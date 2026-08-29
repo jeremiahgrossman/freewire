@@ -26,7 +26,7 @@ import (
 // Keepalive:  KEEPALIVE(0x20)
 // Encryption: ChaCha20-Poly1305, AAD = Freewire header (8 bytes)
 // Max payload: 1500 bytes (a full-size WireGuard packet at the 1420 tunnel MTU)
-// Rate limit: 20 packets/second hard cap
+// Rate limit: byte-based token bucket, ~500 Kbps (icmpRateBytesPerSec)
 // Keepalive:  every 15s when idle
 
 // maxSessionSeq bounds the sequence space a session may use.
@@ -64,8 +64,6 @@ const (
 	// exactly icmpMaxPayload silently truncated full-size packets, which were
 	// then encrypted and shipped as corrupt.
 	icmpReadBuf     = 2048
-	icmpWindowInit  = 4
-	icmpWindowMax   = 16
 	icmpKeepalive   = 15 * time.Second
 	icmpHandshakeTO = 2 * time.Second
 	// Outbound budget, in bytes per second.
@@ -101,7 +99,6 @@ type icmpClientSession struct {
 	aeadTx     cipher.AEAD
 	aeadRx     cipher.AEAD
 	txSeq      uint32 // outbound sequence (atomic)
-	windowSize int    // current sliding window size
 	conn       *net.UDPConn
 	mu         sync.Mutex
 	// rx guards against replay of server->client data packets, whose sequence
@@ -110,7 +107,9 @@ type icmpClientSession struct {
 	rx   replayWindow
 	rxMu sync.Mutex
 
-	// Rate limiter: token bucket, refilled every 50ms (20 pkt/s = 1 per 50ms).
+	// Rate limiter: byte-based token bucket refilled continuously at
+	// icmpRateBytesPerSec (~500 Kbps). Bytes, not packets, because the budget is
+	// a bit-rate: a packet cap starves real (small-packet) traffic far below it.
 	rateMu    sync.Mutex
 	rateAvail int
 	rateLast  time.Time
@@ -259,7 +258,6 @@ func icmpHandshake(cfg Config, uc *net.UDPConn) (*icmpClientSession, error) {
 		aeadTx:       aeadTx,
 		aeadRx:       aeadRx,
 		txSeq:        2, // 0=hello, 1=confirm, data starts at 2
-		windowSize:   icmpWindowInit,
 		conn:         uc,
 		rateAvail:    icmpRateBytesPerSec,
 		rateLast:     time.Now(),
@@ -324,8 +322,8 @@ func (s *icmpClientSession) run(lp net.PacketConn) {
 			select {
 			case sendCh <- pkt:
 			default:
-				// Queue full: drop rather than grow without bound. The 20 pkt/s
-				// rate cap means a backlog is never going to drain in time.
+				// Queue full: drop rather than grow without bound. The ~500 Kbps
+				// rate cap means a deep backlog is never going to drain in time.
 			}
 		}
 	}()
