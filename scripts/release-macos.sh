@@ -51,9 +51,19 @@ APP="$BUILD_DIR/$APP_NAME"
 # helpers are embedded -- would produce a bundle whose signature breaks the moment
 # the helpers are added. Manual signing gives the correct nested order.
 echo "==> archiving (Release, universal arm64+x86_64, unsigned; signing driven manually)"
-xcodebuild archive -project "$PROJ" -scheme "$SCHEME" -configuration Release \
+# Capture rather than discard: a bare >/dev/null hid the compiler diagnostics, so
+# an archive that failed on CI (a different Xcode than the developer's) reported
+# only "ARCHIVE FAILED" with no way to see which files or why. On failure, print
+# the errors and warnings before exiting.
+ARCHIVE_LOG="$BUILD_DIR/xcodebuild-archive.log"
+if ! xcodebuild archive -project "$PROJ" -scheme "$SCHEME" -configuration Release \
   -archivePath "$ARCHIVE" ARCHS="arm64 x86_64" ONLY_ACTIVE_ARCH=NO \
-  CODE_SIGNING_ALLOWED=NO >/dev/null
+  CODE_SIGNING_ALLOWED=NO > "$ARCHIVE_LOG" 2>&1; then
+  echo "ERROR: archive failed. Compiler diagnostics:" >&2
+  grep -E 'error:|warning:' "$ARCHIVE_LOG" | grep -viE 'ld: warning|AppIntents' | tail -50 >&2
+  echo "  (full log: $ARCHIVE_LOG)" >&2
+  exit 1
+fi
 cp -R "$ARCHIVE/Products/Applications/$APP_NAME" "$APP"
 [[ -d "$APP" ]] || { echo "ERROR: app bundle not produced at $APP" >&2; exit 1; }
 

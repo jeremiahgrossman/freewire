@@ -198,6 +198,32 @@ func defaultCandidates() []transportCandidate {
 			},
 		},
 		{
+			// WireGuard over a TCP connection to the server's port 53. Sits above
+			// the UDP DNS tunnel because it lifts two of that carrier's three
+			// ceilings: per-query payload (64KB messages vs a ~4096 EDNS0 budget)
+			// and the total absence of backpressure (TCP has flow control, so a
+			// throttled path paces the sender instead of tail-dropping into a
+			// teardown -- the failure that killed café #3). Sits below the
+			// 443-family carriers because it pays the same TCP-over-TCP penalty
+			// without their throughput.
+			//
+			// Whether a portal that passes UDP/53 also passes TCP/53 is unknown
+			// per venue, which is what --probe-battery's TCP/53 line measures.
+			name: "dns_tcp",
+			open: func(cfg Config) (net.PacketConn, net.Conn, error) {
+				tc, err := tryDNSTCP(cfg)
+				if err != nil {
+					return nil, nil, err
+				}
+				lp, err := newLocalUDPProxy()
+				if err != nil {
+					tc.Close()
+					return nil, nil, err
+				}
+				return lp, tc, nil
+			},
+		},
+		{
 			name: "dns",
 			open: func(cfg Config) (net.PacketConn, net.Conn, error) {
 				lp, err := runDNSTunnel(cfg)

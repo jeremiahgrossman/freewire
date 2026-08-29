@@ -291,6 +291,17 @@ func readLineLimited(br *bufio.Reader, limit int) (string, error) {
 // bridgeToWireGuard reads length-framed packets from transport, forwards them to
 // the local WireGuard UDP port, reads WireGuard responses, and writes them back
 // length-framed.
+// BridgeToWireGuard relays a stream carrier to the local WireGuard socket using
+// [2-byte BE length][packet] framing, and owns the connection from here on.
+//
+// Exported because that framing is also RFC 7766's DNS-over-TCP framing, so the
+// DNS-over-TCP carrier on port 53 is the same relay with a different way of
+// getting here. Reimplementing it there would fork the idle-deadline and frame
+// -ceiling handling that this one has already been corrected for twice.
+func (s *TLS443Server) BridgeToWireGuard(transport net.Conn) {
+	s.bridgeToWireGuard(transport)
+}
+
 func (s *TLS443Server) bridgeToWireGuard(transport net.Conn) {
 	wgAddr, err := net.ResolveUDPAddr("udp4", fmt.Sprintf("127.0.0.1:%d", s.wgPort))
 	if err != nil {

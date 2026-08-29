@@ -236,6 +236,12 @@ func main() {
 	// has never been asked about: the DNS carrier is UDP-only on both ends, and
 	// whether a portal that allow-lists UDP/53 also passes TCP/53 decides
 	// whether a much higher-payload-per-query DNS carrier is even possible here.
+	// The DNS-over-TCP carrier rides the probe's TCP/53 listener and reuses the
+	// TLS/443 server's stream bridge: identical [2-byte length][packet] framing,
+	// which is also RFC 7766's. Wired here rather than at construction because
+	// the bridge belongs to tls443, which is built above.
+	probe.WithDNSCarrier(tls443.BridgeToWireGuard)
+
 	if probeTCPPorts := safeProbeTCPPorts(cfg, log); len(probeTCPPorts) > 0 {
 		go func() {
 			if err := probe.RunTCP(ctx, probeTCPPorts); err != nil {

@@ -156,6 +156,17 @@ func probeBattery(args []string) int {
 		rows = append(rows, row{"CDN WebSocket/443", cdnOK, true})
 	}
 
+	// 6b. dns_tcp: WireGuard over a TCP connection to our port 53. SHIPPED, and
+	// it sits here because that is its place in the real chain: below the
+	// 443-family carriers (same TCP-over-TCP penalty, less throughput) and above
+	// the UDP DNS tunnel, which it beats by ~56x measured (32 Mbps vs ~0.57).
+	// The magic exchange matters more here than anywhere else in this battery:
+	// port 53 is the port most likely to be intercepted by a transparent DNS
+	// proxy, so a connection that merely opens proves nothing.
+	rows = append(rows, row{"TCP/53 (dns_tcp carrier)",
+		reportTCPProbe("TCP/53 (dns_tcp carrier)", net.JoinHostPort(server, "53"),
+			"WireGuard over TCP/53; ~56x the UDP DNS tunnel, and TCP gives real backpressure"), true})
+
 	// 7. dns: server-direct on UDP/53. The historical winner at hard captive
 	// portals: a portal MUST pass some DNS pre-auth to serve its own redirect, and
 	// where it lets outbound 53 reach our authoritative server, the DNS tunnel
@@ -165,18 +176,6 @@ func probeBattery(args []string) int {
 	// queries). ICMP needs raw sockets (root), so it is NOT in this battery -- run
 	// probe-transports.sh with the passwordless-sudo rule for the ICMP carrier.
 	rows = append(rows, row{"DNS/53 (server-direct)", reportDNS(cfg, server), true})
-
-	// 7b. TCP/53: a CANDIDATE (not built) and the highest-value unanswered
-	// question in this battery. Our DNS carrier is UDP-only on both ends, and
-	// what throttles it is a QUERY rate -- the client's AIMD limiter and a
-	// recursor's unique-name forwarding cap both meter queries, not bytes, and
-	// café #3 died at queue 256/256 with the carrier itself showing headroom.
-	// DNS-over-TCP (RFC 7766) carries 64KB messages against ~1232 usable bytes
-	// per EDNS0 UDP exchange, so it moves far more payload per query. Whether a
-	// portal that allow-lists UDP/53 also passes TCP/53 has never been measured.
-	rows = append(rows, row{"TCP/53 (DNS-over-TCP)",
-		reportTCPProbe("TCP/53 (DNS-over-TCP)", net.JoinHostPort(server, "53"),
-			"up to ~15x payload per query vs UDP/53 (measured); the query rate is what throttles us"), false})
 
 	// 7c. TCP/853: a CANDIDATE (not built). DoT's port, which walled gardens
 	// sometimes pass because Android Private DNS breaks without it.
@@ -259,10 +258,10 @@ func probeBattery(args []string) int {
 			if r.open {
 				fmt.Fprintln(os.Stderr, "  *** IPv6 egress reaches our server: a v6 WireGuard endpoint would run at full speed here. ***")
 			}
-		case "TCP/53 (DNS-over-TCP)":
+		case "TCP/53 (dns_tcp carrier)":
 			if r.open {
-				fmt.Fprintln(os.Stderr, "  *** TCP/53 reaches our server: a DNS-over-TCP carrier would move far more per query")
-				fmt.Fprintln(os.Stderr, "      than the UDP/53 carrier, whose ceiling is the QUERY rate, not the byte rate. ***")
+				fmt.Fprintln(os.Stderr, "  *** TCP/53 reaches our server: the dns_tcp carrier works here, at roughly 56x the")
+				fmt.Fprintln(os.Stderr, "      UDP DNS tunnel and with real backpressure instead of tail-drop. ***")
 			}
 		case "TCP/80 (HTTP, candidate)":
 			if r.open {

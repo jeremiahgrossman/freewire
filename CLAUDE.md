@@ -222,6 +222,38 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   outright rather than merely carrying more. Our café data does not distinguish
   which key is in use — 0% loss to a queue-full cliff fits all of them — so this
   is a measurement question the new lines now answer.
+- **DNS-over-TCP CARRIER (`dns_tcp`) BUILT, DEPLOYED, ROUTED-VERIFIED
+  (2026-08-28). 32 Mbps measured — ~56x the UDP DNS tunnel.** WireGuard over a
+  TCP connection to the server's port 53. This is the biggest single throughput
+  change the DNS path has ever had, and it lifts two of the UDP DNS carrier's
+  three ceilings: per-query payload (64KB messages vs a ~4096 EDNS0 budget) and,
+  more importantly, **backpressure** — TCP has flow control by construction, so a
+  throttled path paces the sender instead of tail-dropping indiscriminately into
+  a teardown, which is precisely how café #3 died at `queue 256/256`. That is the
+  long-deferred Stage-2 backpressure work obtained structurally rather than via a
+  custom wireguard-go `Bind`. The third ceiling (a recursor's ~14 unique names/s)
+  does not apply: this is server-direct, no recursor in the path.
+  **Chain position:** between `cdn_wss` and `dns` — it pays the same
+  TCP-over-TCP penalty as the 443 carriers without their throughput, but it
+  crushes the UDP DNS tunnel. Nine carriers now ship.
+  **Implementation:** the server shares TCP/53 three ways (probe / TC-bit
+  experiment / carrier) because 53 is the port portals actually pass. Dispatch is
+  unambiguous by construction: a DNS-over-TCP stream opens with a small BE length
+  prefix, the probe magic with `FW` = 0x4657 = 17943, an absurd DNS length. After
+  a hello that is a real DNS query, the stream is `[2-byte length][packet]` —
+  which IS RFC 7766's framing, so it reuses the TLS/443 server's existing bridge
+  unchanged. Honest limit: the message CONTENTS are not DNS, so this beats
+  destination/port gating, not body inspection.
+  **The hello's nonce-echo check is load-bearing:** port 53 is the port most
+  likely to be intercepted by a transparent DNS proxy, so a connection that
+  merely opens proves nothing — only our server can return magic+nonce.
+  **Verified:** routed run 6/6 TUNNELLED with clean teardown, 32 Mbps via
+  `testing/throughput-test.sh dns_tcp`, cross-module wire-contract tests, and the
+  chain-order tests updated deliberately (they caught the new carrier, which is
+  their job). `--probe-battery` now lists it as a SHIPPED carrier in chain
+  position; `testing/connect.sh` and `probe-transports.sh` accept `dns_tcp`.
+  **Field-unconfirmed:** whether a portal that passes UDP/53 also passes TCP/53.
+  That is exactly what the battery's TCP/53 line measures.
 - **Every field test runs the full carrier battery.** `testing/cafe-run.sh`
   surveys ALL 8 shipped carriers so a portal's support map is complete: the
   rootless probe battery covers 7/8 (wireguard, http_connect, tls443, wss443,

@@ -10,7 +10,12 @@ import "testing"
 // the battery that must move with it.
 //
 // icmp_udp is last in the chain but absent from the rootless battery (it needs
-// raw sockets); every other carrier appears in both, in this order.
+// raw sockets); every other carrier appears in both, in this order. dns_tcp is
+// in both, as "TCP/53 (dns_tcp carrier)".
+//
+// dns_tcp sits between cdn_wss and dns: it pays the same TCP-over-TCP penalty as
+// the 443 carriers without their throughput, so it is not one of them, but it
+// lifts two of the UDP DNS carrier's three ceilings, so it clearly outranks dns.
 func TestCarrierChainOrderIsStable(t *testing.T) {
 	want := []string{
 		"wireguard",
@@ -19,6 +24,7 @@ func TestCarrierChainOrderIsStable(t *testing.T) {
 		"tls443",
 		"wss443",
 		"cdn_wss",
+		"dns_tcp",
 		"dns",
 		"icmp_udp",
 	}

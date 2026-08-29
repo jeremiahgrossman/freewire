@@ -41,6 +41,13 @@ type ProbeResponder struct {
 	// (e.g. ".T.PINGHOP.NET"). Empty disables the TC-bit experiment's
 	// DNS-over-TCP half, so the probe port stays probe-only.
 	tcbitSuffix string
+
+	// carrierBridge, when set, relays a DNS-over-TCP carrier connection to
+	// WireGuard after the carrier hello. Port 53/tcp is shared three ways --
+	// probe, TC-bit experiment, carrier -- because 53 is the port captive
+	// portals actually pass, so everything that wants to reach us there has to
+	// arrive on it. The dispatch is unambiguous; see handleTCPProbe.
+	carrierBridge func(net.Conn)
 }
 
 // probeMagic opens every probe request and reply. Eight bytes, fixed, so a
@@ -73,6 +80,13 @@ func (p *ProbeResponder) WithTCBitZone(zone string) *ProbeResponder {
 	if zone != "" {
 		p.tcbitSuffix = "." + strings.ToUpper(strings.TrimSuffix(zone, "."))
 	}
+	return p
+}
+
+// WithDNSCarrier enables the DNS-over-TCP carrier on the probe's TCP port,
+// relaying accepted carrier connections to WireGuard via bridge.
+func (p *ProbeResponder) WithDNSCarrier(bridge func(net.Conn)) *ProbeResponder {
+	p.carrierBridge = bridge
 	return p
 }
 
@@ -256,7 +270,17 @@ func (p *ProbeResponder) serveTCP(ctx context.Context, port int, limiter *probeL
 }
 
 func (p *ProbeResponder) handleTCPProbe(conn net.Conn, limiter *probeLimiter) {
-	defer conn.Close()
+	// Closed here UNLESS the connection is handed to the carrier bridge, which
+	// then owns it. This cannot be a bare `defer conn.Close()` with an early
+	// return: runtime.Goexit runs deferred calls too, so an "escape without
+	// closing" via Goexit would still close the connection and kill every tunnel
+	// the instant it was established.
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			conn.Close()
+		}
+	}()
 	conn.SetDeadline(time.Now().Add(probeTCPIdleTimeout)) //nolint:errcheck
 
 	// Peek two bytes to separate a probe from DNS-over-TCP, which shares this
@@ -269,7 +293,7 @@ func (p *ProbeResponder) handleTCPProbe(conn net.Conn, limiter *probeLimiter) {
 		return
 	}
 	if !bytes.Equal(head[:], probeMagic[:2]) {
-		p.handleTCPDNS(conn, head, limiter)
+		handedOff = p.handleTCPDNS(conn, head, limiter)
 		return
 	}
 
@@ -340,36 +364,75 @@ func (p *ProbeResponder) HTTPProbeHandler() http.Handler {
 // It answers ONLY the experiment name. Anything else is closed unanswered, so
 // TCP/53 does not become a general resolver -- this is a measuring instrument,
 // not a service, and it comes out with the rest of the scaffolding.
-func (p *ProbeResponder) handleTCPDNS(conn net.Conn, head [2]byte, limiter *probeLimiter) {
+// handleTCPDNS serves the DNS-over-TCP half of port 53: the carrier hello, and
+// the TC-bit experiment. head holds the two length bytes already read.
+//
+// It answers ONLY those two names. Anything else is closed unanswered, so TCP/53
+// never becomes a general resolver. Returns true when the connection has been
+// handed to the carrier bridge and must NOT be closed by the caller.
+func (p *ProbeResponder) handleTCPDNS(conn net.Conn, head [2]byte, limiter *probeLimiter) bool {
 	n := int(binary.BigEndian.Uint16(head[:]))
 	if n < 12 || n > 4096 {
-		return
+		return false
 	}
 	query := make([]byte, n)
 	if _, err := io.ReadFull(conn, query); err != nil {
-		return
+		return false
 	}
 	name, err := extractQNAME(query, 12)
 	if err != nil {
-		return
+		return false
 	}
 	label := strings.ToUpper(strings.TrimSuffix(name, "."))
 	if p.tcbitSuffix == "" || !strings.HasSuffix(label, p.tcbitSuffix) {
-		return
+		return false
 	}
-	req, ok := parseTCBitQuery(strings.TrimSuffix(label, p.tcbitSuffix))
+	inner := strings.TrimSuffix(label, p.tcbitSuffix)
+
+	// Carrier hello: <nonce>.C -- answered with a nonce-echoing TXT so the client
+	// can tell OUR server from a portal's transparent DNS proxy, then the
+	// connection becomes a WireGuard relay.
+	if nonce, ok := parseDNSCarrierHello(inner); ok {
+		if p.carrierBridge == nil {
+			return false
+		}
+		if !limiter.allow() {
+			return false
+		}
+		reply := dnsCarrierHelloReply(query, nonce)
+		if reply == nil {
+			return false
+		}
+		var out [2]byte
+		binary.BigEndian.PutUint16(out[:], uint16(len(reply)))
+		if _, err := conn.Write(out[:]); err != nil {
+			return false
+		}
+		if _, err := conn.Write(reply); err != nil {
+			return false
+		}
+		// Clear the probe's short deadline: the bridge sets its own rolling idle
+		// deadline, and leaving this one would kill every tunnel after 10s.
+		conn.SetDeadline(time.Time{}) //nolint:errcheck
+		p.log.Info("dns-tcp carrier accepted")
+		go p.carrierBridge(conn)
+		return true
+	}
+
+	req, ok := parseTCBitQuery(inner)
 	if !ok {
-		return
+		return false
 	}
 	if !limiter.allow() {
-		return
+		return false
 	}
 	reply := tcbitSizedReply(query, req.size)
 	if reply == nil {
-		return
+		return false
 	}
 	var out [2]byte
 	binary.BigEndian.PutUint16(out[:], uint16(len(reply)))
 	conn.Write(out[:]) //nolint:errcheck
 	conn.Write(reply)  //nolint:errcheck
+	return false
 }
