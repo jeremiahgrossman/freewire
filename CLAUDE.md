@@ -70,10 +70,14 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   **App opt-in shipped:** Preferences toggle "Essentials Mode" (off by default) +
   the ESSENTIALS-1 panel state ("Limited connectivity — messaging and email only",
   replacing "Protected"; tooltip + icon drop the shield too). Parsing + config-path
-  unit-tested (8 cases). **Left:** field-validate over real throttled DNS at a café
-  (carrier headroom ~27 KB/s says messaging should flow); Phase 2 = domain allowlist
-  + scoped in-tunnel resolver (Signal, mail on fluid CDN IPs); an in-flow "enter
-  Essentials Mode?" offer when a portal leaves only a throttled carrier.
+  unit-tested (8 cases). **App opt-in has TWO paths:** the Settings toggle, and an
+  **in-flow one-shot offer** — on CONN-2a/CONN-2b the panel shows "Try messaging &
+  email only", which reconnects in essentials for THIS network without persisting
+  the pref (cleared on disconnect; self-hides after a failed essentials attempt).
+  **Left:** field-validate the whole flow over real throttled DNS at café #3 (tap
+  the offer when CONN-2a appears; carrier headroom ~27 KB/s says messaging should
+  flow); Phase 2 = domain allowlist + scoped in-tunnel resolver (Signal, mail on
+  fluid CDN IPs).
 - **PLAN B for the throttled-DNS-only café is specced: `ESSENTIALS-MODE-SPEC.md`
   (2026-08-28, not built).** When only throttled DNS escapes, full-tunnel (`0/0`)
   collapses under whole-machine load — so instead carry only a low-bandwidth
