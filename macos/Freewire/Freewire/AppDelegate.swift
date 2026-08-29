@@ -2,6 +2,12 @@ import Cocoa
 import SwiftUI
 import Combine
 
+// @MainActor: this is the app's UI delegate — every method runs on the main
+// thread, and its helpers read TunnelManager's @MainActor-isolated state
+// (`state`, `essentialsActive`). Without the annotation those reads compile as
+// a warning under the developer's newer Xcode but a hard error under the CI
+// runner's Xcode 16 (stricter Swift-5 actor-isolation), which broke the archive.
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
