@@ -18,6 +18,30 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 - **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
 - **In progress:** nothing
+- **LATEST (2026-08-28, end of session). Everything below is landed on `main`
+  (tree clean, all suites green: tunnel+server `-race`, Swift harness, app build).**
+  This session, in order:
+  1. **Essentials Mode built end to end** (Plan B for the throttled-DNS café):
+     IP-only split tunnel → app opt-in (Settings toggle + in-flow CONN-2a/2b offer +
+     ESSENTIALS-1 "Limited connectivity" status) → Phase 2 domain allowlist + scoped
+     resolver → editable allowlist. Adversarially reviewed (5 real bugs fixed);
+     unit-tested everywhere testable. **Two validations still owed, both need a real
+     run:** Phase-1 at café #3 (runbook Step 3), and the Phase-2 routed desk test
+     (`testing/essentials-domain-test.sh`, ⚠️ scopes DNS ~30s). See the ESSENTIALS
+     bullets below and `ESSENTIALS-MODE-SPEC.md`.
+  2. **PRIVACY-1 (DoH-unreachable warning) merged** — see the "now BUILT and
+     surfaced" bullet below. Reviewed; one real bug fixed (the `dohTornDown` reset
+     so the 60s retry survives a carrier fall-through).
+  3. **Path-upgrade FIXED + extended** (rode in on the PRIVACY-1 branch) — see the
+     `PathUpgradeManager now probes udp443` bullet. Upgrades were **completely
+     no-ops** before (rebuild kept the slow carrier); now they climb to line-rate
+     `udp443` via a magic probe that can't roam the active session.
+  4. **All four tunnel subsystems adversarially reviewed** — DNS send path, DNS
+     server, ICMP tunnel, essentials. The heavily-audited legacy is solid (a few
+     hardening fixes + one pinned invariant: `maxReassemblyTries >= 2^maxFragConflicts`
+     in `dns_server.go`); the fresh essentials code is where the bugs were.
+  Unchanged external blockers: Developer ID (kill switch), and the two field-gated
+  essentials validations above.
 - **CARRIER RE-VALIDATION DONE (2026-08-26, `testing/validate-all-carriers.sh`).**
   Ran every carrier routed against the live server on an open network: **7/7 carry
   real traffic** (wireguard/udp443/tls443/wss443/cdn_wss ~20–30 Mbps here —
