@@ -807,6 +807,15 @@ func recordPins() {
 func setupRouting(tunName, bypassHost, carrierPeer string, carrierResolvers []string, dohEndpoints []string) error {
 	// Already repaired at process start; nothing to redo here.
 
+	// A new routing setup is NOT a teardown: clear the DoH teardown latch so the
+	// PRIVACY-1 retry works on this carrier. The traffic-verified fall-through
+	// calls cleanupRouting (which latches dohTornDown) between carriers, so
+	// without this reset the first carrier's cleanup would permanently disable the
+	// DoH retry for the carrier that finally carries traffic.
+	dohMu.Lock()
+	dohTornDown = false
+	dohMu.Unlock()
+
 	// Resolve bypass host to an IP if needed.
 	bypassIP := bypassHost
 	if bypassHost != "" && net.ParseIP(bypassHost) == nil {
