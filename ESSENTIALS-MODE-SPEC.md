@@ -109,12 +109,19 @@ connect even to an allowlisted IP range.
   DNS — it is already an IP range, and the device maintains persistent APNs
   connections. The operator's mail server can be pinned by IP. This sidesteps
   resolution entirely and is enough to prove the model.
-- **Phase 2: domain allowlist + scoped in-tunnel resolver.** For domain-based
-  entries (Signal on fluid CDN IPs, a mail provider on Google/Fastmail ranges), run
-  a scoped resolver on the client (reusing the `doh.go` forwarder): allowlisted
-  names resolve *through the tunnel* (to our server), everything else is refused.
-  Route the resolved IPs into the tunnel dynamically. This is the maintainable
-  answer to CDN/IP fluidity, at the cost of real complexity.
+- **Phase 2: domain allowlist + scoped in-tunnel resolver — BUILT (2026-08-28),
+  integration not yet field-validated.** The allowlist accepts domains alongside
+  CIDRs. A scoped resolver (`essentials_resolver.go`) binds `127.0.0.1:53` (free on
+  the DNS carrier, where DoH is off), answers ONLY allowlisted names — forwarding
+  them to an upstream (`1.1.1.1`) routed *into* the tunnel, then dynamically routing
+  each resolved A/AAAA IP into the tunnel — and REFUSES everything else (NXDOMAIN),
+  so non-allowlisted apps cannot resolve and stay blackholed. `setupRouting` takes
+  the resolver over even on the slow carrier (safe: non-allowlisted names are
+  refused instantly, no round trip). Pure logic is unit-tested (matching,
+  normalization, DNS wire-format parse/extract). The routed takeover + dynamic
+  routing is built but wants a routed desk run and ideally Phase-1 field validation
+  before it is trusted — a system-resolver takeover is the class of change that
+  broke DNS earlier in this project.
 
 ## Default allowlist (seed, user-editable — single-user scope)
 

@@ -74,10 +74,17 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   **in-flow one-shot offer** — on CONN-2a/CONN-2b the panel shows "Try messaging &
   email only", which reconnects in essentials for THIS network without persisting
   the pref (cleared on disconnect; self-hides after a failed essentials attempt).
+  **PHASE 2 BUILT (2026-08-28), integration untested:** the allowlist now accepts
+  DOMAINS; a scoped resolver (`essentials_resolver.go`) answers only allowlisted
+  names (forwards to `1.1.1.1` routed into the tunnel, dynamically routes each
+  resolved IP in) and REFUSES the rest (NXDOMAIN → blackholed). Pure logic
+  unit-tested (matching/normalization/DNS wire-format, 12 cases); the routed
+  DNS-takeover + dynamic-routing INTEGRATION is built but NOT yet validated — a
+  system-resolver takeover is the class of change that broke DNS before, so validate
+  it on a routed desk run (ideally after Phase-1 field validation) before trusting.
   **Left:** field-validate the whole flow over real throttled DNS at café #3 (tap
   the offer when CONN-2a appears; carrier headroom ~27 KB/s says messaging should
-  flow); Phase 2 = domain allowlist + scoped in-tunnel resolver (Signal, mail on
-  fluid CDN IPs).
+  flow); routed desk-validate the Phase-2 resolver takeover.
 - **PLAN B for the throttled-DNS-only café is specced: `ESSENTIALS-MODE-SPEC.md`
   (2026-08-28, not built).** When only throttled DNS escapes, full-tunnel (`0/0`)
   collapses under whole-machine load — so instead carry only a low-bandwidth
