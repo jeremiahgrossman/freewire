@@ -208,7 +208,21 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   the rootless battery. `http_connect` was added to the battery 2026-08-26 (it
   uniquely probes the LOCAL gateway for a CONNECT proxy, not our server, so it had
   been absent). The `--walled-garden` line then maps which third-party
-  destinations the portal permits, to learn what fronting could work.
+  destinations the portal permits, to learn what fronting could work — **extended
+  2026-08-28 from TCP/443-only to three sections: 443, TCP/80, and DNS/53.**
+  The :80 rows use endpoints with a DETERMINISTIC expected response (the OS
+  captive-detection endpoints, plus our own nonce-echoing `/.freewire-probe`), so
+  a portal answering 200 with its login page reads as `intercepted` rather than a
+  pass, and redirects are deliberately not followed. The DNS/53 UDP rows run a
+  REAL tunnel handshake through each public resolver — resolving some public name
+  through a hijacked resolver would prove nothing — and the TCP/53 rows check the
+  reply's transaction ID, measuring portal POLICY on TCP/53 (our carrier is still
+  UDP-only, so `--probe-battery`'s TCP/53 line answers the other half: does it
+  reach US). Also fixed a latent bug that made the survey under-report: the
+  frontable-provider verdict re-stated its labels in a second list and one never
+  matched (`"Cloudflare (1.1.1.1)"` vs `"Cloudflare DNS (1.1.1.1)"`), so
+  Cloudflare was silently dropped from every verdict; `frontable` is now a field
+  on the destination list so that drift cannot recur.
 - To re-survey any café: `testing/cafe-run.sh` (self-contained, writes a /tmp
   file). The raw one-liner is
   `tunnel/freewire-tunnel --probe-battery --server 52.203.246.145 --insecure --cdn d29cubp361kpm8.cloudfront.net`
