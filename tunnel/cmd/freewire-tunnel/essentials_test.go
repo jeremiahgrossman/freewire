@@ -6,7 +6,7 @@ import (
 
 func TestEssentialsAllowlistInactiveWhenUnset(t *testing.T) {
 	t.Setenv(essentialsEnv, "")
-	if nets, active := essentialsAllowlist(); active || nets != nil {
+	if nets, domains, active := essentialsAllowlist(); active || nets != nil || domains != nil {
 		t.Fatalf("empty env must be inactive, got active=%v nets=%v", active, nets)
 	}
 }
@@ -14,7 +14,7 @@ func TestEssentialsAllowlistInactiveWhenUnset(t *testing.T) {
 func TestEssentialsAllowlistSeed(t *testing.T) {
 	for _, v := range []string{"1", "default", "on"} {
 		t.Setenv(essentialsEnv, v)
-		nets, active := essentialsAllowlist()
+		nets, _, active := essentialsAllowlist()
 		if !active {
 			t.Fatalf("%q should activate essentials mode", v)
 		}
@@ -27,7 +27,7 @@ func TestEssentialsAllowlistSeed(t *testing.T) {
 func TestEssentialsAllowlistExplicitCIDRsAndBareIP(t *testing.T) {
 	// A bare IP is accepted as a /32; whitespace is trimmed.
 	t.Setenv(essentialsEnv, "17.0.0.0/8, 203.0.113.9 ,198.51.100.0/24")
-	nets, active := essentialsAllowlist()
+	nets, _, active := essentialsAllowlist()
 	if !active {
 		t.Fatal("explicit list should be active")
 	}
@@ -45,7 +45,7 @@ func TestEssentialsAllowlistExplicitCIDRsAndBareIP(t *testing.T) {
 
 func TestEssentialsAllowlistSkipsInvalidButKeepsValid(t *testing.T) {
 	t.Setenv(essentialsEnv, "17.0.0.0/8,not-an-ip,999.1.2.3/8")
-	nets, active := essentialsAllowlist()
+	nets, _, active := essentialsAllowlist()
 	if !active {
 		t.Fatal("one valid entry should still activate")
 	}
@@ -58,7 +58,7 @@ func TestEssentialsAllowlistSkipsInvalidButKeepsValid(t *testing.T) {
 // than active with an empty allowlist, which would tunnel nothing at all.
 func TestEssentialsAllowlistAllInvalidIsInactive(t *testing.T) {
 	t.Setenv(essentialsEnv, "not-an-ip, also-bad")
-	if nets, active := essentialsAllowlist(); active || nets != nil {
+	if nets, domains, active := essentialsAllowlist(); active || nets != nil || domains != nil {
 		t.Fatalf("all-invalid must be inactive (fail safe to full tunnel), got active=%v nets=%v", active, nets)
 	}
 }
@@ -69,7 +69,7 @@ func TestEssentialsFromConfig(t *testing.T) {
 	t.Setenv(essentialsEnv, "") // env off, so config is the source
 	essentialsConfigAllowlist = []string{"17.0.0.0/8", "203.0.113.9"}
 	defer func() { essentialsConfigAllowlist = nil }()
-	nets, active := essentialsAllowlist()
+	nets, _, active := essentialsAllowlist()
 	if !active {
 		t.Fatal("config allowlist should activate essentials mode")
 	}
@@ -78,12 +78,44 @@ func TestEssentialsFromConfig(t *testing.T) {
 	}
 }
 
+// Phase 2: the allowlist accepts domains alongside CIDRs/IPs. IPs become routes,
+// everything hostname-shaped becomes a domain suffix for the scoped resolver.
+func TestEssentialsAllowlistMixedIPsAndDomains(t *testing.T) {
+	t.Setenv(essentialsEnv, "17.0.0.0/8, signal.org, 203.0.113.9, *.apple.com, chat.example.co.uk")
+	nets, domains, active := essentialsAllowlist()
+	if !active {
+		t.Fatal("mixed list should be active")
+	}
+	if got := essentialsCIDRs(nets); len(got) != 2 || got[0] != "17.0.0.0/8" || got[1] != "203.0.113.9/32" {
+		t.Fatalf("IP entries = %v, want [17.0.0.0/8 203.0.113.9/32]", got)
+	}
+	want := []string{"signal.org", "apple.com", "chat.example.co.uk"} // "*." stripped
+	if len(domains) != len(want) {
+		t.Fatalf("domains = %v, want %v", domains, want)
+	}
+	for i := range want {
+		if domains[i] != want[i] {
+			t.Fatalf("domain %d = %q, want %q (full %v)", i, domains[i], want[i], domains)
+		}
+	}
+}
+
+// A domain-only allowlist activates (the scoped resolver carries it; no static
+// routes needed at setup time).
+func TestEssentialsAllowlistDomainOnlyIsActive(t *testing.T) {
+	t.Setenv(essentialsEnv, "signal.org")
+	nets, domains, active := essentialsAllowlist()
+	if !active || len(nets) != 0 || len(domains) != 1 || domains[0] != "signal.org" {
+		t.Fatalf("domain-only: active=%v nets=%v domains=%v", active, nets, domains)
+	}
+}
+
 // The env var is a direct-binary test override: when both are set, env wins.
 func TestEssentialsEnvOverridesConfig(t *testing.T) {
 	t.Setenv(essentialsEnv, "198.51.100.0/24")
 	essentialsConfigAllowlist = []string{"17.0.0.0/8"}
 	defer func() { essentialsConfigAllowlist = nil }()
-	nets, active := essentialsAllowlist()
+	nets, _, active := essentialsAllowlist()
 	if !active {
 		t.Fatal("should be active")
 	}
@@ -94,7 +126,7 @@ func TestEssentialsEnvOverridesConfig(t *testing.T) {
 
 func TestEssentialsProbeTarget(t *testing.T) {
 	t.Setenv(essentialsEnv, "17.0.0.0/8,203.0.113.9")
-	nets, _ := essentialsAllowlist()
+	nets, _, _ := essentialsAllowlist()
 	if got := essentialsProbeTarget(nets); got != "17.0.0.0" {
 		t.Fatalf("probe target = %q, want 17.0.0.0 (network addr of the first prefix)", got)
 	}

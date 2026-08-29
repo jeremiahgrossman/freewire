@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -696,8 +697,14 @@ var bypassRoutes []string
 
 // essentialsRoutes records the allowlist CIDRs routed into the tunnel in
 // Essentials Mode, so cleanup removes exactly what was added (in place of the
-// 0/1+128/1 split-default).
+// 0/1+128/1 split-default). The scoped resolver appends dynamically-resolved IPs
+// concurrently, so all access is guarded by essentialsRoutesMu.
 var essentialsRoutes []string
+var essentialsRoutesMu sync.Mutex
+
+// essentialsResolverActive is the running scoped resolver (Phase 2 domain
+// allowlist), stopped on teardown.
+var essentialsResolverActive *essentialsResolver
 
 // pinnedRoutesFile records pinned host routes so a run that dies without
 // cleaning up can be repaired by the next one.
@@ -913,7 +920,7 @@ func setupRouting(tunName, bypassHost, carrierPeer string, carrierResolvers []st
 		return fmt.Errorf("disable ipv6: %w", err)
 	}
 
-	essNets, essActive := essentialsAllowlist()
+	essNets, essDomains, essActive := essentialsAllowlist()
 	if essActive {
 		// Essentials Mode: route ONLY the allowlist prefixes into the tunnel, not
 		// 0/1+128/1. Everything else stays on the physical default, where a captive
@@ -1039,6 +1046,49 @@ func setupRouting(tunName, bypassHost, carrierPeer string, carrierResolvers []st
 			"freewire-tunnel: essentials — routes installed; NOT gating on the whole-machine egress probe (allowlisted traffic only)")
 	} else if err := verifyTunnelCarriesTraffic(); err != nil {
 		return fmt.Errorf("tunnel routes installed but carry no traffic: %w", err)
+	}
+
+	// Essentials Mode with domain entries takes over the system resolver with the
+	// SCOPED resolver -- even on a slow carrier. The usual objection to a DoH
+	// takeover on the DNS carrier is that every lookup pays a slow round trip; here
+	// the scoped resolver REFUSES every non-allowlisted name instantly (no round
+	// trip at all) and forwards only the few allowlisted names through the tunnel,
+	// so that objection does not apply. IP-only Essentials (no domains) skips this
+	// and falls through to the DNS-1 "leave the resolver alone" path below.
+	if essActive && len(essDomains) > 0 {
+		// Route an upstream resolver INTO the tunnel so allowlisted lookups egress
+		// from our server, not the local (blackholing) network.
+		const essUpstream = "1.1.1.1:53"
+		essAddRoute := func(cidr string) {
+			exec.Command(routeBin, "-q", "-n", "delete", "-inet", cidr).Run() //nolint:errcheck
+			if out, err := exec.Command(routeBin, "-q", "-n", "add", "-inet", cidr,
+				"-interface", tunName).CombinedOutput(); err != nil {
+				fmt.Fprintf(os.Stderr, "freewire-tunnel: essentials: route %s: %v — %s\n",
+					cidr, err, strings.TrimSpace(string(out)))
+				return
+			}
+			essentialsRoutesMu.Lock()
+			essentialsRoutes = append(essentialsRoutes, cidr)
+			essentialsRoutesMu.Unlock()
+		}
+		essAddRoute("1.1.1.1/32") // the upstream itself
+		r, err := startEssentialsResolver(essDomains, essUpstream, func(ip string) {
+			if strings.Contains(ip, ":") {
+				return // v6 is switched off for the tunnel's lifetime; do not route it
+			}
+			essAddRoute(ip + "/32")
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr,
+				"freewire-tunnel: essentials resolver: %v — domain allowlist inactive (IP entries still routed)\n", err)
+		} else {
+			essentialsResolverActive = r
+			if err := setupDNS(); err != nil {
+				fmt.Fprintf(os.Stderr,
+					"freewire-tunnel: essentials: could not take over DNS: %v — allowlisted domains may not resolve\n", err)
+			}
+		}
+		return nil
 	}
 
 	// Encrypted DNS, on the transports that can carry it.
@@ -1258,24 +1308,34 @@ func cleanupRouting(tunName, bypassHost string) {
 	// tunnel, so restoring them after tearing the routes down would leave a
 	// window with no working name resolution.
 	cleanupDNS()
-	// Then the forwarder, once nothing is pointed at it.
+	// Then the forwarders, once nothing is pointed at them.
 	if dohActive != nil {
 		dohActive.Close()
 		dohActive = nil
+	}
+	if essentialsResolverActive != nil {
+		essentialsResolverActive.Close()
+		essentialsResolverActive = nil
 	}
 
 	for _, half := range []string{"0.0.0.0/1", "128.0.0.0/1"} {
 		exec.Command(routeBin, "-q", "-n", "delete", "-inet", half).Run() //nolint:errcheck
 	}
 
-	// Essentials Mode's allowlist routes, if any. Remove the tracked set from this
-	// run, and -- for a --restore that repairs a crashed run in the same shell --
-	// also re-derive the current env's allowlist so a stale entry cannot survive.
+	// Essentials Mode's allowlist routes, if any -- both the static prefixes and
+	// the IPs the scoped resolver added dynamically. Remove the tracked set from
+	// this run, and -- for a --restore that repairs a crashed run in the same shell
+	// -- also re-derive the current env's static allowlist so a stale entry cannot
+	// survive (dynamic IPs are not re-derivable, but a crashed run's routes are
+	// -interface entries the OS drops when the utun disappears).
+	essentialsRoutesMu.Lock()
 	toDrop := map[string]bool{}
 	for _, cidr := range essentialsRoutes {
 		toDrop[cidr] = true
 	}
-	if nets, active := essentialsAllowlist(); active {
+	essentialsRoutes = nil
+	essentialsRoutesMu.Unlock()
+	if nets, _, active := essentialsAllowlist(); active {
 		for _, cidr := range essentialsCIDRs(nets) {
 			toDrop[cidr] = true
 		}
@@ -1283,7 +1343,6 @@ func cleanupRouting(tunName, bypassHost string) {
 	for cidr := range toDrop {
 		exec.Command(routeBin, "-q", "-n", "delete", "-inet", cidr).Run() //nolint:errcheck
 	}
-	essentialsRoutes = nil
 
 	// Give IPv6 back. Left off, a crashed tunnel would silently cost the user
 	// v6 connectivity with nothing on screen to explain it.

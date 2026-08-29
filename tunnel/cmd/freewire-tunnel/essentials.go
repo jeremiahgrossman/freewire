@@ -46,7 +46,7 @@ var essentialsConfigAllowlist []string
 //
 // Invalid entries are reported and skipped; if none parse, the mode is inactive
 // (fail safe to full tunnel rather than silently tunnelling nothing).
-func essentialsAllowlist() (nets []*net.IPNet, active bool) {
+func essentialsAllowlist() (nets []*net.IPNet, domains []string, active bool) {
 	var specs []string
 	if raw := strings.TrimSpace(os.Getenv(essentialsEnv)); raw != "" {
 		switch raw {
@@ -58,26 +58,60 @@ func essentialsAllowlist() (nets []*net.IPNet, active bool) {
 	} else {
 		specs = essentialsConfigAllowlist
 	}
-	if len(specs) == 0 {
-		return nil, false
-	}
 	for _, s := range specs {
 		s = strings.TrimSpace(s)
 		if s == "" {
 			continue
 		}
-		if !strings.Contains(s, "/") {
-			s += "/32"
+		// An IP or CIDR is a static route; everything else is a domain suffix,
+		// resolved and routed dynamically by the scoped resolver (Phase 2).
+		cidr := s
+		if !strings.Contains(cidr, "/") && net.ParseIP(cidr) != nil {
+			cidr += "/32"
 		}
-		_, n, err := net.ParseCIDR(s)
-		if err != nil {
-			fmt.Fprintf(os.Stderr,
-				"freewire-tunnel: essentials: skipping invalid allowlist entry %q: %v\n", s, err)
+		if _, n, err := net.ParseCIDR(cidr); err == nil {
+			nets = append(nets, n)
 			continue
 		}
-		nets = append(nets, n)
+		if d := normalizeEssentialsDomain(s); d != "" {
+			domains = append(domains, d)
+			continue
+		}
+		fmt.Fprintf(os.Stderr,
+			"freewire-tunnel: essentials: skipping invalid allowlist entry %q (not an IP/CIDR or domain)\n", s)
 	}
-	return nets, len(nets) > 0
+	return nets, domains, len(nets)+len(domains) > 0
+}
+
+// normalizeEssentialsDomain lowercases, strips a leading "*." and a trailing dot,
+// and checks the result looks like a hostname (at least one dot, hostname chars
+// only). Returns "" if it does not qualify as a domain.
+func normalizeEssentialsDomain(s string) string {
+	d := strings.ToLower(strings.TrimSpace(s))
+	d = strings.TrimSuffix(d, ".")
+	d = strings.TrimPrefix(d, "*.")
+	if !strings.Contains(d, ".") {
+		return "" // require a dot; bare labels like "localhost" are not essentials
+	}
+	for _, r := range d {
+		if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '.' || r == '-') {
+			return ""
+		}
+	}
+	return d
+}
+
+// domainAllowed reports whether qname is an allowlisted domain or a subdomain of
+// one. "signal.org" matches "signal.org" and "chat.signal.org", but NOT
+// "notsignal.org" (a suffix match on a label boundary, not a substring).
+func domainAllowed(qname string, domains []string) bool {
+	q := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(qname), "."))
+	for _, d := range domains {
+		if q == d || strings.HasSuffix(q, "."+d) {
+			return true
+		}
+	}
+	return false
 }
 
 // essentialsCIDRs renders the allowlist as canonical CIDR strings, for route
