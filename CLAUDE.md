@@ -17,10 +17,29 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 > Do not add multi-user machinery without checking that decision has changed.
 
 - **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
-- **In progress:** peer-table persistence fix built and unit-tested (committed
-  locally, not yet deployed to the live server — see below); a repeat café
-  visit is needed once it's deployed, to actually validate `dns_tcp`/TCP-53
-  end to end (this trip's app-level connect failed for an unrelated reason).
+- **In progress:** peer-table persistence fix is DEPLOYED and verified live
+  (2026-08-29 — see below); next real step is a repeat café visit to validate
+  `dns_tcp`/TCP-53 end to end through the app (this trip's app-level connect
+  failed for the now-fixed reason, not a carrier problem).
+- **PEER-TABLE PERSISTENCE FIX DEPLOYED + VERIFIED LIVE (2026-08-29).** Built
+  same-day as the café finding below; deployed via `deploy/launch-aws.sh`
+  (server public key unchanged: `4MZT9TPG…S2DA=`, no client re-pin needed) and
+  proven end to end against the real server, not just unit tests: registered a
+  real peer, restarted the live `freewire` service over SSH, confirmed
+  `journalctl` logged `"restored peers from disk","count":1` with the exact
+  token/key/IP that had been registered, then brought the tunnel up again
+  using **only** the pre-restart saved credentials — zero new registration —
+  and got `ready utun6 10.0.0.2 wireguard`. That is the exact scenario that
+  stranded the app at today's café (a cached identity trying to reconnect
+  after a restart), now confirmed working. Post-deploy `--probe-battery`
+  reconfirmed all carriers healthy including `dns_tcp`/TCP-53. One
+  deploy-mechanics note for next time: the security group's SSH ingress rule
+  is only set at security-group *creation*, never refreshed on later
+  deploys, and a mobile-hotspot NAT can rotate the deployer's egress IP
+  mid-session — a single `/32` addition wasn't reliable here and the group had
+  to be opened to `0.0.0.0/0` just long enough to run the deploy, then
+  narrowed back to its original two IPs immediately after. Prefer deploying
+  from stable wifi when possible.
 - **FIELD TEST (2026-08-29, café #3 repeat). `dns_tcp`/TCP-53 answer confirmed;
   the app itself failed to connect for a DIFFERENT reason — a real reliability
   bug found and fixed.** The probe battery (rootless, not app-dependent)
