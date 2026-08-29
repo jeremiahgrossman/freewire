@@ -124,3 +124,21 @@ func TestAdaptiveLimiter_ConvergesToPathCapacity(t *testing.T) {
 		t.Errorf("limit settled at %v, want near the path capacity %d", got, K)
 	}
 }
+
+// A hostile env override must not break the min<=start<=max invariant. With
+// FREEWIRE_DNS_SEND_CONCURRENCY=1 the caller passes max=1 while min=2; the limiter
+// must clamp so the ceiling never sits below the floor and the limit stays bounded.
+func TestAdaptiveLimiterClampsMaxBelowMin(t *testing.T) {
+	a := newAdaptiveLimiter(1, 2, 1) // start=1, min=2, max=1 (misconfigured)
+	if a.min > a.max {
+		t.Fatalf("min %v > max %v after construction; invariant broken", a.min, a.max)
+	}
+	if a.limit < a.min || a.limit > a.max {
+		t.Fatalf("start limit %v not in [%v,%v]", a.limit, a.min, a.max)
+	}
+	// A decrease must not push the limit above max.
+	a.release(false)
+	if a.currentLimit() > a.max {
+		t.Fatalf("limit %v exceeds max %v after a decrease", a.currentLimit(), a.max)
+	}
+}

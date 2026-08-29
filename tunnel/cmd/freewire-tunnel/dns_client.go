@@ -698,8 +698,8 @@ func (s *dnsClientSession) sendPacket(pkt []byte) ([][]byte, error) {
 	// Sequential sending made a 12-fragment packet take ~12 round trips (~1.66s
 	// measured). The server reassembles by fragment index and tolerates
 	// out-of-order arrival. No per-packet bound is needed here: every dnsQuery
-	// draws from the global dnsQuerySem, so total in-flight queries across all
-	// packets and fragments stay capped there.
+	// acquires a slot on the send-side adaptiveLimiter (dnsSendLimiter), so total
+	// in-flight queries across all packets and fragments stay capped there.
 	type fragResult struct {
 		resp []byte
 		err  error

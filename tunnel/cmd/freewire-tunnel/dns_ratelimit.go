@@ -35,6 +35,18 @@ type adaptiveLimiter struct {
 }
 
 func newAdaptiveLimiter(start, min, max int) *adaptiveLimiter {
+	// Keep the invariant min <= start <= max, so a hostile env override (e.g.
+	// FREEWIRE_DNS_SEND_CONCURRENCY=1, which would make max < the min of 2) cannot
+	// leave the limit able to exceed max after a decrease, or start outside [min,max].
+	if max < min {
+		max = min
+	}
+	if start < min {
+		start = min
+	}
+	if start > max {
+		start = max
+	}
 	a := &adaptiveLimiter{limit: float64(start), min: float64(min), max: float64(max)}
 	a.cond = sync.NewCond(&a.mu)
 	return a
