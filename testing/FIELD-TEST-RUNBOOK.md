@@ -111,9 +111,28 @@ café the chain now falls past the fast carriers to `dns_tcp` **before** the UDP
 - **If it shows CONN-2a immediately**: the fast carriers and both DNS carriers all
   failed — go straight to **Step 3**.
 
-The `cafe-run.sh` battery from Step 1 already recorded whether TCP/53 is open, so
-the selected carrier and the battery line should agree; if they disagree, that
-disagreement is itself worth capturing.
+You do not have to guess which carrier settled: **`cafe-measure.sh` now prints the
+active carrier by name** (read from `/var/run/freewire-tunnel.status`, which the
+tunnel writes on connect). Its `which carrier` line says `dns_tcp` or `dns`
+outright, so the throughput number is attributable. The `cafe-run.sh` battery from
+Step 1 already recorded whether TCP/53 is reachable; the selected carrier and that
+battery line should agree, and a disagreement is itself worth capturing.
+
+**Step 2b (optional) — a clean, pinned `dns_tcp` number.** If auto-select is
+ambiguous, or you want a `dns_tcp` measurement regardless of what the chain would
+pick, pin it, reconnect, measure, then un-pin:
+```
+defaults write com.freewire.vpn.Freewire forceTransport dns_tcp
+```
+Reconnect in the app, then `bash testing/cafe-measure.sh`. The pin is a *reorder*
+(it puts `dns_tcp` first but the chain still falls through if TCP/53 is blocked),
+which is exactly why the `which carrier` line matters: if it reads `dns_tcp` the
+number is `dns_tcp`; if it fell through to `dns`, you will see that and know TCP/53
+is blocked here. **Always clear the pin afterward**, or the app stays pinned on the
+next network:
+```
+defaults delete com.freewire.vpn.Freewire forceTransport
+```
 
 **Step 3 — validate Essentials Mode (the in-flow offer).**
 This is the pending Phase-1 validation of the whole find→build→ship arc. On a

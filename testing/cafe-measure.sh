@@ -28,6 +28,23 @@ else
   echo "  no egress at all -- either fully blocked, or the tunnel is up but carrying nothing"
 fi
 
+echo "---- which carrier is carrying this? (so the number is attributable) ----"
+# The tunnel helper records the selected carrier here on ready, world-readable,
+# removed on teardown. Named explicitly because the app UI does not show it and
+# dns_tcp vs the UDP dns carrier is the whole question at a DNS-only café.
+CARRIER_FILE="/var/run/freewire-tunnel.status"
+if [ -r "$CARRIER_FILE" ]; then
+  CARRIER="$(tr -d '\n ' < "$CARRIER_FILE" 2>/dev/null)"
+  case "$CARRIER" in
+    dns_tcp) echo "  carrier: dns_tcp  *** the backpressured TCP/53 carrier -- the one this trip is validating ***" ;;
+    dns)     echo "  carrier: dns      (the UDP DNS tunnel -- café #3 showed this collapses under full-tunnel load)" ;;
+    "")      echo "  carrier: (status file present but empty)" ;;
+    *)       echo "  carrier: $CARRIER" ;;
+  esac
+else
+  echo "  carrier: unknown (no status file -- tunnel not up via the app, or a pre-status build)"
+fi
+
 echo "---- interface / routes (is a utun carrying the default?) ----"
 route -n get default 2>/dev/null | awk '/interface:/{print "  default via "$2}'
 ifconfig 2>/dev/null | grep -E "^utun[0-9]" | sed 's/:.*//' | sed 's/^/  up: /' | tail -3

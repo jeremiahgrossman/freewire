@@ -146,6 +146,7 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--restore" {
 		releaseStalePins()
 		restoreStaleDNS()
+		os.Remove(statusFile) //nolint:errcheck  clear a status left by a hard-killed run
 		fmt.Fprintln(os.Stderr, "freewire-tunnel: restored routes and resolvers")
 		os.Exit(0)
 	}
@@ -389,6 +390,15 @@ func main() {
 	// ready line by stopping the tunnel always finds it.
 	writePIDFile()
 	defer os.Remove(pidFile) //nolint:errcheck
+
+	// Record the selected carrier to a fixed, world-readable path so a field
+	// diagnostic (testing/cafe-measure.sh) can name the active carrier at a
+	// captive portal -- where the app UI does not show it and the ready line
+	// below (stdout) is consumed and then deleted by the app. Additive and
+	// strictly post-selection: it changes nothing about how the carrier was
+	// chosen. Contains only the carrier name, never a client IP.
+	writeStatusFile(transportName)
+	defer os.Remove(statusFile) //nolint:errcheck
 
 	// Signal ready to the parent Swift process.
 	fmt.Printf("ready %s %s %s\n", tunName, cfg.TunnelIP, transportName)
@@ -727,6 +737,15 @@ const pinnedRoutesFile = "/var/run/freewire-pinned-routes"
 
 func writePIDFile() {
 	os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o644) //nolint:errcheck
+}
+
+// statusFile names the carrier the tunnel came up on, for field diagnostics.
+// World-readable (0o644) so an unprivileged reader can name the active carrier;
+// the helper itself runs as root, so it can always write /var/run.
+const statusFile = "/var/run/freewire-tunnel.status"
+
+func writeStatusFile(transport string) {
+	os.WriteFile(statusFile, []byte(transport+"\n"), 0o644) //nolint:errcheck
 }
 
 // stopRunningTunnel signals the recorded tunnel and waits for it to exit.
