@@ -155,9 +155,70 @@ for t in TunnelTransport.allCases {
           "rawValue round-trips for \(t.rawValue)")
 }
 
+// MARK: - PRIVACY-1 DoH status parsing (the Go helper <-> app boundary)
+
+// Neither line: a transport that cannot carry DoH emits nothing here; that is
+// DNS-1, warned separately, so the leak state stays unknown (nil), not "leaking".
+check(DoHStatus.latestLeak(in: "ready utun6 10.0.0.2 tls443\n") == nil,
+      "no doh line -> nil (DNS-1 handled separately, not a false PRIVACY-1)")
+
+// Initial PRIVACY-1: the helper writes `doh down` during routing setup, before
+// `ready`. Parser must report leaking even with the ready line present.
+check(DoHStatus.latestLeak(in: "doh down\nready utun6 10.0.0.2 tls443\n") == true,
+      "doh down before ready -> leaking (PRIVACY-1 shown)")
+
+// Healthy path: `doh up` before `ready` -> not leaking.
+check(DoHStatus.latestLeak(in: "doh up\nready utun6 10.0.0.2 tls443\n") == false,
+      "doh up before ready -> not leaking")
+
+// Auto-dismiss: the 60s retry appends `doh up` after the initial `doh down`.
+// Newest wins, so the warning clears.
+check(DoHStatus.latestLeak(in: "doh down\nready utun6 10.0.0.2 tls443\ndoh up\n") == false,
+      "doh up after doh down -> not leaking (60s recovery dismisses the warning)")
+
+// A later regression to down would re-show it (newest wins both ways).
+check(DoHStatus.latestLeak(in: "doh up\ndoh down\n") == true,
+      "newest line wins in both directions")
+
+// MARK: - Path-upgrade candidate scope (probe .dns / .icmpUDP reasoning)
+
+// The upgrade manager probes only paths FASTER than the current one. That makes
+// DNS an upgrade target solely from ICMP, and ICMP a target from nobody -- which
+// is exactly why probe(.dns) is implemented and probe(.icmpUDP) stays false.
+// Pin it so a priority reorder cannot silently break that reasoning.
+func fasterThan(_ t: TunnelTransport) -> [TunnelTransport] {
+    TunnelTransport.allCases.filter { $0.priority < t.priority }
+}
+check(TunnelTransport.allCases.filter { fasterThan($0).contains(.dns) } == [.icmpUDP],
+      "DNS is a faster-path upgrade candidate only from ICMP")
+check(TunnelTransport.allCases.allSatisfy { !fasterThan($0).contains(.icmpUDP) },
+      "ICMP is never a faster-path upgrade candidate (nothing is slower)")
+
+// MARK: - MagicProbe wire codec (udp443 upgrade probe <-> server responder)
+
+// The client's udp443 probe must speak the server's exact magic-UDP format
+// (probe.go / udp443.go: FWPROBE1, 16-byte nonce, 64-byte floor). A drift makes
+// the probe silently never pass, so udp443 upgrades would stop.
+check(MagicProbe.magic == Array("FWPROBE1".utf8), "probe magic matches server probeMagic")
+check(MagicProbe.nonceLen == 16, "nonce length matches server probeNonceLen")
+check(MagicProbe.minRequest == 64, "request floor matches server probeMinRequest")
+
+let n0 = [UInt8](repeating: 0xAB, count: MagicProbe.nonceLen)
+let req = MagicProbe.request(nonce: n0)
+check(req.count == MagicProbe.minRequest, "request is padded up to the 64-byte floor")
+check(Array(req.prefix(8)) == MagicProbe.magic, "request opens with the magic")
+check(Array(req[8 ..< 8 + MagicProbe.nonceLen]) == n0, "request carries the nonce after the magic")
+
+// A well-formed reply (magic + our nonce) passes; a wrong nonce or a short
+// datagram does not -- an unrelated packet on the port must not read as a pass.
+check(MagicProbe.replyMatches(MagicProbe.magic + n0, nonce: n0), "reply echoing our nonce passes")
+let n1 = [UInt8](repeating: 0xCD, count: MagicProbe.nonceLen)
+check(!MagicProbe.replyMatches(MagicProbe.magic + n1, nonce: n0), "reply with a different nonce fails")
+check(!MagicProbe.replyMatches(MagicProbe.magic, nonce: n0), "reply too short to carry a nonce fails")
+
 print("")
 if failures == 0 {
-    print("all KillSwitchRules + TunnelTransport assertions passed")
+    print("all KillSwitchRules + TunnelTransport + DoHStatus + MagicProbe assertions passed")
     exit(0)
 } else {
     print("\(failures) assertion(s) failed")

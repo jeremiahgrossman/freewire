@@ -139,6 +139,21 @@ final class TunnelManager: ObservableObject {
         await connect()
     }
 
+    /// PRIVACY-1: true when the tunnel is up but encrypted DNS (DoH) is not, so
+    /// lookups reach the network's resolver in cleartext. The tunnel still
+    /// carries and encrypts traffic — only the lookups are exposed — so this
+    /// drives a soft warning *below* the connected status, never a replacement
+    /// for "Protected" (the same rendering rule DNS-1 follows). Published so the
+    /// connected panel re-renders; cleared automatically when the helper reports
+    /// DoH restored (it retries every 60s), and on teardown.
+    @Published private(set) var dohLeaking: Bool = false
+
+    /// The active tunnel's stdout file (where the helper writes "ready …" and
+    /// the "doh up"/"doh down" status lines), tailed by dohMonitorTask for later
+    /// DoH transitions. Removed and cleared on teardown.
+    private var dohStatusFileURL: URL?
+    private var dohMonitorTask: Task<Void, Never>?
+
     private let api: ServerAPI
     private let identity: DeviceIdentity
     let peerTokenBox = PeerTokenBox()
@@ -576,7 +591,18 @@ final class TunnelManager: ObservableObject {
         // switch away from it -- otherwise a forced DNS field test would drift to
         // TLS/443 the moment a probe found it reachable.
         if Preferences.shared.forceTransport != nil { return }
-        let mgr = PathUpgradeManager(serverHost: serverHost, currentTransport: transport)
+        // The DNS zone for the `.dns` upgrade probe. Read from the cache, which is
+        // saved before this runs on every connect path; nil is a safe fallback to
+        // the helper's default zone. Only relevant when upgrading off the ICMP
+        // tunnel (the sole path from which DNS is a faster target).
+        let cached = CachedConnection.load(host: serverHost)
+        let mgr = PathUpgradeManager(
+            serverHost: serverHost,
+            currentTransport: transport,
+            dnsTunnelDomain: cached?.dnsTunnelDomain,
+            helperURL: Self.tunnelHelperURL,
+            udp443Port: cached?.tlsPort ?? 443
+        )
         mgr.onUpgradeAvailable = { [weak self] faster in
             guard let self else { return }
             self.upgradeTask?.cancel()
@@ -615,11 +641,15 @@ final class TunnelManager: ObservableObject {
         // and let the fastest-first chain choose. It aims at WireGuard-direct and
         // falls through to whatever is fastest-available, so a portal-login that
         // opens the network upgrades DNS all the way to WireGuard, not just to the
-        // one path the probe happened to confirm. (forceTransport is nil here --
-        // the upgrade manager is suppressed while it is set -- so connectFromCache
-        // runs the fastest-first chain.)
+        // one path the probe happened to confirm.
+        //
+        // `fastestFirst: true` is load-bearing: connectFromCache otherwise prefers
+        // lastGoodTransport, which here is the SLOW carrier being left, so
+        // orderCandidates would move it to the front and the rebuild would settle
+        // right back on it -- making every upgrade a no-op. (forceTransport is nil
+        // here anyway; the upgrade manager is suppressed while it is set.)
         if let cached = CachedConnection.load(host: api.serverHost),
-           let result = await connectFromCache(cached) {
+           let result = await connectFromCache(cached, fastestFirst: true) {
             guard !Task.isCancelled else { await killTunnel(); return }
             lastGoodTransport = result.transport
             peerToken = cached.peerToken
@@ -818,6 +848,10 @@ final class TunnelManager: ObservableObject {
         // network" session, so the next manual connect starts as full tunnel.
         essentialsActive = false
         tryEssentialsOnce = false
+        // Stop tailing the old tunnel's stdout and clear the PRIVACY-1 warning:
+        // a torn-down tunnel is not leaking DNS, and the next launch will report
+        // its own DoH state afresh.
+        stopDoHMonitor()
         // Primary teardown: close the helper's stdin. It exits on EOF and runs
         // its own cleanup, with no privilege needed -- so this works even when the
         // sudo `--stop` below cannot authenticate. The `--stop` stays as a backup
@@ -838,6 +872,54 @@ final class TunnelManager: ObservableObject {
             p.waitUntilExit()
         }.value
         try? await Task.sleep(nanoseconds: 300_000_000)
+    }
+
+    // MARK: - DoH status monitor (PRIVACY-1)
+
+    /// Tails the active tunnel's stdout file for the helper's "doh up"/"doh down"
+    /// status lines and mirrors them onto `dohLeaking`.
+    ///
+    /// The helper writes "doh down" during routing setup (before "ready") when
+    /// the DoH forwarder cannot start, and "doh up" again if its 60s background
+    /// retry restores encrypted DNS — so polling this one file surfaces both the
+    /// initial PRIVACY-1 state and its automatic dismissal without any second
+    /// channel. A transport that cannot carry DoH at all (dns/icmp) emits neither
+    /// line; that is DNS-1, warned separately, so `dohLeaking` stays false here.
+    private func startDoHMonitor(readyFile: URL) {
+        stopDoHMonitor()
+        dohStatusFileURL = readyFile
+        dohMonitorTask = Task { [weak self] in
+            // Read immediately, then every few seconds. The first read picks up
+            // the state the helper already wrote by the time "ready" arrived.
+            while !Task.isCancelled {
+                let leak = await Self.readDoHLeak(from: readyFile)
+                guard let self, !Task.isCancelled else { return }
+                if let leak, self.dohLeaking != leak {
+                    self.dohLeaking = leak
+                }
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+        }
+    }
+
+    private func stopDoHMonitor() {
+        dohMonitorTask?.cancel()
+        dohMonitorTask = nil
+        dohLeaking = false
+        if let url = dohStatusFileURL {
+            try? FileManager.default.removeItem(at: url)
+            dohStatusFileURL = nil
+        }
+    }
+
+    /// Reads the file off the main actor and returns the newest DoH state it
+    /// carries: true for "doh down" (leaking), false for "doh up", nil if the
+    /// helper has written neither line.
+    nonisolated private static func readDoHLeak(from url: URL) async -> Bool? {
+        await Task.detached(priority: .utility) {
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+            return DoHStatus.latestLeak(in: text)
+        }.value
     }
 
     // MARK: - Tunnel launch
@@ -874,8 +956,20 @@ final class TunnelManager: ObservableObject {
     /// connected to this server before. Returns nil if no transport carries the
     /// tunnel (e.g. the peer is no longer registered), leaving the caller to fall
     /// back to captive-portal handling.
-    private func connectFromCache(_ cached: CachedConnection) async -> (ifName: String, transport: TunnelTransport)? {
+    ///
+    /// `fastestFirst` distinguishes the two callers. Reconnect (false) prefers
+    /// the carrier that last carried traffic, so a café where only a late-chain
+    /// carrier works does not re-walk all eight on every drop. A path upgrade
+    /// (true) must NOT prefer the current carrier -- that is the slow one it is
+    /// trying to leave -- so it passes no preference and runs the true
+    /// fastest-first chain, climbing to the fastest the network now allows.
+    private func connectFromCache(_ cached: CachedConnection, fastestFirst: Bool = false) async -> (ifName: String, transport: TunnelTransport)? {
         state = .connecting(status: "Using your saved connection for this network.")
+        // Upgrade: no preference (fastest-first). Reconnect: prefer the last
+        // working carrier. A pinned forceTransport always wins for field tests.
+        let preferred = fastestFirst
+            ? Preferences.shared.forceTransport
+            : (Preferences.shared.forceTransport ?? lastGoodTransport?.rawValue)
         let cfg = TunnelConfig(
             privateKey:      identity.privateKeyBase64,
             serverPublicKey: cached.serverPublicKey,
@@ -895,8 +989,10 @@ final class TunnelManager: ObservableObject {
             // API path handles good networks), so preferring the last winner
             // cannot slow an open network onto a slower carrier. On the first
             // connect of a session lastGoodTransport is nil and the chain walks
-            // normally to discover what works.
-            preferredTransport: Preferences.shared.forceTransport ?? lastGoodTransport?.rawValue,
+            // normally to discover what works. During an upgrade `preferred` is
+            // nil (fastest-first) so the rebuild does not settle back on the slow
+            // carrier it is leaving.
+            preferredTransport: preferred,
             dnsResolver:     Preferences.shared.dnsResolverOverride,
             dnsTunnelDomain: cached.dnsTunnelDomain,
             cdnHost: cached.cdnHost,
@@ -1018,17 +1114,22 @@ final class TunnelManager: ObservableObject {
 
         do {
             let readyLine = try await pollReady(at: readyFile, timeout: 30)
-            try? FileManager.default.removeItem(at: readyFile)
 
             // Line format: "ready <ifName> <tunnelIP> <transport>"
             let parts = readyLine.split(separator: " ")
             guard parts.count >= 2, parts[0] == "ready", !parts[1].isEmpty else {
+                try? FileManager.default.removeItem(at: readyFile)
                 throw TunnelError.badReadyLine(readyLine)
             }
             let ifName = String(parts[1])
             let transport = parts.count >= 4
                 ? TunnelTransport(rawValue: String(parts[3])) ?? .wireguard
                 : .wireguard
+            // Keep the stdout file and tail it for PRIVACY-1: the helper writes
+            // "doh down"/"doh up" on this same channel, before "ready" for the
+            // initial state and again if a background retry restores DoH. The
+            // monitor owns the file's lifetime now and removes it on teardown.
+            startDoHMonitor(readyFile: readyFile)
             return (ifName, transport)
         } catch TunnelError.allPathsFailed {
             try? FileManager.default.removeItem(at: readyFile)

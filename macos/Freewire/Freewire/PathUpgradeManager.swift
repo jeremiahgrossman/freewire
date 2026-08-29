@@ -24,13 +24,31 @@ final class PathUpgradeManager {
 
     private let serverHost: String
     private let wgPort: Int
+    /// DNS-tunnel zone, needed for the `.dns` upgrade probe (server-direct DNS
+    /// handshake). Nil falls back to the helper's default zone, which is correct
+    /// for the default deployment; a custom self-hosted zone left nil only makes
+    /// the probe a false negative (a missed DNS upgrade), never a bad one.
+    private let dnsTunnelDomain: String?
+    /// The rootless tunnel helper, used to run the `.dns` upgrade probe. Injected
+    /// (rather than resolved here) so this type has no dependency on TunnelManager
+    /// and stays compilable on its own for the standalone test harness. Nil
+    /// disables the DNS probe (it reports unreachable), which is safe.
+    private let helperURL: URL?
+    /// Port the udp443 carrier (WireGuard over UDP/443) listens on, for the
+    /// `.udp443` magic probe. Defaults to 443; a self-hosted server on another
+    /// port supplies it from the cache.
+    private let udp443Port: Int
     private var probeTask: Task<Void, Never>?
     private var currentTransport: TunnelTransport
 
-    init(serverHost: String, wgPort: Int = 51820, currentTransport: TunnelTransport) {
+    init(serverHost: String, wgPort: Int = 51820, currentTransport: TunnelTransport,
+         dnsTunnelDomain: String? = nil, helperURL: URL? = nil, udp443Port: Int = 443) {
         self.serverHost = serverHost
         self.wgPort = wgPort
         self.currentTransport = currentTransport
+        self.dnsTunnelDomain = dnsTunnelDomain
+        self.helperURL = helperURL
+        self.udp443Port = udp443Port
     }
 
     func start() {
@@ -102,10 +120,7 @@ final class PathUpgradeManager {
         case .wireguard:
             return await probeWireGuard()
         case .udp443:
-            // A direct WireGuard handshake on UDP/443. The chain discovers it on
-            // connect; the upgrade manager does not have a cheap UDP/443 probe
-            // distinct from a full handshake, so it declines rather than guess.
-            return false
+            return await probeUDP443()
         case .tls443:
             return await probeTCP443()
         case .cdnWSS:
@@ -125,10 +140,73 @@ final class PathUpgradeManager {
         case .httpConnect:
             return await probeHTTPConnect()
         case .dns:
-            return false // DNS tunnel probe would require full handshake; skip in upgrade manager
+            return await probeDNS()
         case .icmpUDP:
+            // ICMP is the slowest path, so it is never a candidate here (the
+            // candidate filter keeps only paths faster than the current one, and
+            // nothing is slower than ICMP). This arm is unreachable in practice;
+            // it stays false so a future reordering cannot turn it into a probe
+            // that would need raw sockets (root) the app does not have anyway.
             return false
         }
+    }
+
+    /// Probes the DNS tunnel by running the helper's rootless `--dns-probe`,
+    /// which completes the full DNS-carrier handshake against the server plus a
+    /// post-handshake poll and changes no system state, so it is safe on a
+    /// machine in use.
+    ///
+    /// Server-direct (resolver = the server itself): the server IP is pinned
+    /// outside the tunnel, so the probe takes the real DIRECT path rather than
+    /// looping back through the active tunnel, and field testing showed
+    /// server-direct is the DNS path that actually carries traffic (the
+    /// public-recursor path throttles below usable). A full handshake, not a bare
+    /// UDP/53 reachability ping: a false positive tears down a working tunnel to
+    /// rebuild on a DNS path that then fails, so the probe must prove the carrier
+    /// is live, not merely that a datagram left the host.
+    ///
+    /// This is the one slow-path upgrade with a sufficient rootless probe, and it
+    /// fires only from the ICMP tunnel (the sole path slower than DNS). Every
+    /// faster slow-path target -- wireguard, udp443, wss443, cdn_wss -- still
+    /// declines above, because a cheap probe cannot predict whether they carry
+    /// traffic and the connect chain discovers them correctly instead.
+    private func probeDNS() async -> Bool {
+        guard let binary = helperURL else { return false }
+        var args = ["--dns-probe", "--resolver", serverHost]
+        if let zone = dnsTunnelDomain, !zone.isEmpty {
+            args.append(contentsOf: ["--domain", zone])
+        }
+        // The DNS handshake is three round trips at ~1s each; the fallback chain
+        // budgets it at 3s, so hold the probe to the same ceiling rather than the
+        // generic 2s the TCP probes use.
+        return await Self.runProbeBinary(binary, args: args, timeout: 3)
+    }
+
+    /// Runs a rootless helper subcommand off the main actor and reports whether
+    /// it exited 0 within `timeout`, terminating it if it overruns.
+    ///
+    /// Carrier handshake protocols (DNS, ICMP) live in the Go helper; driving its
+    /// `--dns-probe` reuses that tested code rather than reimplementing the
+    /// protocol in Swift. Output is discarded -- the exit status is the whole
+    /// signal, and the helper never logs a client IP.
+    nonisolated private static func runProbeBinary(_ url: URL, args: [String], timeout: TimeInterval) async -> Bool {
+        await Task.detached(priority: .utility) {
+            let p = Process()
+            p.executableURL = url
+            p.arguments = args
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            guard (try? p.run()) != nil else { return false }
+
+            // Enforce the deadline: terminate a probe that overruns rather than
+            // let a stalled handshake hold the upgrade round open. Cancelled if
+            // the process finishes first.
+            let killer = DispatchWorkItem { if p.isRunning { p.terminate() } }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: killer)
+            p.waitUntilExit()
+            killer.cancel()
+            return p.terminationStatus == 0
+        }.value
     }
 
     /// HTTP CONNECT depends on a proxy running on the local gateway, not on the
@@ -237,20 +315,88 @@ final class PathUpgradeManager {
     }
 
     private func probeWireGuard() async -> Bool {
-        // Not implemented, and deliberately reports unreachable.
+        // Deliberately reports unreachable, and cannot be safely made otherwise
+        // from the client alone.
         //
-        // The previous version opened a UDP NWConnection to the WireGuard port
-        // and treated .ready as success. UDP is connectionless: NWConnection
-        // reaches .ready without a single packet leaving the host, so this
-        // returned true on every network including ones blocking UDP outright.
-        // The upgrade manager then restarted the tunnel about 60s after every
-        // connect, failed to reach WireGuard, and repeated.
+        // A UDP .ready check is a false positive (UDP is connectionless;
+        // NWConnection reaches .ready without a packet leaving the host), which
+        // is the bug this replaced. The only sufficient test is a real WireGuard
+        // handshake -- but that would use the device's static key, and a second
+        // authenticated handshake from the direct 51820 path makes the server
+        // ROAM the peer's endpoint there (WireGuard's roaming). The server would
+        // then send the peer's traffic to a direct socket the probe never routed,
+        // tearing down the active carrier-based session. There is no magic
+        // responder on 51820 either (WireGuard owns the port), so no cheap
+        // key-less probe exists.
         //
-        // A real probe has to send a WireGuard handshake initiation and wait
-        // for the response, which needs the peer keys the manager does not
-        // hold. Until that exists, reporting unreachable keeps the client on
-        // the working path rather than acting on a probe that cannot fail.
+        // udp443 IS WireGuard, just on UDP/443, and it has a key-less magic probe
+        // (probeUDP443) plus line-rate throughput (~125 Mbps, no TCP-over-TCP). A
+        // network that passes UDP/51820 almost always passes UDP/443, so probing
+        // udp443 captures the WireGuard-speed upgrade without the roaming hazard.
         return false
+    }
+
+    /// Probes udp443 (WireGuard straight over UDP/443) with the server's magic
+    /// UDP reachability probe -- the same signal the connect-time probe battery
+    /// uses to decide udp443. The udp443 listener dispatches a magic datagram to
+    /// its echo responder, so a returned nonce proves the portal passes UDP/443
+    /// to our server AND the carrier's dispatcher is live; the WireGuard handshake
+    /// that follows is between tested code and the same server, so reachability is
+    /// the sufficient test. One round trip, rootless, and -- unlike a real
+    /// WireGuard handshake -- it carries no WireGuard identity, so it cannot roam
+    /// the active session's endpoint (see probeWireGuard). The server IP is pinned
+    /// outside the tunnel, so the datagram takes the real DIRECT path.
+    private func probeUDP443() async -> Bool {
+        await Self.magicUDPReachable(host: serverHost, port: udp443Port, timeout: 2)
+    }
+
+    /// Sends the server's magic UDP probe and reports whether the echoed nonce
+    /// comes back within `timeout`. A pass requires the matching reply, never
+    /// merely a .ready UDP connection (connectionless, so .ready proves nothing).
+    nonisolated private static func magicUDPReachable(host: String, port: Int, timeout: TimeInterval) async -> Bool {
+        var nonce = [UInt8](repeating: 0, count: MagicProbe.nonceLen)
+        for i in nonce.indices { nonce[i] = UInt8.random(in: .min ... .max) }
+        let request = MagicProbe.request(nonce: nonce)
+
+        return await withCheckedContinuation { cont in
+            // The guard is crossed by the connection's callback queue and the
+            // timeout block on different threads; resuming a continuation twice
+            // is a fatalError, so serialize with a lock.
+            let lock = NSLock()
+            var done = false
+            let finish: (Bool) -> Void = { result in
+                lock.lock(); if done { lock.unlock(); return }; done = true; lock.unlock()
+                cont.resume(returning: result)
+            }
+
+            let conn = NWConnection(
+                host: NWEndpoint.Host(host),
+                port: NWEndpoint.Port(integerLiteral: UInt16(port)),
+                using: .udp
+            )
+            conn.stateUpdateHandler = { state in
+                switch state {
+                case .ready:
+                    conn.send(content: Data(request), completion: .contentProcessed { error in
+                        if error != nil { conn.cancel(); finish(false); return }
+                        conn.receiveMessage { data, _, _, _ in
+                            let ok = data.map { MagicProbe.replyMatches([UInt8]($0), nonce: nonce) } ?? false
+                            conn.cancel()
+                            finish(ok)
+                        }
+                    })
+                case .failed, .cancelled:
+                    conn.cancel(); finish(false)
+                default:
+                    break
+                }
+            }
+            conn.start(queue: .global())
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                conn.cancel()
+                finish(false)
+            }
+        }
     }
 
     private func probeTCP443() async -> Bool {
@@ -284,6 +430,42 @@ final class PathUpgradeManager {
             conn.start(queue: .global())
             DispatchQueue.global().asyncAfter(deadline: .now() + 2) { finish(false) }
         }
+    }
+}
+
+// MARK: - MagicProbe
+
+/// Wire codec for the server's magic UDP reachability probe (the udp443 upgrade
+/// probe, and what the connect-time probe battery uses).
+///
+/// Must match the server's `probeMagic` / `probeNonceLen` / `probeMinRequest`
+/// (server/internal/transport/probe.go and udp443.go). Pulled out as a pure
+/// codec so it is testable at the desk without a live server; the network glue
+/// (magicUDPReachable) stays in the manager.
+enum MagicProbe {
+    /// Opens every request and reply. Must equal the server's probeMagic.
+    static let magic = Array("FWPROBE1".utf8)
+    /// Nonce length the client supplies and the server echoes (probeNonceLen).
+    static let nonceLen = 16
+    /// Minimum request size; the reply is always smaller, so the responder can
+    /// never amplify. Clients pad up to this (probeMinRequest).
+    static let minRequest = 64
+
+    /// Builds a probe request: magic + nonce, zero-padded to the server minimum.
+    static func request(nonce: [UInt8]) -> [UInt8] {
+        var req = magic + nonce
+        if req.count < minRequest {
+            req.append(contentsOf: repeatElement(0, count: minRequest - req.count))
+        }
+        return req
+    }
+
+    /// True when a reply echoes our nonce after the magic prefix. A datagram that
+    /// does not echo the nonce is an unrelated packet on the port, not a pass.
+    static func replyMatches(_ reply: [UInt8], nonce: [UInt8]) -> Bool {
+        guard reply.count >= magic.count + nonceLen else { return false }
+        return Array(reply.prefix(magic.count)) == magic
+            && Array(reply[magic.count ..< magic.count + nonceLen]) == nonce
     }
 }
 

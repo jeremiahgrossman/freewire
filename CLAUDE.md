@@ -594,29 +594,66 @@ the moment anyone else connects.
 
 ### Known gaps that matter at any scale
 
-- **PRIVACY-1 (DoH-unreachable warning) is detected but not surfaced.** An
-  error-copy verbatim audit (2026-08-26, every `error-states-spec.md` string vs
-  the app) found ONE active, undeferred gap: when the DoH resolver is unreachable
-  the client falls back to the network's resolver, and the tunnel helper logs it
-  loudly (`dohNotice`, `tunnel/.../doh.go`) — but the macOS panel never shows the
-  spec's soft warning "Reduced privacy: DNS not encrypted" / "Freewire couldn't
-  reach its secure DNS resolver…". Building it is a feature (parse the helper
-  signal → panel warning → the spec's 60s auto-retry/auto-dismiss), not a copy
-  fix, so it is flagged not built. Every OTHER unbuilt spec string is legitimately
-  deferred: iOS states, Phase-3 self-hosted/QR/AWS-deploy copy, Sparkle UPDATE-1/2,
-  the post-helper kill-switch "traffic is blocked" variants, and the System
-  Extension PERM-3/4 copy (the macOS client uses utun + SMAppService, not a System
-  Extension, so that copy does not match the shipped architecture). **All
-  implemented active states are verbatim** — no paraphrased or invented copy —
-  so architecture rule 4 holds; many render as a label + caption split, which a
-  flat string search misses but concatenates to the exact spec sentence.
+- **PRIVACY-1 (DoH-unreachable warning) is now BUILT and surfaced (2026-08-28).**
+  Previously detected but never shown; the audit (2026-08-26) had it as the one
+  active, undeferred gap. Now wired end to end: the helper emits a structured
+  `doh down`/`doh up` status line on stdout — the same channel as `ready …` —
+  from `setupRouting` (initial state, before `ready`) and again if recovery
+  succeeds (`dohStatus`, `tunnel/.../doh.go`); the stderr `dohNotice` warning
+  stays as the operator log. `TunnelManager` tails that file into a published
+  `dohLeaking`, and `PanelView` shows the spec's soft warning VERBATIM below the
+  connected status (like DNS-1, not replacing "Protected"): "Reduced privacy: DNS
+  not encrypted" / "Freewire couldn't reach its secure DNS resolver. DNS queries
+  may be visible to your network provider until this resolves." The 60s
+  background retry (`startDoHRetry`/`tryDoHRecovery`) covers both failure modes
+  (forwarder never started; forwarder up but system-resolver takeover failed),
+  is serialized with teardown via `dohMu`/`dohTornDown`, and clears the warning
+  automatically on restore. Verified: `go test -race ./...`, `macos/Tests/run.sh`,
+  app build. Every OTHER unbuilt spec string is legitimately deferred: iOS states,
+  Phase-3 self-hosted/QR/AWS-deploy copy, Sparkle UPDATE-1/2, the post-helper
+  kill-switch "traffic is blocked" variants, and the System Extension PERM-3/4
+  copy (the macOS client uses utun + SMAppService, not a System Extension, so that
+  copy does not match the shipped architecture). **All implemented active states
+  are verbatim** — no paraphrased or invented copy — so architecture rule 4 holds;
+  many render as a label + caption split, which a flat string search misses but
+  concatenates to the exact spec sentence.
 - **`FreewireHelper` is written but cannot install.** `SMAppService` requires a
   Developer ID and this machine has no signing identity. The rule generation is
   done and tested (16 assertions); the packaging is not. The UI does not claim
   the kill switch — see `error-states-spec.md` §"Interim". **Resolved:**
   `SMAppService`, and **fail closed**.
-- `PathUpgradeManager` returns false for the DNS and ICMP paths; probing either
-  needs a full handshake.
+- `PathUpgradeManager` now probes the DNS path (2026-08-28): `probe(.dns)` runs
+  the helper's rootless `--dns-probe` (full DNS-carrier handshake + poll,
+  server-direct so it takes the pinned direct path, no system-state change),
+  which fires only when connected on ICMP — the sole path from which DNS is a
+  faster target (asserted in `macos/Tests`). `probe(.icmpUDP)` stays false: ICMP
+  is the slowest path so it is never an upgrade candidate, and an ICMP probe
+  needs raw sockets (root) anyway. The faster slow-path targets — wireguard,
+  udp443, wss443, cdn_wss — still decline by design: a cheap probe cannot predict
+  whether they carry traffic, and the connect chain discovers them correctly.
+- **`PathUpgradeManager` now probes udp443, and path-upgrade actually upgrades
+  now (2026-08-28).** `probe(.udp443)` sends the server's magic UDP probe to
+  `serverHost:443` (native Swift, `enum MagicProbe`; the udp443 listener echoes
+  magic+nonce — the same signal the connect-time battery uses). udp443 is
+  WireGuard over UDP/443 at ~line rate, so this is the high-value upgrade: it
+  fires from every slower carrier (tls443/wss443/cdn_wss/dns) and carries no
+  WireGuard identity, so unlike a real WG handshake it cannot roam the active
+  session's endpoint. `probe(.wireguard)` stays false on purpose: a real 51820
+  handshake would use the device key and make the server roam the peer to the
+  direct path, tearing down the active carrier session; there is no magic
+  responder on 51820 (WireGuard owns it), and a network passing UDP/51820 almost
+  always passes UDP/443, so udp443 captures the win safely. **Companion bug fix
+  (was making ALL upgrades no-ops):** `performPathUpgrade` rebuilt via
+  `connectFromCache`, which preferred `lastGoodTransport` — the SLOW carrier being
+  left — so `orderCandidates` moved it to the front and the rebuild settled right
+  back on it. Added `fastestFirst:` to `connectFromCache`; the upgrade path passes
+  no preference and climbs to the fastest carrier the network now allows.
+  Cross-language wire contract pinned both sides (`macos/Tests` MagicProbe +
+  server `TestProbeWireConstantsMatchClient`). Desk-verified (server+tunnel race
+  tests, Swift harness, app build); live upgrade is field-unconfirmed. Direct
+  wireguard-51820 probing remains unavailable by design (the roaming hazard).
+  Desk-verified (build + assertions); the live ICMP→DNS upgrade is
+  field-unconfirmed (sessions rarely land on ICMP).
 - The kill-switch cluster is real and untouched: the helper replaces the whole
   pf ruleset instead of loading its anchor, `release()` runs `pfctl -F all`,
   `isEngaged()` infers state from a file, and `sanitize()` strips hostile
