@@ -73,3 +73,9 @@ __pycache__/
 .idea/
 *.swp
 *~
+
+# Belt and braces for the "--help minted a keypair" bug: freewire-server used to
+# treat any argument as a config path, and config.Load CREATES a missing path
+# with a fresh WireGuard private key. Fixed in main.go's parseArgs, but an older
+# binary lying around can still do it, and this must never be committed again.
+server/--help

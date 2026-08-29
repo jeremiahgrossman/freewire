@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,7 +21,70 @@ import (
 	"github.com/freewire/server/internal/tunnel"
 )
 
+const usage = `freewire-server -- Freewire VPN server
+
+usage:
+  freewire-server [config-path]
+
+  config-path  path to the JSON config (default: freewire-server.json).
+               If the file does not exist it is CREATED, and a fresh WireGuard
+               keypair is generated into it -- so the path is the server's
+               identity, not just its settings.
+
+options:
+  -h, --help   print this message and exit
+`
+
+// parseArgs resolves the config path, or exits after printing usage.
+//
+// It exists because the config path used to be taken as os.Args[1] with no
+// validation, and config.Load CREATES a missing path with a freshly generated
+// private key. So `freewire-server --help` -- the first thing anyone types --
+// wrote a real keypair to a file literally named "--help", which then got
+// committed. Rejecting anything that looks like a flag is the guard: an
+// unrecognised option must never be able to mint an identity.
+//
+// Called before the exitCode defer below is registered, so os.Exit here skips
+// no cleanup.
+func parseArgs(args []string) string {
+	path, msg, code, stop := resolveConfigPath(args)
+	if stop {
+		out := os.Stderr
+		if code == 0 {
+			out = os.Stdout
+		}
+		fmt.Fprint(out, msg)
+		os.Exit(code)
+	}
+	return path
+}
+
+// resolveConfigPath is parseArgs without the exit, so the argument rules can be
+// tested. It returns the config path, or a message plus an exit code and
+// stop=true when the process should print and quit instead of starting.
+func resolveConfigPath(args []string) (path, msg string, code int, stop bool) {
+	const defaultPath = "freewire-server.json"
+	if len(args) == 0 {
+		return defaultPath, "", 0, false
+	}
+	if len(args) > 1 {
+		return "", fmt.Sprintf("freewire-server: expected at most one argument, got %d\n\n%s", len(args), usage), 2, true
+	}
+	switch args[0] {
+	case "-h", "--help", "help":
+		return "", usage, 0, true
+	}
+	if strings.HasPrefix(args[0], "-") {
+		// No flags are defined, so a leading dash is a typo or an unsupported
+		// option. Treating it as a config path is what caused the bug above.
+		return "", fmt.Sprintf("freewire-server: unknown option %q\n\n%s", args[0], usage), 2, true
+	}
+	return args[0], "", 0, false
+}
+
 func main() {
+	cfgPath := parseArgs(os.Args[1:])
+
 	// Registered first so it runs last: every other deferred cleanup below has
 	// already completed by the time the process exits. Calling os.Exit directly
 	// -- which log.Fatal does -- skips all of them, and one of them is the flush
@@ -32,11 +97,6 @@ func main() {
 		panic(err)
 	}
 	defer log.Sync() //nolint:errcheck
-
-	cfgPath := "freewire-server.json"
-	if len(os.Args) > 1 {
-		cfgPath = os.Args[1]
-	}
 
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
