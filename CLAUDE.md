@@ -58,10 +58,22 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   Essentials Mode: reduce what enters the pipe and this café becomes usable for
   messaging/email. Walled garden was fully sealed again (every provider `[SYN-RST]`
   — fronting dead, desync futile).
-- **BUILDING NOW: Essentials Mode IP-only MVP** (`ESSENTIALS-MODE-SPEC.md`).
-  Destination-allowlist split tunnel: route only a low-bandwidth IP allowlist
-  (Apple `17.0.0.0/8`, operator mail IP) into the DNS carrier, blackhole the rest
-  on the physical path. Testable at the desk against `FREEWIRE_DNS_CARRIER_CAP`.
+- **ESSENTIALS MODE IP-only MVP: BUILT + validated + app opt-in wired**
+  (`ESSENTIALS-MODE-SPEC.md`). Destination-allowlist split tunnel: routes only a
+  low-bandwidth IP allowlist (default Apple `17.0.0.0/8`) into the tunnel and
+  blackholes the rest on the physical path. **Routing validated on the hotspot**
+  (`testing/essentials-test.sh`, 2026-08-28): `17.0.0.0/8 → utun`, no split-default,
+  non-allowlisted egress = hotspot (NOT the server) — the machine is NOT
+  full-tunnelled. Activation rides in the client-assembled stdin config
+  (`essentials_allowlist`), NOT the server's `/v1/config`, so a server can't force
+  reduced scope; `FREEWIRE_ESSENTIALS` env overrides for direct runs.
+  **App opt-in shipped:** Preferences toggle "Essentials Mode" (off by default) +
+  the ESSENTIALS-1 panel state ("Limited connectivity — messaging and email only",
+  replacing "Protected"; tooltip + icon drop the shield too). Parsing + config-path
+  unit-tested (8 cases). **Left:** field-validate over real throttled DNS at a café
+  (carrier headroom ~27 KB/s says messaging should flow); Phase 2 = domain allowlist
+  + scoped in-tunnel resolver (Signal, mail on fluid CDN IPs); an in-flow "enter
+  Essentials Mode?" offer when a portal leaves only a throttled carrier.
 - **PLAN B for the throttled-DNS-only café is specced: `ESSENTIALS-MODE-SPEC.md`
   (2026-08-28, not built).** When only throttled DNS escapes, full-tunnel (`0/0`)
   collapses under whole-machine load — so instead carry only a low-bandwidth
