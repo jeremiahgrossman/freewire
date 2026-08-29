@@ -332,6 +332,16 @@ func (s *DNSServer) handleQuery(buf []byte, srcAddr *net.UDPAddr, conn *net.UDPC
 	// Strip the tunnel domain suffix.
 	label := strings.TrimSuffix(name, s.tunnelSuffix)
 
+	// TC-bit experiment (see tcbit.go): answer truncated so the recursor re-asks
+	// over TCP, where the sized answer is served. Checked before the tunnel
+	// dispatch because it owns its own label and must not be read as a tunnel
+	// opcode; it is scaffolding and comes out once the ceiling is known.
+	if req, ok := parseTCBitQuery(label); ok {
+		_ = req
+		conn.WriteToUDP(tcbitTruncatedReply(buf), srcAddr) //nolint:errcheck
+		return
+	}
+
 	parts := strings.Split(label, ".")
 	if len(parts) < 2 {
 		s.sendNXDomain(conn, srcAddr, req)

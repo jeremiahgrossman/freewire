@@ -127,7 +127,7 @@ func main() {
 	// because the ACME manager needs its port-80 handler: autocert owns :80 for
 	// the HTTP-01 challenge, so the only way the TCP/80 reachability probe can
 	// be answered on an ACME server is as autocert's fallback handler.
-	probe := transport.NewProbeResponder(log)
+	probe := transport.NewProbeResponder(log).WithTCBitZone(cfg.DNSTunnelDomain)
 	tlsCfg, err := certs.Build(cfg.TLSCertFile, cfg.TLSKeyFile, certs.ACMEOptions{
 		Domain:       cfg.ACMEDomain,
 		Email:        cfg.ACMEEmail,

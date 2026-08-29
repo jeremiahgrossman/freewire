@@ -393,11 +393,28 @@ generic ~1232 UDP default (it advertises EDNS0 4096 and targets ~4096 wire,
 after base32's 8/5 inflation), and the TCP side's 64KB is a protocol maximum, not
 a measured recursor limit. Against the measured 5209 the gain is only ~1.3x.
 
-That 5209 is a **lower bound, not a ceiling** — it is simply the largest public
-RRset found (amazon.com TXT; a sweep of DNSKEY sets and big-SPF domains produced
-nothing above ~1KB otherwise). Establishing the real ceiling needs our own
-authoritative server emitting progressively larger TXT answers over TCP, which is
-the deciding experiment: 1.3x is not worth a carrier, 10x+ clearly is.
+**RESOLVED 2026-08-28 by building the authoritative half** (`--tcbit`, server
+`tcbit.go`). Sweeping requested answer sizes through each recursor:
+
+| requested | 1.1.1.1 | 8.8.8.8 | 9.9.9.9 |
+|---|---|---|---|
+| 1232 B | OK | OK | OK |
+| 4096 B | **short (1036 B)** | OK | OK |
+| 16384 B | **short (1084 B)** | OK | OK |
+| 60000 B | **short (1860 B)** | **OK (60000 B)** | **OK (60000 B)** |
+
+**Google and Quad9 relay the full 60000 bytes — ~15x our current ~4096-byte
+per-query budget.** The idea is validated, and by a wide margin: at ~37KB of
+plaintext per permitted query (after base32's 8/5 inflation) a recursor's ~14
+unique names/s stops being the wall it is today.
+
+**Cloudflare is the exception, and fails in the worst way.** 1.1.1.1 caps the
+relayed answer around 1232 bytes and does it by SILENTLY DROPPING answer records
+— NOERROR, 2 of 9 records, no TC bit — so a naive client reads a partial answer
+as a complete one. Any carrier built on this must therefore verify it received
+what it asked for rather than trusting rcode, and **must not use 1.1.1.1**, which
+is currently our default DoH operator (`Config.DoHEndpoints`). Prefer 8.8.8.8 or
+9.9.9.9 for a recursor-path DNS-over-TCP carrier.
 
 **Design note discovered while scoping it:** our TCP/53 is now the probe
 responder, so a DNS-over-TCP carrier (or this experiment) must dispatch on the

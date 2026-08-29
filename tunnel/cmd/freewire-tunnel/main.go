@@ -199,6 +199,13 @@ func main() {
 		os.Exit(wgProbe(os.Args[2:]))
 	}
 
+	// --tcbit sweeps the largest answer a public recursor will relay from our
+	// authoritative server via a TC-forced TCP fetch. Experiment scaffolding;
+	// see server/internal/transport/tcbit.go. Rootless, non-routed.
+	if len(os.Args) > 1 && os.Args[1] == "--tcbit" {
+		os.Exit(tcbitSweep(os.Args[2:]))
+	}
+
 	// Repair before doing anything else, on every run. setupRouting used to be
 	// the only place this happened, so a machine left broken stayed broken
 	// until a connection attempt got far enough to reach it -- and a connection

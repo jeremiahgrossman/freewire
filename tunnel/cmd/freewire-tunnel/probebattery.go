@@ -176,7 +176,7 @@ func probeBattery(args []string) int {
 	// portal that allow-lists UDP/53 also passes TCP/53 has never been measured.
 	rows = append(rows, row{"TCP/53 (DNS-over-TCP)",
 		reportTCPProbe("TCP/53 (DNS-over-TCP)", net.JoinHostPort(server, "53"),
-			"~50x payload per query vs UDP/53; the query rate is what throttles us"), false})
+			"up to ~15x payload per query vs UDP/53 (measured); the query rate is what throttles us"), false})
 
 	// 7c. TCP/853: a CANDIDATE (not built). DoT's port, which walled gardens
 	// sometimes pass because Android Private DNS breaks without it.

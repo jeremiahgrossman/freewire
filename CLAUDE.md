@@ -202,10 +202,16 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   protocol maximum, not a measured recursor limit. Against the measured 5209 the
   gain is ~1.3x. But 5209 is the largest PUBLIC RRset that exists to test with,
   not a ceiling: a sweep of DNSKEY sets and big-SPF domains found nothing above
-  ~1KB otherwise. **The deciding experiment needs our own authoritative server
-  emitting progressively larger TXT answers over TCP** (UDP TC=1 for an
-  experiment name + DNS-over-TCP on our TCP/53). 1.3x is not worth a carrier;
-  10x+ clearly is. Design note found while scoping it: TCP/53 is now the probe
+  ~1KB otherwise. **RESOLVED 2026-08-28 by building the authoritative half** (`--tcbit`, server
+  `tcbit.go`, deployed): **8.8.8.8 and 9.9.9.9 relay the FULL 60000 bytes, ~15x
+  our current ~4096-byte per-query budget** (~37KB plaintext after base32 8/5).
+  The idea is validated by a wide margin — at that size a recursor's ~14 unique
+  names/s stops being the wall it is today. **Cloudflare is the exception and
+  fails in the worst way:** 1.1.1.1 caps around 1232 bytes by SILENTLY DROPPING
+  answer records (NOERROR, 2 of 9 records, no TC bit), so a partial answer reads
+  as complete. Any carrier built on this must verify it got what it asked for
+  rather than trusting rcode, and must NOT use 1.1.1.1 — currently our default
+  DoH operator (`Config.DoHEndpoints`). Design note found while scoping it: TCP/53 is now the probe
   responder, so DNS-over-TCP must dispatch on the first two bytes — probe magic
   starts `FW` (0x4657, an absurd DNS length prefix), so it separates cleanly.
   **Why TCP/53 matters more than "more bytes per query":** a portal's cap is

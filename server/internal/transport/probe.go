@@ -3,11 +3,13 @@ package transport
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,6 +37,10 @@ import (
 //     address -- the privacy guarantee holds here too.
 type ProbeResponder struct {
 	log *zap.Logger
+	// tcbitSuffix is the uppercased, dot-prefixed authoritative zone
+	// (e.g. ".T.PINGHOP.NET"). Empty disables the TC-bit experiment's
+	// DNS-over-TCP half, so the probe port stays probe-only.
+	tcbitSuffix string
 }
 
 // probeMagic opens every probe request and reply. Eight bytes, fixed, so a
@@ -59,6 +65,15 @@ const (
 // NewProbeResponder builds a responder. It holds no per-connection state.
 func NewProbeResponder(log *zap.Logger) *ProbeResponder {
 	return &ProbeResponder{log: log}
+}
+
+// WithTCBitZone enables the TC-bit experiment's DNS-over-TCP half for zone
+// (e.g. "t.pinghop.net"). Scaffolding; see tcbit.go.
+func (p *ProbeResponder) WithTCBitZone(zone string) *ProbeResponder {
+	if zone != "" {
+		p.tcbitSuffix = "." + strings.ToUpper(strings.TrimSuffix(zone, "."))
+	}
+	return p
 }
 
 // Run listens on every port in ports (UDP, both v4 and v6 via a dual-stack
@@ -244,10 +259,25 @@ func (p *ProbeResponder) handleTCPProbe(conn net.Conn, limiter *probeLimiter) {
 	defer conn.Close()
 	conn.SetDeadline(time.Now().Add(probeTCPIdleTimeout)) //nolint:errcheck
 
-	// Read exactly the probe floor. A shorter write is not a probe, and reading
-	// no more than this keeps the responder from being a byte sink.
+	// Peek two bytes to separate a probe from DNS-over-TCP, which shares this
+	// port when it is 53. The two cannot be confused: a DNS-over-TCP stream opens
+	// with a 2-byte BE length prefix, always small, while a probe opens with
+	// "FW" = 0x4657 = 17943, an absurd length for a DNS message. Same peek trick
+	// wss443 uses to tell a raw frame from an HTTP upgrade inside TLS.
+	var head [2]byte
+	if _, err := io.ReadFull(conn, head[:]); err != nil {
+		return
+	}
+	if !bytes.Equal(head[:], probeMagic[:2]) {
+		p.handleTCPDNS(conn, head, limiter)
+		return
+	}
+
+	// Read the rest of the probe floor. A shorter write is not a probe, and
+	// reading no more than this keeps the responder from being a byte sink.
 	req := make([]byte, probeMinRequest)
-	if _, err := io.ReadFull(conn, req); err != nil {
+	copy(req, head[:])
+	if _, err := io.ReadFull(conn, req[2:]); err != nil {
 		return
 	}
 	if !bytes.HasPrefix(req, probeMagic) {
@@ -301,4 +331,45 @@ func (p *ProbeResponder) HTTPProbeHandler() http.Handler {
 		w.Write(nonce)      //nolint:errcheck
 	})
 	return mux
+}
+
+// handleTCPDNS serves the TC-bit experiment over DNS-over-TCP (RFC 7766) on the
+// probe port, when that port is 53. head holds the two length bytes already read
+// by the dispatch above.
+//
+// It answers ONLY the experiment name. Anything else is closed unanswered, so
+// TCP/53 does not become a general resolver -- this is a measuring instrument,
+// not a service, and it comes out with the rest of the scaffolding.
+func (p *ProbeResponder) handleTCPDNS(conn net.Conn, head [2]byte, limiter *probeLimiter) {
+	n := int(binary.BigEndian.Uint16(head[:]))
+	if n < 12 || n > 4096 {
+		return
+	}
+	query := make([]byte, n)
+	if _, err := io.ReadFull(conn, query); err != nil {
+		return
+	}
+	name, err := extractQNAME(query, 12)
+	if err != nil {
+		return
+	}
+	label := strings.ToUpper(strings.TrimSuffix(name, "."))
+	if p.tcbitSuffix == "" || !strings.HasSuffix(label, p.tcbitSuffix) {
+		return
+	}
+	req, ok := parseTCBitQuery(strings.TrimSuffix(label, p.tcbitSuffix))
+	if !ok {
+		return
+	}
+	if !limiter.allow() {
+		return
+	}
+	reply := tcbitSizedReply(query, req.size)
+	if reply == nil {
+		return
+	}
+	var out [2]byte
+	binary.BigEndian.PutUint16(out[:], uint16(len(reply)))
+	conn.Write(out[:]) //nolint:errcheck
+	conn.Write(reply)  //nolint:errcheck
 }
