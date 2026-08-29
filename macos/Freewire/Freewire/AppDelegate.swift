@@ -150,7 +150,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func icon(for state: TunnelState) -> NSImage? {
-        let img = NSImage(systemSymbolName: state.iconSymbol, accessibilityDescription: "Freewire")
+        // state.iconSymbol reads the essentialsMode PREF for the connected shield,
+        // which is wrong for a one-shot in-flow offer (essentialsActive without the
+        // pref). Override here, where the manager's real flag is reachable, so the
+        // icon matches the tooltip and panel: no shield when scope is limited.
+        var symbol = state.iconSymbol
+        if case .connected = state, tunnelManager?.essentialsActive == true {
+            symbol = "exclamationmark.triangle.fill"
+        }
+        let img = NSImage(systemSymbolName: symbol, accessibilityDescription: "Freewire")
         img?.isTemplate = true
         return img
     }

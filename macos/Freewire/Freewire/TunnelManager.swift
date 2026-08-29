@@ -42,12 +42,12 @@ enum TunnelState {
         case .noNetwork:               return "network.slash"
         case .connecting, .upgrading:  return "network.badge.shield.half.filled"
         case .connected:
-            // DEBUG-1 / ESSENTIALS-1: with routing skipped nothing is protected,
-            // and in Essentials Mode only the allowlist is — the menu bar icon is
-            // the signal most users act on without opening the panel, so a shield
-            // there would be the same lie in a smaller space.
-            return (UserDefaults.standard.bool(forKey: "skipRouting")
-                    || UserDefaults.standard.bool(forKey: "essentialsMode"))
+            // DEBUG-1: with routing skipped nothing is protected, and the menu bar
+            // icon is the signal most users act on without opening the panel, so a
+            // shield there would be the same lie in a smaller space. (ESSENTIALS-1
+            // is handled by AppDelegate.icon(), which reads the manager's real
+            // essentialsActive flag — the pref is wrong for a one-shot offer.)
+            return UserDefaults.standard.bool(forKey: "skipRouting")
                 ? "exclamationmark.triangle.fill"
                 : "checkmark.shield.fill"
         case .reconnecting:            return "exclamationmark.triangle.fill"
