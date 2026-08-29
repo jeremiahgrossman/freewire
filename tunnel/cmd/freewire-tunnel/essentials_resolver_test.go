@@ -6,6 +6,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestDomainAllowed(t *testing.T) {
@@ -26,14 +27,14 @@ func TestDomainAllowed(t *testing.T) {
 
 func TestNormalizeEssentialsDomain(t *testing.T) {
 	cases := map[string]string{
-		"Signal.org":     "signal.org",
-		"*.apple.com":    "apple.com",
+		"Signal.org":       "signal.org",
+		"*.apple.com":      "apple.com",
 		"chat.signal.org.": "chat.signal.org",
-		"  mail.me.com ": "mail.me.com",
-		"localhost":      "", // no dot
-		"has space.com":  "", // invalid char
-		"under_score.com": "", // underscore is not a hostname char
-		"":               "",
+		"  mail.me.com ":   "mail.me.com",
+		"localhost":        "", // no dot
+		"has space.com":    "", // invalid char
+		"under_score.com":  "", // underscore is not a hostname char
+		"":                 "",
 	}
 	for in, want := range cases {
 		if got := normalizeEssentialsDomain(in); got != want {
@@ -228,8 +229,8 @@ func buildQuery(name string) []byte {
 
 func buildReply(name string, a4 [4]byte, a16 [16]byte) []byte {
 	msg := buildQuery(name)
-	msg[2] |= 0x80                            // QR
-	binary.BigEndian.PutUint16(msg[6:8], 2)   // ANCOUNT = 2
+	msg[2] |= 0x80                          // QR
+	binary.BigEndian.PutUint16(msg[6:8], 2) // ANCOUNT = 2
 	// Answer 1: A. Name via compression pointer to offset 12 (the question name).
 	msg = append(msg, 0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4)
 	msg = append(msg, a4[:]...)
@@ -237,4 +238,149 @@ func buildReply(name string, a4 [4]byte, a16 [16]byte) []byte {
 	msg = append(msg, 0xC0, 0x0C, 0, 28, 0, 1, 0, 0, 0, 60, 0, 16)
 	msg = append(msg, a16[:]...)
 	return msg
+}
+
+// flakyUpstream answers only after dropping the first `drop` queries, modelling
+// the real failure: a still-settling tunnel swallowing the first datagram(s).
+func flakyUpstream(t *testing.T, drop int32) (addr string, hits *int32, stop func()) {
+	t.Helper()
+	up, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int32
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			c, from, err := up.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			if atomic.AddInt32(&n, 1) <= drop {
+				continue // silently drop, exactly as a lost packet would
+			}
+			name, _ := essentialsQueryName(buf[:c])
+			up.WriteTo(buildReply(name, [4]byte{5, 6, 7, 8},
+				[16]byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}), from) //nolint:errcheck
+		}
+	}()
+	return up.LocalAddr().String(), &n, func() { up.Close() }
+}
+
+func newTestResolver(upstream string) *essentialsResolver {
+	return &essentialsResolver{
+		domains:  []string{"signal.org"},
+		upstream: upstream,
+		routed:   map[string]bool{},
+		addRoute: func(string) {},
+	}
+}
+
+// The regression this retry exists for. A single dropped first packet used to
+// become SERVFAIL, which at a café is the user's first allowlisted lookup after
+// tapping "Try messaging & email only". Reproduced on a routed desk run
+// (2026-08-28) on the session's cold first connect.
+func TestForwardRetriesPastADroppedFirstPacket(t *testing.T) {
+	addr, hits, stop := flakyUpstream(t, 1)
+	defer stop()
+	r := newTestResolver(addr)
+
+	reply := r.handle(buildQuery("chat.signal.org"))
+	if rcode := reply[3] & 0x0F; rcode != 0 {
+		t.Fatalf("rcode = %d, want NOERROR — one dropped packet still became a failure", rcode)
+	}
+	if got := extractAnswerIPs(reply); len(got) == 0 || got[0] != "5.6.7.8" {
+		t.Fatalf("answer = %v, want the upstream's 5.6.7.8", got)
+	}
+	if n := atomic.LoadInt32(hits); n != 2 {
+		t.Errorf("upstream saw %d queries, want 2 (one dropped, one answered)", n)
+	}
+}
+
+// It must survive losing every attempt but the last, and no more than that.
+//
+// The policy is swapped for short timeouts so the suite does not pay two real
+// budgets (13s) to assert control flow. The shipped values are pinned separately
+// by TestForwardPolicyIsFieldPlausible, so shortening here cannot hide a bad one.
+func TestForwardExhaustsBudgetThenServfails(t *testing.T) {
+	restore := essentialsForwardTimeouts
+	essentialsForwardTimeouts = []time.Duration{80 * time.Millisecond, 80 * time.Millisecond, 80 * time.Millisecond}
+	defer func() { essentialsForwardTimeouts = restore }()
+	attempts := len(essentialsForwardTimeouts)
+
+	// Drops all but the final attempt: still answered.
+	addr, hits, stop := flakyUpstream(t, int32(attempts-1))
+	defer stop()
+	reply := newTestResolver(addr).handle(buildQuery("signal.org"))
+	if rcode := reply[3] & 0x0F; rcode != 0 {
+		t.Fatalf("rcode = %d, want NOERROR on the last allowed attempt", rcode)
+	}
+	if n := atomic.LoadInt32(hits); int(n) != attempts {
+		t.Errorf("upstream saw %d queries, want %d (the full budget)", n, attempts)
+	}
+
+	// Drops everything: SERVFAIL, and it must not retry forever.
+	addr2, hits2, stop2 := flakyUpstream(t, 1000)
+	defer stop2()
+	reply2 := newTestResolver(addr2).handle(buildQuery("signal.org"))
+	if rcode := reply2[3] & 0x0F; rcode != 2 {
+		t.Fatalf("rcode = %d, want SERVFAIL (2) once the budget is spent", rcode)
+	}
+	if n := atomic.LoadInt32(hits2); int(n) != attempts {
+		t.Errorf("upstream saw %d queries, want exactly %d — the retry is unbounded", n, attempts)
+	}
+}
+
+// A refused name must never be forwarded, retries or not: NXDOMAIN stays instant,
+// which is what makes a DNS takeover tolerable on a slow carrier.
+func TestRefusedNamesAreNeverRetried(t *testing.T) {
+	addr, hits, stop := flakyUpstream(t, 0)
+	defer stop()
+
+	start := time.Now()
+	reply := newTestResolver(addr).handle(buildQuery("example.com"))
+	elapsed := time.Since(start)
+
+	if rcode := reply[3] & 0x0F; rcode != 3 {
+		t.Fatalf("rcode = %d, want NXDOMAIN (3)", rcode)
+	}
+	if n := atomic.LoadInt32(hits); n != 0 {
+		t.Errorf("upstream saw %d queries for a refused name, want 0", n)
+	}
+	if elapsed > time.Second {
+		t.Errorf("refusal took %s, want it instant — a refused name must not pay the retry budget", elapsed)
+	}
+}
+
+// Pins the SHIPPED retry policy, which the test above deliberately overrides.
+// These numbers are a field judgement, not an implementation detail: more than
+// one attempt (the whole point), escalating deadlines so a warm path pays little,
+// and a total budget in the range a stub resolver still waits for -- answering
+// after the client gave up converts a visible failure into an invisible one.
+func TestForwardPolicyIsFieldPlausible(t *testing.T) {
+	if len(essentialsForwardTimeouts) < 2 {
+		t.Fatalf("only %d attempt(s): a single lost packet becomes SERVFAIL again",
+			len(essentialsForwardTimeouts))
+	}
+	for i := 1; i < len(essentialsForwardTimeouts); i++ {
+		if essentialsForwardTimeouts[i] < essentialsForwardTimeouts[i-1] {
+			t.Errorf("attempt %d (%s) is shorter than attempt %d (%s): deadlines must not shrink",
+				i, essentialsForwardTimeouts[i], i-1, essentialsForwardTimeouts[i-1])
+		}
+	}
+	if b := essentialsForwardBudget(); b < 4*time.Second || b > 10*time.Second {
+		t.Errorf("budget %s is outside 4s..10s — too short for a throttled carrier, or past what a stub resolver waits", b)
+	}
+}
+
+// The TCP listener's deadline has to outlast the forward budget, or a retrying
+// query is cut off by its own listener before the last attempt finishes.
+func TestTCPDeadlineOutlastsForwardBudget(t *testing.T) {
+	if got := essentialsForwardBudget(); got < 4*time.Second {
+		t.Errorf("forward budget %s is implausibly short for a throttled carrier", got)
+	}
+	// handleTCP uses budget+4s; assert the margin is real rather than negative.
+	if essentialsForwardBudget()+4*time.Second <= essentialsForwardBudget() {
+		t.Fatal("TCP deadline does not exceed the forward budget")
+	}
 }

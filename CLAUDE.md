@@ -110,9 +110,34 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   system-resolver takeover — the class of change that broke DNS before). Validate on
   a routed desk run via `testing/essentials-domain-test.sh` (⚠️ scopes the machine's
   DNS ~30s), ideally after Phase-1 field validation.
+  **PHASE 2 IS NOW ROUTED-VALIDATED (2026-08-28), and the run found a real bug.**
+  `testing/essentials-domain-test.sh`, three routed runs: TAKEOVER, REFUSE and
+  route installation passed every time, and the machine restored cleanly every
+  time (all 8 teardown assertions). But ALLOW returned **SERVFAIL** on the
+  session's cold first run and NOERROR on warm runs seconds later. Mechanism,
+  certain from the code even though the trigger is intermittent: `forward()` had
+  ONE call site making ONE UDP attempt (4s) and turning any error into SERVFAIL,
+  while Essentials deliberately skips the whole-machine egress probe — so the
+  resolver takes over the system resolver BEFORE the tunnel is known to carry
+  traffic. One lost first packet failed the user's first allowlisted lookup
+  outright, which in the field is exactly when someone taps "Try messaging &
+  email only", on the throttled carrier where RTTs are worst.
+  **Fixed:** `forward()` now retries per `essentialsForwardTimeouts`
+  (2s/3s/3s, 8s total), each attempt on a FRESH socket so a late reply cannot be
+  read as the answer to the next query; the TCP path's deadline was raised to
+  outlast the budget; and an exhausted budget now logs the name and cause instead
+  of failing silently. NXDOMAIN stays instant (never forwarded, never retried),
+  which is what makes a DNS takeover tolerable on a slow carrier. After the fix a
+  routed run passed ALL FOUR checks including ROUTE — which had never executed
+  before, since ALLOW failing skipped it. Note honestly: the retry is proven by
+  unit tests (dropped-first-packet, budget exhaustion, refusals never retried,
+  shipped-policy sanity); the original cold-start failure was intermittent and was
+  NOT reproduced on demand, so the routed pass is consistent with the fix rather
+  than proof of it.
   **Left:** field-validate the whole flow at café #3 (runbook Step 3 — tap the offer
-  on CONN-2a; ~27 KB/s headroom says messaging flows); routed desk-validate the
-  Phase-2 resolver takeover.
+  on CONN-2a; ~27 KB/s headroom says messaging flows). The scoped in-allowlist
+  egress probe (noted in `main.go` as a follow-up) would close the underlying
+  race properly by verifying the tunnel carries traffic before the takeover.
 - **PLAN B for the throttled-DNS-only café is specced: `ESSENTIALS-MODE-SPEC.md`
   (2026-08-28, not built).** When only throttled DNS escapes, full-tunnel (`0/0`)
   collapses under whole-machine load — so instead carry only a low-bandwidth

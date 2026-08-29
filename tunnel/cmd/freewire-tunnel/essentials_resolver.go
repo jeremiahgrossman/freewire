@@ -109,7 +109,10 @@ func (r *essentialsResolver) serveTCP() {
 
 func (r *essentialsResolver) handleTCP(conn net.Conn) {
 	defer conn.Close()
-	conn.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
+	// Must outlast the forward budget, or a retrying query is cut off by its own
+	// listener before the final attempt completes. The margin covers reading the
+	// query and writing the reply.
+	conn.SetDeadline(time.Now().Add(essentialsForwardBudget() + 4*time.Second)) //nolint:errcheck
 	var lenBuf [2]byte
 	if _, err := readFull(conn, lenBuf[:]); err != nil {
 		return
@@ -128,8 +131,8 @@ func (r *essentialsResolver) handleTCP(conn net.Conn) {
 	}
 	var out [2]byte
 	binary.BigEndian.PutUint16(out[:], uint16(len(reply)))
-	conn.Write(out[:])  //nolint:errcheck
-	conn.Write(reply)   //nolint:errcheck
+	conn.Write(out[:]) //nolint:errcheck
+	conn.Write(reply)  //nolint:errcheck
 }
 
 // handle answers one query: forward if the name is allowlisted, else NXDOMAIN.
@@ -144,6 +147,13 @@ func (r *essentialsResolver) handle(query []byte) []byte {
 	}
 	reply, err := r.forward(query)
 	if err != nil || reply == nil {
+		// Worth a line: every attempt in the budget failed, so the user's app
+		// sees SERVFAIL and backs off. On the throttled carrier this is the
+		// symptom that reads as "Essentials Mode is broken", and without the
+		// name and cause it is undiagnosable from a café.
+		fmt.Fprintf(os.Stderr,
+			"freewire-tunnel: essentials resolver: %s did not resolve after %d attempts in %s: %v\n",
+			name, len(essentialsForwardTimeouts), essentialsForwardBudget(), err)
 		return servfailReply(query)
 	}
 	// Route every resolved address into the tunnel so the app's connection to it
@@ -167,15 +177,68 @@ func (r *essentialsResolver) routeOnce(ip string) {
 	r.addRoute(ip)
 }
 
+// essentialsForwardTimeouts is the per-attempt deadline for each forward try,
+// in order. The list IS the retry policy: its length is the attempt count and
+// its sum is the total budget before a query is answered SERVFAIL.
+//
+// Why retrying at all is load-bearing. A single 4s attempt used to become
+// SERVFAIL on any error, and two things conspire against that. Essentials Mode
+// deliberately skips the whole-machine egress probe (see setupRouting), so this
+// resolver takes over the system resolver BEFORE the tunnel is known to carry
+// traffic; and the carrier it exists to run over is the throttled café DNS path,
+// where RTTs run to hundreds of ms. One lost first packet was therefore enough
+// to fail the user's FIRST allowlisted lookup outright -- reproduced on a routed
+// desk run (2026-08-28): SERVFAIL for an allowlisted name on the session's cold
+// first connect, NOERROR for the same name on warm runs seconds later. In the
+// field that lands precisely when someone taps "Try messaging & email only",
+// and a SERVFAIL makes the app back off rather than retry promptly.
+//
+// The timeouts escalate rather than repeating a fixed value: a warm path answers
+// on the first short attempt and pays nothing, while a cold or throttled one
+// still gets a window long enough to succeed. The 8s total is deliberately kept
+// near what a stub resolver will wait -- answering after the client has already
+// given up buys nothing, so a longer budget would trade real failures for
+// invisible ones.
+var essentialsForwardTimeouts = []time.Duration{2 * time.Second, 3 * time.Second, 3 * time.Second}
+
+// essentialsForwardBudget is the worst-case time handle() can spend forwarding.
+// The TCP path's connection deadline must exceed it, or a retrying query would
+// be cut off by its own listener before the last attempt finishes.
+func essentialsForwardBudget() time.Duration {
+	var total time.Duration
+	for _, d := range essentialsForwardTimeouts {
+		total += d
+	}
+	return total
+}
+
 // forward relays the query to the upstream resolver over UDP (which reaches it
-// through the tunnel, since setupRouting routed the upstream IP in).
+// through the tunnel, since setupRouting routed the upstream IP in), retrying on
+// failure per essentialsForwardTimeouts.
+//
+// Each attempt uses a FRESH socket. The common failure here is a datagram lost
+// in a slow or still-settling tunnel, and reusing the socket would leave a late
+// reply to the previous attempt sitting in the buffer, to be read as the answer
+// to this one -- a mismatched-ID answer for whatever was asked next.
 func (r *essentialsResolver) forward(query []byte) ([]byte, error) {
-	c, err := net.DialTimeout("udp", r.upstream, 4*time.Second)
+	var lastErr error
+	for _, timeout := range essentialsForwardTimeouts {
+		reply, err := r.forwardOnce(query, timeout)
+		if err == nil {
+			return reply, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
+}
+
+func (r *essentialsResolver) forwardOnce(query []byte, timeout time.Duration) ([]byte, error) {
+	c, err := net.DialTimeout("udp", r.upstream, timeout)
 	if err != nil {
 		return nil, err
 	}
 	defer c.Close()
-	c.SetDeadline(time.Now().Add(4 * time.Second)) //nolint:errcheck
+	c.SetDeadline(time.Now().Add(timeout)) //nolint:errcheck
 	if _, err := c.Write(query); err != nil {
 		return nil, err
 	}
@@ -274,8 +337,8 @@ func setReplyRcode(query []byte, rcode byte) []byte {
 	out := make([]byte, end)
 	copy(out, query[:end])
 	if len(out) >= 12 {
-		out[2] |= 0x80                    // QR = response
-		out[3] = (out[3] &^ 0x0F) | rcode // rcode
+		out[2] |= 0x80                            // QR = response
+		out[3] = (out[3] &^ 0x0F) | rcode         // rcode
 		binary.BigEndian.PutUint16(out[6:8], 0)   // ANCOUNT = 0
 		binary.BigEndian.PutUint16(out[8:10], 0)  // NSCOUNT
 		binary.BigEndian.PutUint16(out[10:12], 0) // ARCOUNT
