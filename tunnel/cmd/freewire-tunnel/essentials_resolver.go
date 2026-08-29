@@ -80,7 +80,7 @@ func (r *essentialsResolver) Close() {
 }
 
 func (r *essentialsResolver) serveUDP() {
-	buf := make([]byte, 1500)
+	buf := make([]byte, 4096)
 	for {
 		n, from, err := r.udp.ReadFromUDP(buf)
 		if err != nil {
@@ -179,7 +179,7 @@ func (r *essentialsResolver) forward(query []byte) ([]byte, error) {
 	if _, err := c.Write(query); err != nil {
 		return nil, err
 	}
-	buf := make([]byte, 1500)
+	buf := make([]byte, 4096)
 	n, err := c.Read(buf)
 	if err != nil {
 		return nil, err
