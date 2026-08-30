@@ -17,10 +17,35 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 > Do not add multi-user machinery without checking that decision has changed.
 
 - **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
-- **In progress:** peer-table persistence fix is DEPLOYED and verified live
-  (2026-08-29 — see below); next real step is a repeat café visit to validate
-  `dns_tcp`/TCP-53 end to end through the app (this trip's app-level connect
-  failed for the now-fixed reason, not a carrier problem).
+- **In progress:** `dns_tcp` is FIELD-VALIDATED as of 2026-08-30 (see below) —
+  the primary open question from this whole arc is answered. Remaining work is
+  lower-priority: Essentials Mode's field validation is now optional rather
+  than urgent (see the finding below), and the Developer ID blocker for the
+  kill switch is unchanged.
+- **`dns_tcp` FIELD-VALIDATED AT A REAL DESTINATION-GATED CAFÉ (2026-08-30).**
+  Same café as the 2026-08-29 visit, now with the peer-persistence fix
+  deployed so the test could actually run end to end. Connected on the café
+  wifi (cancelled the portal login sheet), the app selected **`dns_tcp` on its
+  own**, and `testing/cafe-measure.sh` (now carrier-labeled) confirmed:
+  tunnelled (egress = the server IP), **held under load with no collapse** —
+  the exact failure mode `dns_tcp` was built to fix, previously seen at this
+  same café's UDP `dns` carrier (`queue 256/256` → teardown) — **3.6–7.6 Mbps
+  sustained** (roughly 13–56× the old ~72 Kbps DNS-carrier floor, consistent
+  with the desk-measured ~56×/32 Mbps unthrottled), and a **real page load in
+  0.3s**. Ping showed 100% loss, which is ICMP being deprioritized/dropped
+  independently of data traffic (common on portal networks) and not a tunnel
+  problem — the throughput numbers are the real evidence and they are
+  unambiguous. This is the headline result the whole `dns_tcp` +
+  peer-persistence arc was built toward: a hard destination-gated portal that
+  used to leave Freewire at a painful ~72 Kbps DNS floor (or fail outright, as
+  it did on 2026-08-29 before the persistence fix) now gets a genuinely usable
+  full tunnel. **Implication for Essentials Mode:** at any café where TCP/53
+  is open, `dns_tcp` likely makes full-tunnel viable on its own, so
+  Essentials Mode's remaining value is narrower than originally scoped — it
+  now matters specifically for a café that blocks TCP/53 while still passing
+  UDP/53, not for "DNS-only" cafés in general. Its Phase-1 field validation
+  (the in-flow "Try messaging & email only" offer) is accordingly lower
+  priority than it was before this result.
 - **PEER-TABLE PERSISTENCE FIX DEPLOYED + VERIFIED LIVE (2026-08-29).** Built
   same-day as the café finding below; deployed via `deploy/launch-aws.sh`
   (server public key unchanged: `4MZT9TPG…S2DA=`, no client re-pin needed) and
