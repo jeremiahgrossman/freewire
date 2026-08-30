@@ -15,6 +15,20 @@ The upgrade manager is client-side only. The server treats all paths equally onc
 
 ---
 
+> ## Superseded (2026-08-30)
+>
+> Everything below this point through "Probing" describes the original design intent, kept for historical context — **the shipped `PathUpgradeManager` (macOS) does not implement it.** The real mechanism is much narrower:
+>
+> - It does **not** treat every faster carrier as a probe candidate. It only probes two specific transitions: `.dns` (only from ICMP — the sole path from which DNS is actually a faster target) and `.udp443` (from any slower carrier, via a magic UDP probe to the server's port 443 that can't roam the active session's WireGuard identity).
+> - It deliberately **declines** to probe `wireguard`, `tls443`, `wss443`, or `cdn_wss` as upgrade targets — a cheap reachability probe can't predict whether one of these actually carries traffic once routed, so the fallback chain (not the upgrade manager) is what's trusted to discover them correctly.
+> - It never probes raw `wireguard` (port 51820) directly, on purpose: a real handshake there would use the device's real key and cause the server to roam the peer to that endpoint, tearing down the active carrier session mid-upgrade. `udp443` gets the same practical win (near line-rate UDP) without that hazard.
+> - There is no five-state PROBING/UPGRADING state machine, no generic "N paths, priority-ordered, probe everything faster" loop, and no fixed 5-second MONITORING delay or 60-second STABLE re-probe interval as literal, generally-applicable timers — those numbers describe the original design, not the shipped code path-by-path.
+> - The 9-carrier reality (not the 5 listed in "Path Priority Order" below) is `wireguard`, `udp443`, `http_connect`, `tls443`, `wss443`, `cdn_wss`, `dns_tcp`, `dns`, `icmp_udp`, in that fallback-chain order. `dns_tcp` (added 2026-08-28) sits between `cdn_wss` and `dns`, and is itself a live upgrade candidate would need scoping the same way `.dns`/`.udp443` were — not yet done.
+>
+> See `CLAUDE.md`'s Current State (search "PathUpgradeManager") for the exact shipped behavior and the reasoning behind each of these deliberate exclusions.
+
+---
+
 ## Why Upgrade?
 
 The fallback chain tries paths in order and stops at the first success. On a captive portal network that only allows DNS:

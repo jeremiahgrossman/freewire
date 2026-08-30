@@ -60,14 +60,23 @@ traffic-verified fall-through below). Total time budget for the full chain: unde
 │                    DESTINATION gating (portal allow-lists the CDN, not us).│
 │                    Skipped unless the server advertised `cdn_host`.        │
 ├─────────────────────────────────────────────────────────────────────────┤
-│  7. dns            WireGuard inside DNS queries/responses to our           │
+│  7. dns_tcp        WireGuard over a TCP connection to server:53 (RFC 7766  │
+│                    DNS-over-TCP framing). ~56x the UDP dns carrier below,  │
+│                    and TCP gives real backpressure instead of tail-drop.   │
+│                    Field-validated 2026-08-30: held a full tunnel at a     │
+│                    destination-gated café where the UDP dns carrier below  │
+│                    used to collapse under load. Added 2026-08-28.          │
+├─────────────────────────────────────────────────────────────────────────┤
+│  8. dns            WireGuard inside DNS queries/responses to our           │
 │                    authoritative server. Survives hard portals that pass   │
 │                    only DNS pre-auth; throttled (~72 Kbps floor) but real. │
 ├─────────────────────────────────────────────────────────────────────────┤
-│  8. icmp_udp       WireGuard in ICMP echo payloads. Last resort, for       │
+│  9. icmp_udp       WireGuard in ICMP echo payloads. Last resort, for       │
 │                    networks with a fully-local DNS resolver.               │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Superseded (2026-08-30):** this diagram was 8 carriers as of its last update; `dns_tcp` (row 7 above) was added 2026-08-28 and is now field-validated. Nine carriers ship today.
 
 Per-path handshake budgets (HTTP CONNECT 2s, TLS/443 3s, DNS 3s, ICMP 2s, plus
 the captive-portal probe) are in `CLAUDE.md` §"Fallback Chain Timeouts".
@@ -91,7 +100,7 @@ see "Connected."
 
 ### Captive portal probe (when all paths fail)
 
-If all eight carriers fail, the client immediately probes whether the cause is an unauthenticated captive portal or a genuine network block. This determines the CONN-2a vs. CONN-2b error state (see `error-states-spec.md`).
+If all nine carriers fail, the client immediately probes whether the cause is an unauthenticated captive portal or a genuine network block. This determines the CONN-2a vs. CONN-2b error state (see `error-states-spec.md`).
 
 **Probe mechanism:**
 
@@ -107,7 +116,7 @@ GET http://captive.apple.com/hotspot-detect.html
 
 **Why `captive.apple.com`:** This is the same endpoint iOS uses internally for captive portal detection. It is well-known, always available, returns a predictable response, and captive portal implementations are already designed to intercept and redirect it.
 
-**Timing:** The probe runs only after all eight carriers have been exhausted. It adds at most 1 second to the total failure time. It does not run on successful connections.
+**Timing:** The probe runs only after all nine carriers have been exhausted. It adds at most 1 second to the total failure time. It does not run on successful connections.
 
 ### NEHotspotHelper — fully automatic portal authentication
 

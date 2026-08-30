@@ -176,9 +176,9 @@ Self-hosted users interact with Freewire's infrastructure only to download the s
 | Event | What happens |
 |---|---|
 | **First launch** | App generates a WireGuard keypair locally. Private key stored in device keychain only. Public key used to request a peer slot from the managed server. |
-| **Connection** | Client presents its public key to the server. Server grants a peer slot in WireGuard's in-memory config. No persistent record created. |
-| **Disconnection** | Peer slot may be retained in server memory for reconnection window; cleared when server restarts or after idle timeout. Nothing written to disk. |
-| **App reinstall** | A new keypair is generated. The previous key is orphaned and eventually evicted from server memory. No account recovery needed — there is no account. |
+| **Connection** | Client presents its public key to the server. Server grants a peer slot in its WireGuard peer table. **Superseded (2026-08-29):** a persistent record IS now created — the peer table is written to disk (`peers.json`) on every successful registration, not held only in memory. |
+| **Disconnection** | Peer slot may be retained for a reconnection window; cleared after idle timeout. **Superseded:** "cleared when server restarts" and "nothing written to disk" are no longer true — the peer table survives a server restart (redeploy, crash) by design, restored from disk on startup. This was field-verified 2026-08-29 after the old in-memory-only behavior stranded a real client behind a captive portal, the one situation where a client cannot re-register to recover. |
+| **App reinstall** | A new keypair is generated. The previous key is orphaned and eventually evicted from the server's peer table (idle timeout, or an explicit disconnect). No account recovery needed — there is no account. |
 | **iCloud backup / device restore** | The WireGuard keypair is backed up to iCloud Keychain (`kSecAttrAccessible.afterFirstUnlock`). On restore, the new device inherits the same peer identity — no re-onboarding required. Users can reset their identity via Settings → "Reset Device Key". See DM-5. |
 
 ---

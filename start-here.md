@@ -8,7 +8,7 @@ Freewire is a free consumer VPN that works everywhere — including captive port
 
 - **Free to users.** No subscription, no paywall, no ads, no in-app donation mechanism.
 - **Hybrid server model.** Users choose between Freewire-managed servers or self-hosting on AWS.
-- **Captive portal bypass is the core technical differentiator.** Speed-ordered carrier chain (8 carriers): wireguard → udp443 → http_connect → tls443 → wss443 → cdn_wss → dns → icmp_udp. The client commits to the fastest that actually carries traffic. See `technical-architecture.md` §3.
+- **Captive portal bypass is the core technical differentiator.** Speed-ordered carrier chain (9 carriers): wireguard → udp443 → http_connect → tls443 → wss443 → cdn_wss → dns_tcp → dns → icmp_udp. `dns_tcp` (added 2026-08-28, field-validated 2026-08-30) is WireGuard over TCP/53 -- real backpressure instead of the UDP dns carrier's tail-drop-and-collapse failure. The client commits to the fastest that actually carries traffic. See `technical-architecture.md` §3.
 - **macOS at launch.** iOS, Android, and Windows are post-launch.
 - **Consumer-first UX.** Setup must require no technical knowledge.
 - **No user accounts. No identity required.** Each device generates a WireGuard keypair locally at first launch. The device's public key is its identity. No email, Apple ID, or login of any kind. This is the same principle as Signal: Freewire cannot answer questions it never collected data to answer.

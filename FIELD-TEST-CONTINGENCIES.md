@@ -17,7 +17,7 @@ bash testing/cafe-run.sh
 ```
 
 The raw battery it wraps (rootless, non-routed, safe on a machine in use — probes
-all 8 carriers plus the UDP/123, IPv6 and CDN candidates against OUR server and
+all 9 carriers plus the UDP/123, IPv6 and CDN candidates against OUR server and
 names the verdict):
 
 ```
@@ -32,7 +32,7 @@ See `testing/FIELD-TEST-RUNBOOK.md` for the full step-by-step (incl. the
 - **Reboot the Mac** — clears 8 stale utun interfaces from desk testing. The
   app's cached peer (UserDefaults) and the server peer (AWS) both survive it.
 - Nothing else. The distribution is up, ACME is live, cdn_host is advertised, the
-  app connects (verified), all 8 carriers reach the server.
+  app connects (verified), all 9 carriers reach the server (dns_tcp added 2026-08-28, field-validated 2026-08-30).
 
 ## Result → what it means → what to build
 

@@ -18,15 +18,15 @@ Knowledge base, terminology, and document index for the Freewire VPN project.
 
 **Kill switch** — A safety mechanism that blocks all network traffic if the VPN tunnel drops unexpectedly. Prevents traffic from leaking on an unprotected network while the client attempts to reconnect.
 
-**Protocol fallback chain** — Freewire's ordered sequence of tunnel paths, attempted automatically on each connection: (1) HTTP CONNECT probe, (2) TLS/443 direct, (3) DNS tunnel, (4) ICMP tunnel. The client tries each in order and upgrades to the fastest available path once any tunnel is established.
+**Protocol fallback chain** — Freewire's ordered sequence of tunnel carriers, attempted automatically on each connection, fastest first: `wireguard`, `udp443`, `http_connect`, `tls443`, `wss443`, `cdn_wss`, `dns_tcp`, `dns`, `icmp_udp` (nine carriers as of 2026-08-30 — this entry previously listed only the original four: HTTP CONNECT, TLS/443, DNS tunnel, ICMP). The client commits to the first one that actually carries routed traffic, not merely handshakes, and upgrades to a faster carrier afterward when one becomes reachable. See `technical-architecture.md` §3.
 
-**DNS tunnel** — Freewire's universal fallback tunnel path. Encodes all VPN traffic as DNS queries and responses to Freewire's authoritative DNS server for `tunnel.freewire.com`. Works on any network where DNS queries reach the public internet, which captive portals must allow to display their own portal page.
+**DNS tunnel** — Freewire's fallback tunnel carrier for hard destination-gated portals. Encodes all VPN traffic as DNS queries and responses to Freewire's authoritative DNS server for `t.pinghop.net` (the domain actually registered and delegated — not `tunnel.freewire.com`, which was the original placeholder name before `freewire.com` turned out to belong to a third party). Works on any network where DNS queries reach the public internet, which captive portals must allow to display their own portal page. As of 2026-08-28, a second DNS-based carrier (`dns_tcp`, WireGuard over a TCP connection to port 53) exists alongside the original UDP-based `dns` carrier — see `technical-architecture.md` §3 for both.
 
 **EDNS0 (Extension Mechanisms for DNS)** — A DNS protocol extension that allows response packets larger than the original 512-byte limit, up to 4096 bytes. Freewire's DNS tunnel negotiates EDNS0 to maximize inbound payload per round trip.
 
 **Sliding window** — A pipelining technique used in Freewire's DNS tunnel protocol. Instead of waiting for each DNS query to be answered before sending the next, the client keeps a window of outstanding queries in flight simultaneously. Increases throughput by hiding round-trip latency.
 
-**Anycast** — A network addressing method where multiple servers share the same IP address, and traffic is automatically routed to the nearest one. Freewire's DNS tunnel target architecture uses anycast to minimize resolver-to-server latency; at launch, `tunnel.freewire.com` runs on a single unicast server in US-East. See `anycast-dns-infrastructure.md`.
+**Anycast** — A network addressing method where multiple servers share the same IP address, and traffic is automatically routed to the nearest one. Freewire's DNS tunnel target architecture uses anycast to minimize resolver-to-server latency; at launch, `t.pinghop.net` runs on a single unicast server in US-East. See `anycast-dns-infrastructure.md`.
 
 **HTTP CONNECT** — An HTTP method that asks a proxy server to open a raw TCP connection to a destination. Some captive portals expose an HTTP proxy that supports CONNECT, which Freewire exploits to establish a full-speed TCP tunnel before any other path is tried.
 
@@ -105,7 +105,7 @@ Practically for Freewire: the dependency actually in use (`wireguard-go`) is MIT
 | `sparkle-update-feed-spec.md` | Sparkle appcast format, EdDSA signing, CDN hosting for macOS auto-update | macOS auto-update |
 | `certificate-management.md` | TLS certificate provisioning and renewal for all Freewire domains and signing identities | Certificate lifecycle |
 | `anycast-dns-infrastructure.md` | Anycast DNS PoP deployment, BGP configuration, health monitoring for tunnel.freewire.com | Post-launch DNS tunnel infrastructure |
-| `captive-portal-testing-guide.md` | How to simulate captive portal networks locally and test all eight fallback carriers | Captive portal testing |
+| `captive-portal-testing-guide.md` | How to simulate captive portal networks locally and test all nine fallback carriers | Captive portal testing |
 | `apple-entitlement-application.md` | Application guidance for the Apple NetworkExtension entitlement | App Store submission prerequisite |
 | `icmp-tunnel-protocol-spec.md` | ICMP tunnel wire protocol: packet format, handshake, encryption, sliding window, rate limiting | ICMP tunnel implementation |
 | `server-dashboard-api-spec.md` | HTTP API for the self-hosted server web dashboard: auth, device management, config/QR generation | Self-hosted dashboard implementation |

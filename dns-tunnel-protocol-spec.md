@@ -7,6 +7,10 @@
 
 ---
 
+> **Superseded (2026-08-30):** every `tunnel.freewire.com` reference below is the original placeholder domain, never actually used — `freewire.com` belongs to a third party. The zone actually registered and delegated is **`t.pinghop.net`** (see `PRD.md` OQ-4, `CLAUDE.md`). The wire-format logic below (query encoding, handshake, sliding window) is otherwise still accurate to the shipped `dns` carrier. This spec predates the 2026-08-28 `dns_tcp` carrier (WireGuard over TCP/53, RFC 7766 framing) — a second, separate DNS-based carrier not covered anywhere in this document. See `technical-architecture.md` §3 for both.
+
+---
+
 ## Overview
 
 The DNS tunnel encodes arbitrary binary data as DNS queries and responses. It is the third path in the fallback chain, used when HTTP CONNECT and TLS/443 are both blocked. It works on any captive portal network that forwards unknown DNS queries to the public internet.

@@ -98,7 +98,7 @@ Returns the server's WireGuard configuration that the client needs to establish 
 
 ### POST /v1/peers
 
-Register a device as a WireGuard peer. The server adds the device's public key to its in-memory WireGuard peer list and returns the client's assigned tunnel IP address.
+Register a device as a WireGuard peer. The server adds the device's public key to its WireGuard peer table and returns the client's assigned tunnel IP address. **Superseded (2026-08-29):** the peer table is no longer in-memory only. It persists to disk (`server/internal/tunnel/manager.go` + `peersfile.go`) and is restored into the running WireGuard device on server startup, so a restart (redeploy, crash) no longer silently forgets a registered peer. This was field-verified after the original in-memory design stranded a real client behind a captive portal — the one place a client cannot re-register, since the API is blocked. See §Remove peer below, which still describes the in-memory idle-eviction behavior; that section needs the same correction.
 
 **Authentication:** Privacy Pass token required.
 
@@ -152,7 +152,7 @@ Register a device as a WireGuard peer. The server adds the device's public key t
 
 Gracefully remove a peer when the user explicitly disconnects. The server removes the public key from its WireGuard peer list.
 
-This is a best-effort call. If it fails (network loss, server restart), the peer slot expires naturally via WireGuard's idle eviction timeout (~3 minutes). Clients must not block disconnect UX waiting for this response.
+This is a best-effort call. If it fails (network loss), the peer slot expires naturally via WireGuard's idle eviction timeout (~3 minutes) — CLAUDE.md's OQ-2 leaves the exact timeout as an open engineering question. **Superseded:** a server restart is no longer one of the failure modes this paragraph needs to cover for peer-table correctness — the peer table now persists across restarts (see the correction on `POST /v1/peers` above), so a peer this call never reaches is still recognized after the server comes back, not just evicted after ~3 minutes. Clients must not block disconnect UX waiting for this response.
 
 **Authentication:** None required (the peer token is the credential).
 
