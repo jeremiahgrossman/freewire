@@ -1097,6 +1097,40 @@ Total: ≤11s to CONN-2a (captive portal) or CONN-2b (genuine block).
 
 ## Build Sequence
 
+**Superseded (2026-08-30):** the table below is the ORIGINAL plan, kept for its
+still-useful spec-reading pointers. Reality has diverged from it in three real
+ways — read this note before treating "Milestone gate" as current:
+
+- **Phase 2 is done and was far exceeded**, not just completed. The original
+  scope was 4 fallback paths (HTTP CONNECT, TLS/443, DNS, ICMP). The shipped
+  chain has **nine carriers** (`wireguard`, `udp443`, `http_connect`, `tls443`,
+  `wss443`, `cdn_wss`, `dns_tcp`, `dns`, `icmp_udp`), plus Essentials Mode (not
+  in the original plan at all — built mid-project for throttled-DNS-only
+  portals) and peer-table persistence (built to fix a reliability bug this
+  phase's own field testing surfaced, 2026-08-29, then adversarially reviewed
+  and fixed again 2026-08-30). Field-validated at multiple real cafés, a
+  stronger bar than the original gate's "5 simulated test configs."
+- **Phase 3 is superseded by the single-user scope decision, not "not
+  started."** It assumed *other people* would self-host and need a dashboard/
+  QR onboarding flow. The 2026-08-22 scope decision ("build only what one
+  person running their own server needs") makes that moot for now — the
+  actual deploy path is `deploy/launch-aws.sh` + one manual `defaults write
+  pinnedServerKey`, simpler than the dashboard this phase would have built.
+  Becomes relevant again only if there are other users.
+- **Phase 4 is mostly done, with the remainder split between deliberate
+  declines and one external blocker**, not open engineering work. Privacy
+  Pass, DoH, and aggregate metrics shipped. ECH and network intelligence were
+  evaluated and **declined on purpose** (see `DECISIONS.md`) — not gaps. The
+  kill switch is the one real gap, and it's blocked on a Developer ID
+  certificate, not on any undone engineering.
+
+**A fifth, unplanned phase has effectively been running on top of all this:**
+ongoing field-hardening in response to what real captive portals actually do —
+building `dns_tcp` after a café field-tested a UDP-DNS collapse, finding and
+fixing the peer-persistence bug that same failure exposed, adversarially
+reviewing that fix, auditing infrastructure redundancy. None of it maps to the
+four phases below; the plan couldn't have anticipated it.
+
 | Phase | What | Specs to read | Milestone gate |
 |---|---|---|---|
 | **1 — Foundation** | Device key lifecycle, WireGuard on open network, TLS/443 managed connection, basic macOS UX (menu bar app) | `engineering-handoff.md`, `ux-workflows.md` §3, `client-server-api-spec.md`, `data-model.md`, `error-states-spec.md` | User can install, onboard, and connect to a managed server on a normal network |
@@ -1110,9 +1144,9 @@ Load only the specs for the active phase. The full list is 24 files — loading 
 
 **Phase 1:** `engineering-handoff.md`, `ux-workflows.md`, `client-server-api-spec.md`, `data-model.md`, `error-states-spec.md`
 
-**Phase 2:** `technical-architecture.md`, `dns-tunnel-protocol-spec.md`, `icmp-tunnel-protocol-spec.md`, `path-upgrade-manager-spec.md`, `captive-portal-testing-guide.md`
+**Phase 2:** `technical-architecture.md`, `dns-tunnel-protocol-spec.md`, `icmp-tunnel-protocol-spec.md`, `path-upgrade-manager-spec.md`, `captive-portal-testing-guide.md` — all already carry their own 2026-08-30 correction notes for the 9-carrier reality; read those inline rather than trusting the original body text.
 
-**Phase 3:** `server-dashboard-api-spec.md`, `cloudformation-spec.md`, `sparkle-update-feed-spec.md`, `certificate-management.md`, `build-and-release-pipeline.md`
+**Phase 3:** `server-dashboard-api-spec.md`, `cloudformation-spec.md`, `sparkle-update-feed-spec.md`, `certificate-management.md`, `build-and-release-pipeline.md` — deferred; only load these if the project actually gains other users.
 
 **Phase 4:** `privacy-pass-spec.md`, `testing-plan.md`, `privacy-policy.md`
 
