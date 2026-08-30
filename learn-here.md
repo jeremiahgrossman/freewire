@@ -36,9 +36,20 @@ Knowledge base, terminology, and document index for the Freewire VPN project.
 
 **DH (Diffie-Hellman) key exchange** — A cryptographic protocol for establishing a shared secret over an untrusted channel. Used in Freewire's DNS tunnel handshake to establish session encryption before any payload data flows.
 
-**WireGuard** — A modern VPN protocol used by Freewire on open networks (no captive portal). Fast and efficient. Uses UDP, which captive portals block — WireGuard is not used on captive portal paths.
+**WireGuard** — The VPN protocol that does the actual encryption and tunneling in Freewire: a small, modern protocol (Curve25519 for key exchange, ChaCha20-Poly1305 for the data channel) that authenticates peers by public key rather than accounts or passwords. Freewire generates a keypair per device, keeps the private key in the Keychain (see the non-negotiable constraint in `CLAUDE.md`), and sends only the public key to the server to register.
 
-**WireGuardKit** — Apple's official open-source Swift/Objective-C wrapper around the reference WireGuard implementation. Used by the official WireGuard iOS and macOS apps. Freewire uses WireGuardKit for the WireGuard protocol layer on both Apple platforms; custom tunnel code (DNS tunnel, TLS/443 path, HTTP CONNECT) is built in Swift on top of it.
+WireGuard packets are the payload on *every* carrier, not just the open-network path — what differs per carrier is the outer transport those packets ride inside. `wireguard`/`udp443` send them nearly raw; `tls443`/`wss443`/`cdn_wss` wrap them to look like ordinary HTTPS or a WebSocket; `dns`/`dns_tcp`/`icmp_udp` disguise them as DNS or ICMP traffic for networks that block everything else. See `technical-architecture.md` for the full carrier chain.
+
+Freewire uses `wireguard-go` (`golang.zx2c4.com/wireguard`), the project's official userspace Go implementation, on both the client (via a `utun` device, no NetworkExtension) and the server — see the Tech Stack table below for why (no kernel module or special entitlement needed).
+
+**WireGuard's licensing** — The core WireGuard project is dual-licensed depending on component:
+- The **Linux kernel module** (`wireguard-linux-compat`, and the in-tree kernel driver) is **GPLv2**, because it's part of the Linux kernel and must be.
+- **Userspace implementations and tooling** — including `wireguard-go`, the exact dependency Freewire vendors — are **MIT licensed**. Verified directly from the `LICENSE` file in Freewire's vendored copy (`go.mod`: `golang.zx2c4.com/wireguard`), not just general knowledge about the project.
+- The **wire protocol and packet format** are not code and are not licensed at all — anyone can implement a compatible peer.
+
+Practically for Freewire: the dependency actually in use (`wireguard-go`) is MIT, one of the most permissive open-source licenses — it allows use, modification, and redistribution (including in closed-source or commercial products) with attribution, and imposes no obligation to share Freewire's own source.
+
+**WireGuardKit** — Apple's official open-source Swift/Objective-C wrapper around the reference WireGuard implementation, used by the official WireGuard iOS/macOS apps and by Apple's `NetworkExtension` framework. **Not used on Freewire's current macOS client** — `CLAUDE.md`'s locked tech stack explicitly rules out WireGuardKit and NetworkExtension on macOS in favor of `wireguard-go` over a direct `utun` device, precisely so the app can run without the entitlements NetworkExtension requires. WireGuardKit remains the planned dependency for the **deferred iOS client**, since iOS has no equivalent to a direct `utun` path and NEPacketTunnelProvider is the only way to run a VPN there.
 
 **Shadowsocks** — A proxy protocol originally designed for censorship circumvention. Evaluated as a captive portal bypass candidate; not selected. Freewire's custom DNS tunnel approach provides more universal coverage.
 
