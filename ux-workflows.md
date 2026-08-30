@@ -597,6 +597,8 @@ iOS sometimes shows its own system banner when a captive portal is detected. Fre
 
 ### 2.6 Kill Switch and Reconnection
 
+> **Superseded (2026-08-30):** the kill switch described throughout this section is not shipped. `FreewireHelper` (the `SMAppService` privileged helper that would enforce it via `pf` rules) is written and its rule generation is tested, but cannot be installed — blocked on a Developer ID Application certificate. The UI does not currently show any of the tooltip, activation, or Settings copy below; see `error-states-spec.md` §"Interim" for what the shipped UI actually claims in the meantime (nothing — it does not claim kill-switch protection it can't provide).
+
 **Kill switch first-connect tooltip**
 
 On the very first successful connection (any path, any network), a one-time tooltip is shown briefly below the Connected status:
@@ -809,6 +811,8 @@ Tapping the DEVICE row in Settings opens the Device Identity screen. There is no
 
 ### 3.2 System Extension Approval
 
+> **Superseded (2026-08-30):** the shipped macOS client has no NetworkExtension System Extension and no approval flow like the one below — this whole section describes a design macOS never used. The macOS client runs `wireguard-go` over a direct `utun` device, which needs no such system approval to establish a tunnel. The one piece of this project that *does* need a privileged-helper installation is the kill switch (`FreewireHelper`, an `SMAppService` helper, not a NetworkExtension System Extension) — and that helper is not installed at all yet, blocked on a Developer ID certificate (see `CLAUDE.md`, `error-states-spec.md` §"Interim"), so there is currently no approval-flow UX to build against on macOS. This section may still be relevant to the deferred iOS client, which does use NetworkExtension.
+
 The NetworkExtension System Extension must be approved before the VPN can function. This happens once, on first launch.
 
 **Before the system prompt:**
@@ -855,11 +859,13 @@ The NetworkExtension System Extension must be approved before the VPN can functi
 
 ### 3.3 Onboarding — Freewire Path (macOS)
 
+**Superseded:** "after System Extension approval" no longer applies — see the §3.2 correction above; there is no such approval step in the shipped client. The shipped `OnboardingWindowController` (`macos/Freewire/Freewire/`) appears on first launch instead, gated on `Preferences.shared.hasCompletedOnboarding`, not on any system permission flow.
+
 The onboarding window appears after System Extension approval. The flow mirrors §2.2 (iOS Freewire path). No account or sign-in required — the app generates a WireGuard keypair in the background after path selection.
 
 Steps:
 1. Path selection (same layout as iOS, scaled for a window)
-2. VPN configuration permission (macOS shows a system prompt for VPN configuration, distinct from the System Extension prompt already completed)
+2. **Superseded:** no such prompt exists in the shipped client. ~~VPN configuration permission (macOS shows a system prompt for VPN configuration, distinct from the System Extension prompt already completed)~~ — the shipped `TunnelManager` establishes the tunnel directly via `sudo` (a passwordless NOPASSWD rule scoped to the helper binary) and a `utun` device; there is no macOS system permission dialog in this flow at all.
 3. Connected confirmation
 
 The onboarding window closes after step 4. The menu bar icon updates to Connected state.

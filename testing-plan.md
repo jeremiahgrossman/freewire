@@ -33,8 +33,8 @@ Used by individual engineers during active development.
 |---|---|
 | iOS client | Xcode Simulator + physical device (provisioned via Xcode) |
 | macOS client | Local build, signed with development certificate |
-| Server | Local Go binary on developer machine or AWS t3.small in `us-east-1-dev` |
-| DNS tunnel | Local authoritative server on `localhost:5300`; override `tunnel.freewire.com` in `/etc/hosts` |
+| Server | **Superseded:** the server only runs on AWS (`t4g.small`, `us-east-1`), never locally. Local container/VM runtimes all NAT their own guests but won't forward a third subnet, so tunnel egress cannot be tested against a local server at all — learned the hard way; see `testing/README.md` and `CLAUDE.md`'s "Dev environment" note. Deploy with `deploy/launch-aws.sh` (idempotent, preserves the pinned key), tear down with `deploy/destroy-aws.sh`. |
+| DNS tunnel | **Superseded:** no local authoritative server or `/etc/hosts` override — same reasoning as above. The real zone is `t.pinghop.net` (delegated to the AWS server), not `tunnel.freewire.com`. |
 | Network simulation | Developer's own wifi; captive portal via virtual router (see `captive-portal-testing-guide.md`) |
 | Privacy Pass | Test key pair (not production); token rate limits disabled |
 
@@ -224,9 +224,9 @@ Test the full product flow on a normal network (no captive portal) against the s
 | First install | Fresh install, no prior data | Onboarding appears |
 | Onboarding completion | Complete managed server flow | Connected state |
 | Connect | Tap connect | "Connected" within 10s |
-| Disconnect | Tap disconnect | "Disconnected"; kill switch released |
-| Kill switch | Drop tunnel artificially; check traffic | Traffic blocked until reconnect |
-| Kill switch reconnect | Reconnect after kill switch | Traffic resumes; no leak window |
+| Disconnect | Tap disconnect | "Disconnected" (no kill switch to release yet — see below) |
+| Kill switch | **Superseded: not testable, not shipped.** `FreewireHelper` (the `SMAppService` helper that would enforce this) is written and unit-tested but cannot be installed — blocked on a Developer ID certificate. Remove these two rows from any executable test matrix until it ships; see `error-states-spec.md` §"Interim". | — |
+| ~~Kill switch reconnect~~ | ~~Reconnect after kill switch~~ | ~~Traffic resumes; no leak window~~ |
 | Background | App backgrounded while connected | Tunnel stays connected |
 | Reconnect after sleep | Lock device 5 min; unlock | Tunnel resumes or reconnects within 10s |
 | Notification permission | After first connect | System prompt appears once |
@@ -393,7 +393,7 @@ This is the final checklist before TestFlight launch (iOS) and macOS DMG publica
 ### Pre-submission checklist
 
 **Infrastructure:**
-- [ ] Apple NetworkExtension entitlement (`NEPacketTunnelProvider`) approved — required before TestFlight distribution
+- [ ] Apple NetworkExtension entitlement (`NEPacketTunnelProvider`) approved — required before TestFlight distribution. **Applies to the deferred iOS client only.** The macOS launch blocker is a **Developer ID Application certificate**, needed for `FreewireHelper` (kill switch) and DMG signing/notarization — see `CLAUDE.md`.
 - [ ] AWS Marketplace AMI published and one-click deploy tested end-to-end
 - [ ] Managed server in US East running and reachable
 - [ ] DNS tunnel authoritative server operational at `tunnel.freewire.com` (US-East)

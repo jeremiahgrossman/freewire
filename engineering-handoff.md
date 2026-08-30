@@ -20,7 +20,7 @@ Freewire is a free consumer VPN with one technical differentiator: it works on c
 
 The product has two moving parts:
 
-1. **Client apps** — iOS and macOS native apps (Swift, WireGuardKit). Handle key generation, protocol fallback, tunnel management, and UX.
+1. **Client apps** — iOS (deferred) and macOS native apps (Swift). **Superseded:** only iOS uses WireGuardKit + NetworkExtension; the shipped macOS client uses `wireguard-go` over a direct `utun` device instead, specifically to avoid the entitlements NetworkExtension requires — see line 66 below, which already states this correctly. Handle key generation, protocol fallback, tunnel management, and UX.
 2. **Server software** — A Go binary that runs on AWS (AMI + CloudFormation). Handles the WireGuard gateway, DNS tunnel authoritative server, and Privacy Pass token issuance. Deployed by Freewire (managed servers) and by users (self-hosted).
 
 The full product spec is in `PRD.md`. This document tells you what to build first, what decisions are already made, and where the open questions are.
@@ -105,6 +105,8 @@ The DNS tunnel is the most complex component. Read `technical-architecture.md` �
 
 ## Recommended build order
 
+> **Superseded (2026-08-30):** this whole section describes an iOS-first build order using WireGuardKit + NetworkExtension. The project actually shipped macOS-first, using `wireguard-go` over a direct `utun` device with no NetworkExtension at all — iOS was deferred entirely. Item 2's "NE permission flow" and item 13's "shares NE/tunnel codebase with iOS... System Extension approval flow" describe a design path macOS never took. **`CLAUDE.md`'s "Build Sequence" table is the current, accurate build order** (Phase 1 Foundation → Phase 2 Captive portal → Phase 3 Self-hosted → Phase 4 Privacy + reliability, matching this doc's phase names but macOS-only content). This section is kept for historical planning context, not as a build guide.
+
 ### Phase 1 — Foundation (start here)
 
 1. **Device key lifecycle** — keypair generation at first launch, Keychain storage, fingerprint display. This underpins everything. Define restore/reinstall behavior (new keypair on reinstall is the expected behavior; see `data-model.md`).
@@ -146,8 +148,8 @@ These are settled. The rationale lives in `PRD.md` §10.
 |---|---|
 | Identity | No accounts. Device WireGuard keypair only. Never linked to any real-world identity. |
 | Languages | Swift (macOS client), Go (server). iOS deferred. |
-| DoH resolver | Cloudflare 1.1.1.1. Hardcoded. Not user-configurable at launch. |
-| Kill switch | On by default. User-disableable with plain-language warning. |
+| DoH resolver | **Superseded:** now configurable (`Config.DoHEndpoints`, https-only, failover in order); Cloudflare 1.1.1.1 remains the *default* failover pair, not a hardcoded value. |
+| Kill switch | **Superseded:** not shipped at all yet. `FreewireHelper` (the `SMAppService` privileged helper that would enforce it) is written and its rule generation is tested, but cannot be installed — blocked on a Developer ID Application certificate. The UI does not claim kill-switch protection until this ships (fail-closed by omission, not by a toggle default). See `error-states-spec.md` §"Interim". |
 | macOS distribution | Direct download (signed, notarized DMG) + Sparkle. Mac App Store is post-launch. |
 | Self-hosted deploy | AWS Marketplace only. Binary embedded in AMI. No separate download. |
 | Privacy Pass timing | Request initial batch on first connection. Silent background refresh at < 3 tokens. Silent failure on re-issuance error. |
@@ -272,8 +274,8 @@ If a logging decision arises during implementation that is not covered by `data-
 
 The full checklist is in `product-review-checklist.md`. Items to not miss:
 
-- Apple NetworkExtension entitlement (`NEPacketTunnelProvider`) approved — required before TestFlight distribution
-- TestFlight build uploaded, invite links working
+- Apple NetworkExtension entitlement (`NEPacketTunnelProvider`) approved — required before TestFlight distribution. **This applies to the deferred iOS client only.** The macOS launch blocker is different: a **Developer ID Application certificate**, needed to install `FreewireHelper` (the `SMAppService` kill-switch helper) and to sign/notarize the distributed DMG. See `CLAUDE.md`.
+- TestFlight build uploaded, invite links working (iOS, deferred)
 - Privacy policy (`privacy-policy.md`) reviewed by legal, effective date set, and published at stable URL
 - TestFlight beta channel operational with crash rate < 0.5%
 - macOS DMG signed and notarized (Gatekeeper blocks unsigned builds)
