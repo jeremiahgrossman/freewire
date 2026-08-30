@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"go.uber.org/zap"
 )
 
 // A restart must not orphan a client relying on a cached registration -- that
@@ -20,7 +22,7 @@ func TestPeersFileSurvivesRestart(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	got := loadPeersFile(path)
+	got := loadPeersFile(path, zap.NewNop())
 	if len(got) != len(want) {
 		t.Fatalf("loaded %d peers, want %d", len(got), len(want))
 	}
@@ -42,7 +44,7 @@ func TestPeersFileSurvivesRestart(t *testing.T) {
 
 func TestLoadPeersFileMissingIsEmpty(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "does-not-exist.json")
-	if got := loadPeersFile(path); len(got) != 0 {
+	if got := loadPeersFile(path, zap.NewNop()); len(got) != 0 {
 		t.Errorf("missing file loaded %d peers, want 0", len(got))
 	}
 }
@@ -58,7 +60,7 @@ func TestLoadPeersFileCorruptIsEmpty(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{not valid json"), 0o600); err != nil {
 		t.Fatalf("corrupt: %v", err)
 	}
-	if got := loadPeersFile(path); len(got) != 0 {
+	if got := loadPeersFile(path, zap.NewNop()); len(got) != 0 {
 		t.Errorf("corrupt file loaded %d peers, want 0", len(got))
 	}
 }
@@ -82,7 +84,7 @@ func TestWritePeersFileOverwritesCleanly(t *testing.T) {
 	if err := writePeersFile(path, []persistedPeer{{PeerToken: "b", PublicKey: "2", TunnelIP: "10.0.0.3"}}); err != nil {
 		t.Fatalf("second write: %v", err)
 	}
-	got := loadPeersFile(path)
+	got := loadPeersFile(path, zap.NewNop())
 	if len(got) != 1 || got[0].PeerToken != "b" {
 		t.Errorf("after overwrite, loaded %+v, want exactly [{PeerToken: b, ...}]", got)
 	}

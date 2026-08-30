@@ -45,7 +45,13 @@ var dnsCarrierMagic = []byte("FWDNSTCP1")
 // The nonce-echo check is the point of the hello. Port 53 is the port most
 // likely to be intercepted by a transparent DNS proxy, so a connection that
 // merely opens proves nothing -- a proxy will happily accept it and answer with
-// its own NXDOMAIN. Only our server can return the magic with this nonce.
+// its own NXDOMAIN. This distinguishes our server from an OBLIVIOUS transparent
+// proxy that doesn't bother implementing the echo -- it does not prove the
+// connection reached only our server, since dnsCarrierMagic is a public,
+// hardcoded constant (compiled into this open-source client), not a secret; a
+// targeted on-path adversary could reproduce the echo too. The real trust
+// boundary is WireGuard's own authenticated Noise handshake carried over the
+// bridged stream once this connects.
 func tryDNSTCP(cfg Config) (net.Conn, error) {
 	addr := net.JoinHostPort(cfg.ServerHost, "53")
 	conn, err := net.DialTimeout("tcp", addr, dnsTCPHelloTimeout)

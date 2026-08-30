@@ -40,8 +40,13 @@ import (
 // exactly what a resolver would send.
 
 // dnsCarrierMagic opens the hello's TXT answer, so a client can tell OUR server
-// from a portal's transparent DNS proxy answering on port 53. A proxy can return
-// NXDOMAIN or a forged record; it cannot produce this plus the client's nonce.
+// from an OBLIVIOUS portal transparent DNS proxy on port 53 -- one that returns
+// NXDOMAIN or a forged record rather than implementing this echo. It does not
+// prove the connection reached only our server against a targeted adversary:
+// this constant is public and hardcoded in the open-source client, not a
+// secret, so an on-path attacker could reproduce it too. The real trust
+// boundary is WireGuard's own authenticated Noise handshake, carried over the
+// bridged stream once this hello completes.
 var dnsCarrierMagic = []byte("FWDNSTCP1")
 
 // dnsCarrierNonceLen is the hello nonce, echoed in the reply.

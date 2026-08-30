@@ -35,6 +35,17 @@ type Manager struct {
 	mu        sync.RWMutex
 	peers     map[string]*Peer // peer_token → Peer
 	peersPath string           // where the peer table is persisted; "" disables it
+	// persistMu serializes the ENTIRE snapshot-then-write body of persist(),
+	// not just the snapshot. Guarding only the snapshot (as an early version
+	// did) let two concurrent persist() calls -- one from an AddPeer, one from
+	// a RemovePeer racing it -- take their snapshots in one order but complete
+	// their disk WRITES in the other, so the disk could end up holding the
+	// staler of the two snapshots: a live peer silently missing (never
+	// restored on the next restart) or a just-revoked peer's key resurrected
+	// on one. Serializing the whole body means whichever call finishes last
+	// necessarily re-reads m.peers no earlier than when it started waiting, so
+	// the final write on disk is never staler than the state at that point.
+	persistMu sync.Mutex
 }
 
 func NewManager(cfg *config.Config, log *zap.Logger) (*Manager, error) {
@@ -111,16 +122,13 @@ func NewManager(cfg *config.Config, log *zap.Logger) (*Manager, error) {
 	// carrier connects at the transport layer and then silently fails the
 	// WireGuard handshake, indistinguishable from the portal blocking
 	// everything. Runs before the API is serving, so no lock contention.
-	restored := 0
-	for _, rp := range loadPeersFile(m.peersPath) {
-		if err := m.restorePeer(rp); err != nil {
-			log.Warn("skipping a peer from the peers file", zap.Error(err))
-			continue
-		}
-		restored++
-	}
+	restored, skipped := m.restorePeers(loadPeersFile(m.peersPath, log), cfg.Capacity, log)
 	if restored > 0 {
 		log.Info("restored peers from disk", zap.Int("count", restored))
+	}
+	if skipped > 0 {
+		log.Warn("peers file held more entries than the configured capacity",
+			zap.Int("skipped", skipped), zap.Int("capacity", cfg.Capacity))
 	}
 
 	return m, nil
@@ -148,6 +156,32 @@ func decodeAndValidatePublicKey(publicKeyBase64 string) ([]byte, error) {
 func wireguardAddPeerIPC(publicKeyBytes []byte, tunnelIP string) string {
 	return fmt.Sprintf("public_key=%s\nreplace_allowed_ips=true\nallowed_ip=%s/32\npersistent_keepalive_interval=25\n\n",
 		hex.EncodeToString(publicKeyBytes), tunnelIP)
+}
+
+// restorePeers replays peers-file entries into the running WireGuard device,
+// bounded by capacity.
+//
+// restorePeer itself does not check capacity (it isn't a new registration, so
+// reserveSlot's capacity gate never runs for it) -- so an oversized peers
+// file, e.g. left over from a since-lowered capacity or a hand-edited file,
+// would otherwise restore every entry regardless of the configured limit,
+// then silently lock out every new registration afterward with no
+// indication why. The check runs BEFORE calling restorePeer for an entry
+// past the cap, so a capacity of 0 restores nothing at all rather than
+// attempting one restore before noticing the limit.
+func (m *Manager) restorePeers(entries []persistedPeer, capacity int, log *zap.Logger) (restored, skipped int) {
+	for _, rp := range entries {
+		if restored >= capacity {
+			skipped++
+			continue
+		}
+		if err := m.restorePeer(rp); err != nil {
+			log.Warn("skipping a peer from the peers file", zap.Error(err))
+			continue
+		}
+		restored++
+	}
+	return restored, skipped
 }
 
 // restorePeer re-establishes one peer read from disk into the running
@@ -184,6 +218,9 @@ func (m *Manager) restorePeer(rp persistedPeer) error {
 // *next* restart is at risk, and that next attempt gets another chance to
 // persist.
 func (m *Manager) persist() {
+	m.persistMu.Lock()
+	defer m.persistMu.Unlock()
+
 	m.mu.RLock()
 	snapshot := make([]persistedPeer, 0, len(m.peers))
 	for token, p := range m.peers {

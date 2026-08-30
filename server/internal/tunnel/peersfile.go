@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"go.uber.org/zap"
 )
 
 // persistedPeer is one row of the peers file: everything AddPeer produced,
@@ -23,13 +25,24 @@ type persistedPeer struct {
 // the network allows it, so losing this file costs convenience, not safety
 // (unlike the spent-token journal, where losing state would let a used token
 // be spent again).
-func loadPeersFile(path string) []persistedPeer {
+//
+// A missing file (the expected first-boot case) and an unexpected read/parse
+// failure (wrong ownership after a deploy change, disk error, a genuinely
+// corrupt file) both return zero peers, but only the second is logged -- so
+// "0 peers restored" reads the same on a fresh server as it does when
+// something is actually wrong, unless log is watched for this warning.
+func loadPeersFile(path string, log *zap.Logger) []persistedPeer {
 	data, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) || err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		log.Warn("could not read peers file; starting with no restored peers", zap.Error(err))
 		return nil
 	}
 	var peers []persistedPeer
-	if json.Unmarshal(data, &peers) != nil {
+	if err := json.Unmarshal(data, &peers); err != nil {
+		log.Warn("peers file is not valid JSON; starting with no restored peers", zap.Error(err))
 		return nil
 	}
 	return peers

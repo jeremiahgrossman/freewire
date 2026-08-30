@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"net"
 	"testing"
+
+	"go.uber.org/zap"
 )
 
 func randKeyB64(t *testing.T) string {
@@ -198,5 +200,32 @@ func TestRestorePeerLeavesNoResidueOnRejection(t *testing.T) {
 	}
 	if got := m.pool.Size(); got != before {
 		t.Errorf("pool allocations moved from %d to %d on rejected restores", before, got)
+	}
+}
+
+// A capacity of 0 must restore nothing at all -- and, critically, must never
+// call restorePeer (which would reach the nil WireGuard device in this test
+// and panic) for an entry beyond the cap. Found by adversarial review
+// 2026-08-30: restorePeer itself never checked capacity, so an oversized
+// peers file (e.g. left over from a since-lowered capacity) would silently
+// restore every entry regardless of the configured limit.
+func TestRestorePeersRespectsCapacity(t *testing.T) {
+	m := rejectionManager(t, nil)
+
+	entries := []persistedPeer{
+		{PeerToken: "a", PublicKey: randKeyB64(t), TunnelIP: "10.0.0.10"},
+		{PeerToken: "b", PublicKey: randKeyB64(t), TunnelIP: "10.0.0.11"},
+		{PeerToken: "c", PublicKey: randKeyB64(t), TunnelIP: "10.0.0.12"},
+	}
+
+	restored, skipped := m.restorePeers(entries, 0, zap.NewNop())
+	if restored != 0 {
+		t.Errorf("restored = %d with capacity 0, want 0", restored)
+	}
+	if skipped != len(entries) {
+		t.Errorf("skipped = %d, want %d (all entries)", skipped, len(entries))
+	}
+	if got := m.PeerCount(); got != 0 {
+		t.Errorf("peer count = %d after a capacity-0 restore, want 0", got)
 	}
 }
