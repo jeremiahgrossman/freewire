@@ -227,9 +227,56 @@ let n1 = [UInt8](repeating: 0xCD, count: MagicProbe.nonceLen)
 check(!MagicProbe.replyMatches(MagicProbe.magic + n1, nonce: n0), "reply with a different nonce fails")
 check(!MagicProbe.replyMatches(MagicProbe.magic, nonce: n0), "reply too short to carry a nonce fails")
 
+// MARK: - DiagnosticsLog (2026-08-31 local-first diagnostics)
+
+// formatLine must prepend a timestamp and never double a trailing newline the
+// caller already stripped -- a double blank line per entry would make the
+// exported log painful to read for exactly the person it exists to help.
+let fixedDate = Date(timeIntervalSince1970: 0) // 1970-01-01T00:00:00Z, unambiguous
+let formatted = DiagnosticsLog.formatLine("freewire-tunnel: ready utun6 10.0.0.2 dns_tcp", at: fixedDate)
+check(formatted.hasPrefix("1970-01-01T00:00:00Z "), "formatLine prepends an RFC3339 UTC timestamp")
+check(formatted.hasSuffix("ready utun6 10.0.0.2 dns_tcp"), "formatLine preserves the original line")
+let withoutNewline = DiagnosticsLog.formatLine("freewire-tunnel: same line", at: fixedDate)
+let withNewline = DiagnosticsLog.formatLine("freewire-tunnel: same line\n", at: fixedDate)
+check(withNewline == withoutNewline,
+      "formatLine strips one trailing newline rather than doubling it")
+
+// trimIfNeeded must never trim below threshold, must trim at whole-line
+// boundaries (never leaving a corrupt fragment at the top of the file), and
+// must never empty the log even if a single line exceeds the target alone.
+check(DiagnosticsLog.trimIfNeeded("short", thresholdBytes: 1000, targetBytes: 500) == nil,
+      "trimIfNeeded is a no-op under the threshold")
+let manyLines = (1...100).map { "line \($0)" }.joined(separator: "\n")
+if let trimmed = DiagnosticsLog.trimIfNeeded(manyLines, thresholdBytes: 50, targetBytes: 30) {
+    check(!trimmed.contains("line 1\n"), "trimIfNeeded drops the oldest lines first")
+    check(trimmed.hasSuffix("line 100"), "trimIfNeeded keeps the most recent line")
+    check(trimmed.utf8.count <= 30 || !trimmed.contains("\n"),
+          "trimIfNeeded reaches the target size or stops at one line, never mid-line")
+} else {
+    check(false, "trimIfNeeded should have trimmed 100 lines against a 50-byte threshold")
+}
+let oneHugeLine = String(repeating: "x", count: 200)
+check(DiagnosticsLog.trimIfNeeded(oneHugeLine, thresholdBytes: 50, targetBytes: 10) == oneHugeLine,
+      "trimIfNeeded keeps a single line whole rather than emptying the log")
+
+// LineBuffer: the pipe reader may deliver a stderr chunk that splits a line
+// across two reads, or bundles several lines in one read -- both must produce
+// exactly the complete lines, in order, with partial data held for later.
+let buf = LineBuffer()
+check(buf.appendAndExtractLines(Data("partial".utf8)).isEmpty,
+      "LineBuffer holds a line with no newline yet")
+let afterSplit = buf.appendAndExtractLines(Data(" line\ncomplete line\n".utf8))
+check(afterSplit == ["partial line", "complete line"],
+      "LineBuffer reassembles a line split across two reads and extracts a same-read complete line")
+check(buf.flushRemainder() == nil, "LineBuffer has nothing left to flush after two newline-terminated lines")
+_ = buf.appendAndExtractLines(Data("trailing, no newline".utf8))
+check(buf.flushRemainder() == "trailing, no newline",
+      "LineBuffer.flushRemainder returns a final line that never saw a newline")
+check(buf.flushRemainder() == nil, "LineBuffer.flushRemainder clears the buffer once read")
+
 print("")
 if failures == 0 {
-    print("all KillSwitchRules + TunnelTransport + DoHStatus + MagicProbe assertions passed")
+    print("all KillSwitchRules + TunnelTransport + DoHStatus + MagicProbe + DiagnosticsLog assertions passed")
     exit(0)
 } else {
     print("\(failures) assertion(s) failed")

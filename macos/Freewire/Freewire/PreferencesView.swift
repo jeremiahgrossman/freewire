@@ -30,6 +30,8 @@ struct PreferencesView: View {
     @State private var essentialsList   = Preferences.shared.essentialsAllowlist.joined(separator: ", ")
     @State private var fingerprint      = (try? DeviceIdentity())?.fingerprint ?? "—"
     @State private var showPrivacyDetail = false
+    @State private var exportMessage: String?
+    @State private var exportSucceeded = false
 
     var body: some View {
         Form {
@@ -101,6 +103,21 @@ struct PreferencesView: View {
                     .font(.system(.body, design: .monospaced))
             }
 
+            Section("Diagnostics") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Button("Export Diagnostics…") { exportDiagnostics() }
+                        .buttonStyle(.link)
+                    Text("Timestamped connection and error logs, kept on this device only. Nothing is sent anywhere automatically — this saves a copy where you choose, for your own review.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let exportMessage {
+                        Text(exportMessage)
+                            .font(.caption)
+                            .foregroundStyle(exportSucceeded ? Color.secondary : Color.red)
+                    }
+                }
+            }
+
             Section("About") {
                 LabeledContent("Version", value: Bundle.main.shortVersion)
                 Button("Check for Updates") { /* Sparkle integration — Phase 3 */ }
@@ -115,6 +132,28 @@ struct PreferencesView: View {
         .frame(width: 400, height: 440)
         .sheet(isPresented: $showPrivacyDetail) {
             PrivacyDetailView()
+        }
+    }
+
+    /// The only path diagnostics data ever takes off this device: a deliberate
+    /// action the user just took, saving a copy where THEY choose via a real
+    /// save panel -- never an automatic upload. See DiagnosticsLog.swift.
+    private func exportDiagnostics() {
+        let panel = NSSavePanel()
+        let stamp = ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+        panel.nameFieldStringValue = "freewire-diagnostics-\(stamp).log"
+        panel.canCreateDirectories = true
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                try DiagnosticsLog.exportSnapshot(to: url)
+                exportSucceeded = true
+                exportMessage = "Saved to \(url.lastPathComponent)."
+            } catch {
+                exportSucceeded = false
+                exportMessage = "No diagnostics available yet — connect at least once first."
+            }
         }
     }
 }

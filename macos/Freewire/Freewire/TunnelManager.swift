@@ -1056,10 +1056,24 @@ final class TunnelManager: ObservableObject {
         // tail, so the dns/tls reasons were lost exactly when they mattered.
         let stderrLogURL = URL(fileURLWithPath: "/tmp/freewire-tunnel-stderr.log")
         FileManager.default.createFile(atPath: stderrLogURL.path, contents: nil)
-        let stderrLog = try? FileHandle(forWritingTo: stderrLogURL)
+        let stderrTmpHandle = try? FileHandle(forWritingTo: stderrLogURL)
+        // Also tee every line, timestamped, into DiagnosticsLog -- the SAME
+        // content as the /tmp file above, just persisted across sessions
+        // instead of truncated on every connect. See DiagnosticsLog.swift for
+        // why this is local-only (no automatic transmission anywhere).
+        let stderrPipe = Pipe()
+        let stderrLineBuffer = LineBuffer()
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            guard !chunk.isEmpty else { return }
+            try? stderrTmpHandle?.write(contentsOf: chunk)
+            for line in stderrLineBuffer.appendAndExtractLines(chunk) {
+                DiagnosticsLog.appendLine(line)
+            }
+        }
         let skipRouting = Preferences.shared.skipRouting
 
-        Task.detached { [helperPath, configData, readyFile, stderrLog, skipRouting, tunnelStdin] in
+        Task.detached { [helperPath, configData, readyFile, stderrTmpHandle, stderrPipe, stderrLineBuffer, skipRouting, tunnelStdin] in
             let p = Process()
             p.executableURL = URL(fileURLWithPath: "/usr/bin/sudo")
             // -n: never prompt. Without it sudo blocks on a password nobody can
@@ -1077,7 +1091,7 @@ final class TunnelManager: ObservableObject {
             if let out = try? FileHandle(forWritingTo: readyFile) {
                 p.standardOutput = out
             }
-            p.standardError = stderrLog ?? FileHandle.nullDevice
+            p.standardError = stderrPipe
 
             let stdin = Pipe()
             p.standardInput = stdin
@@ -1090,7 +1104,15 @@ final class TunnelManager: ObservableObject {
             // killTunnel can close it; closes automatically if the app dies.
             tunnelStdin.set(stdin.fileHandleForWriting)
             p.waitUntilExit()
-            try? stderrLog?.close()
+            // Tear the handler down before closing, or a final readable event
+            // could fire against a handle mid-close. Flush whatever partial
+            // line never saw a trailing newline, so the last diagnostic before
+            // an abrupt exit is not silently dropped from the persistent log.
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+            if let last = stderrLineBuffer.flushRemainder() {
+                DiagnosticsLog.appendLine(last)
+            }
+            try? stderrTmpHandle?.close()
         }
 
         func failure() -> TunnelError {

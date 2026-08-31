@@ -14,6 +14,7 @@ swiftc -O \
   "$SRC/KillSwitchRules.swift" \
   "$SRC/PathUpgradeManager.swift" \
   "$SRC/DoHStatus.swift" \
+  "$SRC/DiagnosticsLog.swift" \
   "$HERE/main.swift" \
   -o "$OUT"
 
