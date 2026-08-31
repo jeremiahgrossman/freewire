@@ -27,7 +27,7 @@ This document defines all user-facing flows, states, and information hierarchy f
    - 3.5 Menu Bar States
    - 3.6 Menu Bar Panel
    - 3.7 Kill Switch and Reconnection
-   - 3.8 Preferences
+   - 3.8 Settings
    - 3.9 Sparkle Update Flow
 4. Server Setup (Self-Host)
    - 4.1 AWS Deploy
@@ -916,7 +916,8 @@ Clicking the menu bar icon opens a compact panel. This is the primary interactio
 ```
 
 - Server selector (▾) opens an inline server list within the panel.
-- Gear icon opens Preferences window.
+- Gear icon pushes to the Settings screen inside this same popover (§3.8) — not
+  a separate window.
 
 **Connected:**
 
@@ -979,49 +980,89 @@ If Freewire is quit while in Reconnecting state (kill switch active), the tunnel
 
 ---
 
-### 3.8 Preferences
+### 3.8 Settings
 
-The Preferences window opens from the gear icon in the menu bar panel.
+Settings is a screen pushed into the same popover as the main panel, reached
+from the gear icon (§3.6) — not a separate window. This is the single settings
+surface in the app; an earlier separate Preferences window with an overlapping
+but different feature set existed briefly and was removed once nothing opened
+it (see `PanelView.swift`'s `PanelSettingsView`, the source of truth this
+section is kept in sync with).
 
 ```
 ┌────────────────────────────────────────────────┐
-│  Freewire Preferences                          │
+│  ‹  Settings                                   │
 │                                                │
-│  GENERAL                                       │
-│  Launch at login              [ON]             │
-│  Connect automatically        [ON]             │
-│  Show in menu bar             [ON] (always on) │
+│  Launch at login                        [ON]  │
+│  Connect automatically on launch        [ON]  │
 │                                                │
-│  SERVER                                        │
-│  Active server: Freewire — US         [Change] │
+│  Kill switch                           [OFF]  │
+│  Not available yet. When the VPN drops,        │
+│  traffic is not blocked. Coming in a future     │
+│  release.                                       │
+│  ─────────────────────────────────────────     │
+│  Essentials Mode                       [OFF]  │
+│  On networks too restrictive for a full VPN,    │
+│  carry only messaging, email, and push          │
+│  notifications, and block everything else.      │
+│  Off by default.                                │
+│  (allowlist editor shown only when ON)          │
+│  ─────────────────────────────────────────     │
+│  [ Export Diagnostics… ]                        │
+│  Timestamped connection and error logs, kept    │
+│  on this device only. Nothing is sent           │
+│  anywhere automatically.                        │
+│  ─────────────────────────────────────────     │
+│  [ What Freewire sees › ]                       │
 │                                                │
-│  PROTECTION                                    │
-│  Kill switch                  [ON]             │
-│  [description of kill switch]                  │
-│                                                │
-│  PRIVACY                                       │
-│  What Freewire sees               [ › ]        │
-│  Improve detection            [OFF]            │
-│                                                │
-│  DEVICE                                        │
-│  Key: AB:CD:EF:12:34:56:78:9A                 │
-│  [ Reset Device Key ]  [ Remove Freewire ]     │
-│                                                │
-│  ABOUT                                         │
-│  Version 1.0.0                                 │
-│  [ Check for Updates ]                         │
-│  [ Privacy Policy ]                            │
-│  [ What is a VPN? ]                            │
+│  Key fingerprint                                │
+│  AB:CD:EF:12:34:56:78:9A                       │
+│  Version 1.0.0                                  │
+│  [ Privacy Policy ]                             │
 │                                                │
 └────────────────────────────────────────────────┘
 ```
 
-- "Launch at login" defaults to ON.
-- **"Connect automatically"** — new toggle, defaults to ON. When on, Freewire connects automatically when the app launches. Useful for power users who want constant protection. Disable for users who prefer to connect manually. Both "Launch at login" and "Connect automatically" must be ON for the VPN to be up without any user action after a reboot.
-- "Show in menu bar" is always on and cannot be disabled (menu bar is the only interface).
-- "Check for Updates" manually triggers Sparkle.
-- **"What Freewire sees"** — same in-app privacy transparency screen as iOS (§2.7). Plain-language breakdown of what is and isn't logged.
-- **"Improve detection"** — network intelligence opt-in toggle (same as iOS §2.7).
+- "Launch at login" defaults to ON. The toggle re-reads the true `SMAppService`
+  registration status after every change, so a registration failure snaps it
+  back rather than showing a state that never actually took.
+- **"Connect automatically on launch"** — defaults to ON. When on, Freewire
+  connects automatically when the app launches. Both this and "Launch at
+  login" must be ON for the VPN to be up without any user action after a
+  reboot.
+- **"Kill switch"** — present but disabled (greyed out) until the privileged
+  helper (`FreewireHelper`) can install its pf rules; see §3.7 and
+  `error-states-spec.md`'s "Interim: kill switch not yet enforced." No
+  "Show in menu bar" toggle exists — the menu bar is the only interface and
+  that was never a real setting.
+- **"Essentials Mode"** — off by default. When on, a comma-separated allowlist
+  field appears (IPs, CIDRs, or domains; defaults to Apple's `17.0.0.0/8` for
+  iMessage/push, which needs no DNS). This is the in-popover config surface
+  for the feature also reachable in-flow from CONN-2a/CONN-2b's "Try
+  messaging & email only" offer — see `ESSENTIALS-MODE-SPEC.md`.
+- **"Export Diagnostics…"** — opens a native save panel and writes a copy of
+  the local, timestamped diagnostics log (`DiagnosticsLog.swift`). This is the
+  only path diagnostics data ever leaves the device; nothing is ever
+  transmitted automatically. Not present in the deleted network-intelligence
+  proposal below — a separate, later feature.
+- **"What Freewire sees"** — same in-app privacy transparency screen as iOS
+  (§2.7), pushed within the same popover rather than a separate screen.
+- No "Improve detection" / network intelligence toggle exists. That feature
+  was evaluated and deliberately declined (see `DECISIONS.md`'s
+  NETWORK-INTELLIGENCE entry) — reconnect already remembers the last working
+  transport, so a crowdsourced hint would only help on a first connection to
+  an unseen network, and a hashed BSSID is a location identifier public
+  wardriving databases can reverse. Do not add this toggle while that
+  decision stands — a toggle for a feature that does nothing is its own false
+  claim. (The iOS spec in §2.7 still describes this toggle; iOS is deferred
+  and unbuilt, so that section is aspirational, not a description of shipped
+  behavior the way this one is.)
+- No "Reset Device Key," "Remove Freewire," "Check for Updates," or
+  multi-server "Active server" row exist in Settings today. Sparkle
+  (`sparkle-update-feed-spec.md`) and self-host server switching
+  (`server-dashboard-api-spec.md`) are both real specs, but neither has a
+  Settings entry point built yet — see Build Sequence Phase 3/4 in
+  `CLAUDE.md` for their status.
 
 ---
 
