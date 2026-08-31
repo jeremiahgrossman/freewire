@@ -158,6 +158,13 @@ func main() {
 		os.Exit(dnsProbe(os.Args[2:]))
 	}
 
+	// --dnstcp-probe runs only the dns_tcp hello against the server, then closes
+	// the connection. No system state change. Used both for field diagnostics
+	// and as the PathUpgradeManager's dns_tcp upgrade-candidate probe.
+	if len(os.Args) > 1 && os.Args[1] == "--dnstcp-probe" {
+		os.Exit(dnsTCPProbe(os.Args[2:]))
+	}
+
 	// --dns-throughput measures the resolver/delegation query capacity and the
 	// upstream ceiling it implies. Like --dns-probe it changes no system state.
 	if len(os.Args) > 1 && os.Args[1] == "--dns-throughput" {

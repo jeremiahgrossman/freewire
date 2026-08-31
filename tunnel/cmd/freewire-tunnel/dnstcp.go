@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"strings"
 	"time"
 )
@@ -106,4 +107,51 @@ func tryDNSTCP(cfg Config) (net.Conn, error) {
 	// mid-session.
 	conn.SetDeadline(time.Time{}) //nolint:errcheck
 	return conn, nil
+}
+
+// dnsTCPProbe runs only the dns_tcp hello against the server and reports
+// whether it completes, then closes the connection -- it never progresses to
+// a real WireGuard handshake, so (like the server's own magic-UDP responder
+// for udp443) it cannot roam an active session's endpoint. That safety
+// property is what makes it usable as a PathUpgradeManager candidate probe
+// from a slower carrier, the same reasoning documented on probeUDP443 in
+// macos/Freewire/Freewire/PathUpgradeManager.swift.
+//
+//	freewire-tunnel --dnstcp-probe --server 52.203.246.145 [--domain t.pinghop.net]
+//
+// Reuses tryDNSTCP unchanged, so a probe pass and a real connect attempt can
+// never disagree about whether the hello succeeds.
+func dnsTCPProbe(args []string) int {
+	var server, domain string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--server":
+			if i+1 < len(args) {
+				server, i = args[i+1], i+1
+			}
+		case "--domain":
+			if i+1 < len(args) {
+				domain, i = args[i+1], i+1
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "dnstcp-probe: unknown argument %q\n", args[i])
+			return 2
+		}
+	}
+	if server == "" {
+		fmt.Fprintln(os.Stderr, "dnstcp-probe: --server is required")
+		return 2
+	}
+
+	cfg := Config{ServerHost: server, DNSTunnelDomain: domain}
+	start := time.Now()
+	conn, err := tryDNSTCP(cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dnstcp-probe: FAIL: %v\n", err)
+		return 1
+	}
+	conn.Close() //nolint:errcheck
+	fmt.Fprintf(os.Stderr, "dnstcp-probe: hello OK in %s -- dns_tcp reaches our server here\n",
+		time.Since(start).Round(time.Millisecond))
+	return 0
 }

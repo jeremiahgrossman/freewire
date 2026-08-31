@@ -117,7 +117,7 @@ check(!noServer.contains("pass out quick proto tcp"),
 // so this is the tripwire. Keep this list identical to Go's TestCarrierChainOrderIsStable.
 let goCarrierChain = [
     "wireguard", "udp443", "http_connect", "tls443",
-    "wss443", "cdn_wss", "dns", "icmp_udp",
+    "wss443", "cdn_wss", "dns_tcp", "dns", "icmp_udp",
 ]
 
 // Every carrier the app can select, in speed order.
@@ -127,10 +127,10 @@ check(byPriority.map { $0.rawValue } == goCarrierChain,
 check(TunnelTransport.allCases.count == goCarrierChain.count,
       "no carrier added on one side only (\(TunnelTransport.allCases.count) vs \(goCarrierChain.count))")
 
-// Priorities must be exactly 1...8, dense and unique, so "lower = faster" is a
+// Priorities must be exactly 1...9, dense and unique, so "lower = faster" is a
 // total order with no ties the upgrade manager could resolve arbitrarily.
-check(Set(TunnelTransport.allCases.map { $0.priority }) == Set(1...8),
-      "priorities are exactly 1...8, unique and dense")
+check(Set(TunnelTransport.allCases.map { $0.priority }) == Set(1...9),
+      "priorities are exactly 1...9, unique and dense")
 
 // udp443 must rank second: same speed as WireGuard-direct, one port portals pass
 // more often. This is the exact rank the Go battery reorder corrected.
@@ -141,11 +141,15 @@ for tcp in [TunnelTransport.httpConnect, .tls443, .wss443, .cdnWSS] {
           "\(tcp.rawValue) ranks after udp443 (no TCP-over-TCP on udp443)")
 }
 
-// The reduced-speed / DNS-leak carriers are exactly the two tunnels, nothing else.
+// The reduced-speed carriers are exactly the two throughput-constrained
+// tunnels; the DNS-leak carriers add dns_tcp -- fast, but untested with DoH
+// against a portal that might pass raw TCP/53 and not arbitrary HTTPS
+// (2026-08-30 decision, see PathUpgradeManager.swift's leaksDNSToNetwork doc).
 for t in TunnelTransport.allCases {
     let slow = (t == .dns || t == .icmpUDP)
+    let leaksDNS = (t == .dnsTCP || t == .dns || t == .icmpUDP)
     check(t.isReducedSpeed == slow, "isReducedSpeed correct for \(t.rawValue)")
-    check(t.leaksDNSToNetwork == slow, "leaksDNSToNetwork correct for \(t.rawValue)")
+    check(t.leaksDNSToNetwork == leaksDNS, "leaksDNSToNetwork correct for \(t.rawValue)")
 }
 
 // A round trip through rawValue (the Go boundary) must recover every case, so a
@@ -193,6 +197,13 @@ check(TunnelTransport.allCases.filter { fasterThan($0).contains(.dns) } == [.icm
       "DNS is a faster-path upgrade candidate only from ICMP")
 check(TunnelTransport.allCases.allSatisfy { !fasterThan($0).contains(.icmpUDP) },
       "ICMP is never a faster-path upgrade candidate (nothing is slower)")
+
+// dns_tcp sits between cdn_wss and dns, so it is a candidate only from the two
+// carriers slower than it: dns and icmpUDP. Added 2026-08-30 alongside the
+// probe(.dnsTCP) implementation -- pinned so a priority reorder cannot
+// silently change which carriers probe for it.
+check(TunnelTransport.allCases.filter { fasterThan($0).contains(.dnsTCP) } == [.dns, .icmpUDP],
+      "dns_tcp is a faster-path upgrade candidate only from dns and icmpUDP")
 
 // MARK: - MagicProbe wire codec (udp443 upgrade probe <-> server responder)
 

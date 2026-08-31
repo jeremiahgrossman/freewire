@@ -4,12 +4,13 @@ import Network
 // Runs silently after a tunnel is established on any path. Probes for faster paths
 // and notifies TunnelManager when an upgrade is available.
 //
-// Path priority (fastest → slowest):
-//   1. Open WireGuard (UDP 51820)
-//   2. HTTP CONNECT
-//   3. TLS/443
-//   4. DNS tunnel
-//   5. ICMP/UDP
+// Path priority (fastest → slowest), matching TunnelTransport.priority /
+// tunnel/cmd/freewire-tunnel/transport.go's defaultCandidates:
+//   1. wireguard (UDP 51820)      6. cdn_wss
+//   2. udp443                     7. dns_tcp
+//   3. http_connect                8. dns
+//   4. tls443                     9. icmp_udp
+//   5. wss443
 //
 // The manager only upgrades, never downgrades. It probes in parallel, picks the
 // fastest available path, and hands the result back via the onUpgradeAvailable callback.
@@ -139,6 +140,8 @@ final class PathUpgradeManager {
             return false
         case .httpConnect:
             return await probeHTTPConnect()
+        case .dnsTCP:
+            return await probeDNSTCP()
         case .dns:
             return await probeDNS()
         case .icmpUDP:
@@ -180,6 +183,29 @@ final class PathUpgradeManager {
         // budgets it at 3s, so hold the probe to the same ceiling rather than the
         // generic 2s the TCP probes use.
         return await Self.runProbeBinary(binary, args: args, timeout: 3)
+    }
+
+    /// Probes the dns_tcp carrier by running the helper's rootless
+    /// `--dnstcp-probe`: a TCP dial to server:53 plus the magic+nonce hello,
+    /// closed immediately after -- it never progresses to a real WireGuard
+    /// handshake. That is what makes it safe to probe from an active session
+    /// the same way `probeUDP443` is: unlike a real 51820 handshake, it
+    /// carries no WireGuard identity, so it cannot roam the server's peer
+    /// endpoint out from under the carrier that is still carrying traffic.
+    ///
+    /// The candidate filter in `probeForUpgrade` already scopes this to fire
+    /// only from `.dns` and `.icmpUDP` -- the two carriers slower than
+    /// dns_tcp in the priority order -- with no special-casing needed here,
+    /// the same way `.dns` is automatically scoped to fire only from ICMP.
+    private func probeDNSTCP() async -> Bool {
+        guard let binary = helperURL else { return false }
+        var args = ["--dnstcp-probe", "--server", serverHost]
+        if let zone = dnsTunnelDomain, !zone.isEmpty {
+            args.append(contentsOf: ["--domain", zone])
+        }
+        // One TCP round trip plus one DNS exchange (dnsTCPHelloTimeout on the
+        // Go side is 5s; hold the probe to the same ceiling).
+        return await Self.runProbeBinary(binary, args: args, timeout: 5)
     }
 
     /// Runs a rootless helper subcommand off the main actor and reports whether
@@ -478,6 +504,7 @@ enum TunnelTransport: String, CaseIterable {
     case tls443     = "tls443"
     case wss443     = "wss443"
     case cdnWSS     = "cdn_wss"
+    case dnsTCP     = "dns_tcp"
     case dns        = "dns"
     case icmpUDP    = "icmp_udp"
 
@@ -494,25 +521,42 @@ enum TunnelTransport: String, CaseIterable {
         case .tls443:      return 4
         case .wss443:      return 5
         case .cdnWSS:      return 6
-        case .dns:         return 7
-        case .icmpUDP:     return 8
+        case .dnsTCP:      return 7
+        case .dns:         return 8
+        case .icmpUDP:     return 9
         }
     }
 
     /// True when throughput is constrained (DNS or ICMP tunnel).
+    ///
+    /// dns_tcp is deliberately NOT included here despite sharing port 53 with
+    /// `dns`: it is field-measured at 3.6-7.6 Mbps (2026-08-30, a real
+    /// destination-gated cafe), not remotely in the same class as the ~72 Kbps
+    /// `dns` floor or ICMP. Showing a "Reduced speed" badge on it would be
+    /// actively wrong, not just conservative.
     var isReducedSpeed: Bool {
         self == .dns || self == .icmpUDP
     }
 
     /// True when encrypted DNS is not in use on this transport.
     ///
-    /// DoH costs a full HTTPS round trip per uncached lookup, which these two
-    /// deliver in 5-10 seconds. Since the takeover is system-wide, every
-    /// application pays it, so the tunnel leaves the resolver alone here and the
-    /// network can see which sites are visited. DNS-1 in error-states-spec.md;
-    /// the reasoning is in DECISIONS.md under DNS-ON-SLOW-TRANSPORTS.
+    /// DoH costs a full HTTPS round trip per uncached lookup, which `dns` and
+    /// `icmpUDP` deliver in 5-10 seconds. Since the takeover is system-wide,
+    /// every application pays it, so the tunnel leaves the resolver alone here
+    /// and the network can see which sites are visited. DNS-1 in
+    /// error-states-spec.md; the reasoning is in DECISIONS.md under
+    /// DNS-ON-SLOW-TRANSPORTS.
+    ///
+    /// dns_tcp is included here too, DESPITE being fast enough that the speed
+    /// argument above does not obviously apply (2026-08-30 decision, not an
+    /// oversight): DoH-over-dns_tcp has never been tried against a portal that
+    /// might pass raw TCP/53 but not arbitrary HTTPS traffic, and the proven-safe
+    /// choice is to match the two other DNS-family carriers until that is
+    /// actually tested. Revisit alongside DECISIONS.md's own "revisit if this
+    /// gets materially faster" clause -- dns_tcp already has, but the DoH
+    /// question is untested, not merely unfast.
     var leaksDNSToNetwork: Bool {
-        self == .dns || self == .icmpUDP
+        self == .dnsTCP || self == .dns || self == .icmpUDP
     }
 
     var displayName: String {
@@ -523,6 +567,7 @@ enum TunnelTransport: String, CaseIterable {
         case .tls443:      return "TLS/443"
         case .wss443:      return "WebSocket/443"
         case .cdnWSS:      return "CDN WebSocket/443"
+        case .dnsTCP:      return "DNS-over-TCP tunnel"
         case .dns:         return "DNS tunnel"
         case .icmpUDP:     return "ICMP tunnel"
         }
