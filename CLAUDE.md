@@ -25,6 +25,22 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   code), narrower scope now that `dns_tcp` covers the common case, but still
   genuinely unvalidated against a real portal. The Developer ID blocker for
   the kill switch is unchanged.
+- **LOCAL-FIRST DIAGNOSTICS LOG + ON-DEMAND EXPORT SHIPPED (2026-08-31).**
+  Requested as client->server telemetry (timestamped detailed logs, queued
+  locally when offline, sent when connected); flagged the conflict with
+  Network Intelligence (declined on purpose, `DECISIONS.md`) and the
+  aggregate-only server data model before building, and the user chose
+  local-first over recreating that risk. `DiagnosticsLog.swift` persists the
+  existing stderr diagnostics (RFC3339-timestamped now) to
+  `~/Library/Application Support/Freewire/diagnostics.log`, size-capped at
+  20MB; `TunnelManager.swift`'s helper-stderr capture moved from a direct
+  FileHandle to a Pipe+`LineBuffer` so it tees to both that file and the
+  existing `/tmp` live-debug file unchanged. Export is a Preferences button
+  (NSSavePanel) — the only path data here ever leaves the device, never
+  automatic. Verified two ways: unit tests for the pure logic, and a real
+  end-to-end run of the exact Pipe/LineBuffer/DiagnosticsLog pattern against
+  a live `--probe-battery` subprocess (20 real lines captured, timestamped,
+  persisted, byte-exact on export).
 - **`dns_tcp` FIELD-VALIDATED AT A REAL DESTINATION-GATED CAFÉ (2026-08-30).**
   Same café as the 2026-08-29 visit, now with the peer-persistence fix
   deployed so the test could actually run end to end. Connected on the café
