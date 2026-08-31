@@ -47,6 +47,37 @@
       "Effect": "Allow",
       "Action": "sts:GetCallerIdentity",
       "Resource": "*"
+    },
+    {
+      "Sid": "EBSSnapshotBackup",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateSnapshot",
+        "ec2:DeleteSnapshot",
+        "ec2:DescribeSnapshots",
+        "ec2:DescribeVolumes",
+        "dlm:CreateLifecyclePolicy",
+        "dlm:GetLifecyclePolicy",
+        "dlm:GetLifecyclePolicies",
+        "dlm:UpdateLifecyclePolicy",
+        "dlm:TagResource"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DLMServiceLinkedRole",
+      "Effect": "Allow",
+      "Action": "iam:CreateServiceLinkedRole",
+      "Resource": "arn:aws:iam::*:role/aws-service-role/dlm.amazonaws.com/AWSServiceRoleForDataLifecycleManager",
+      "Condition": {
+        "StringEquals": { "iam:AWSServiceName": "dlm.amazonaws.com" }
+      }
+    },
+    {
+      "Sid": "PassDLMRole",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::216989115408:role/aws-service-role/dlm.amazonaws.com/AWSServiceRoleForDataLifecycleManager"
     }
   ]
 }
