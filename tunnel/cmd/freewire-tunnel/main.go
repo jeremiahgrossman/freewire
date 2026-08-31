@@ -1513,25 +1513,155 @@ const savedDNSFile = "/var/run/freewire-saved-dns"
 // restore a service to DHCP-provided resolvers.
 var dnsSaved = map[string]string{}
 
+// dnsRestoreEntry is one marker-file line, decoupled from the file format so
+// the decision logic around it is testable without touching the filesystem.
+type dnsRestoreEntry struct {
+	Service string
+	Servers string // "" means DHCP/"Empty"
+}
+
+// parseSavedDNS parses the marker file's tab-separated "service\tservers"
+// lines, skipping blank or malformed ones rather than erroring -- this is
+// best-effort local state, not a format that needs strict validation.
+//
+// Trims only the trailing "\r" from each line, not all whitespace: a
+// service saved with an empty Servers value (no static DNS configured, one
+// of the most common real cases) writes as "service\t\n" -- a general
+// strings.TrimSpace would strip that trailing tab along with the newline,
+// making the line look tab-less and dropping the entry entirely. The
+// original restore code had exactly this bug.
+func parseSavedDNS(data string) []dnsRestoreEntry {
+	var entries []dnsRestoreEntry
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		service, servers, ok := strings.Cut(line, "\t")
+		if !ok || service == "" {
+			continue
+		}
+		entries = append(entries, dnsRestoreEntry{Service: service, Servers: servers})
+	}
+	return entries
+}
+
+// formatSavedDNS is the inverse of parseSavedDNS.
+func formatSavedDNS(entries []dnsRestoreEntry) string {
+	var b strings.Builder
+	for _, e := range entries {
+		b.WriteString(e.Service + "\t" + e.Servers + "\n")
+	}
+	return b.String()
+}
+
+// setdnsArgs builds the "-setdnsservers" argv tail for restoring or
+// overriding a service's resolvers. An empty saved value means the service
+// had no static resolvers configured, which networksetup expects spelled as
+// the literal "Empty", not an empty argument list.
+func setdnsArgs(service, servers string) []string {
+	args := append([]string{"-setdnsservers", service}, strings.Fields(servers)...)
+	if len(args) == 2 {
+		args = append(args, "Empty")
+	}
+	return args
+}
+
+// dnsLooksLikeOurs reports whether a "-getdnsservers" reading matches this
+// tunnel's own resolver. A service already pointed here when setupDNS reads
+// it is not a real "original" -- it is state an earlier run's cleanup or
+// restore failed to undo, and capturing it as the value to restore to later
+// would entrench the corruption instead of fixing it.
+func dnsLooksLikeOurs(current string) bool {
+	return current == strings.Join(tunnelResolvers, " ")
+}
+
+// restoreSucceeded compares a "-getdnsservers" reading against the value a
+// restore was supposed to produce, using the same normalization setupDNS
+// applies when it first captures a service's resolvers. A restore command
+// that exits 0 does not guarantee the value actually took (the service can be
+// transiently absent from networksetup's list), so this is checked
+// separately rather than trusted from the command's exit code alone.
+func restoreSucceeded(want, got string) bool {
+	got = strings.TrimSpace(got)
+	if strings.Contains(got, "There aren't any") {
+		got = ""
+	} else {
+		got = strings.Join(strings.Fields(got), " ")
+	}
+	return got == strings.TrimSpace(want)
+}
+
+type captureDecision int
+
+const (
+	// captureNormal: current is a real resolver, not ours. Save it as the
+	// value to restore to later, exactly as before.
+	captureNormal captureDecision = iota
+	// captureSkipPoisoned: current is already our own resolver and there is
+	// no trustworthy prior value to fall back on. Do not save 127.0.0.1 as
+	// if it were the original.
+	captureSkipPoisoned
+	// captureRepairFromMarker: current is our own resolver, but the marker
+	// file still holds a real prior value for this service from an earlier,
+	// incompletely-restored run. Use that value instead of the poisoned
+	// current reading.
+	captureRepairFromMarker
+)
+
+// planDNSCapture decides what setupDNS should do with one service's current
+// DNS reading, given whatever the marker file already knows about it. Pure
+// decision function: no exec.Command, no filesystem -- setupDNS supplies both
+// inputs and acts on the result.
+func planDNSCapture(current string, markerEntry *dnsRestoreEntry) (captureDecision, string) {
+	if !dnsLooksLikeOurs(current) {
+		return captureNormal, current
+	}
+	// current is poisoned. Only trust a marker fallback that is not itself
+	// poisoned -- a marker entry that also reads our own resolver is not a
+	// real original either (a double failure), and reusing it would just
+	// re-save the same corruption under a different name.
+	if markerEntry != nil && !dnsLooksLikeOurs(markerEntry.Servers) {
+		return captureRepairFromMarker, markerEntry.Servers
+	}
+	return captureSkipPoisoned, ""
+}
+
 // restoreStaleDNS puts back resolvers left redirected by a previous run.
+//
+// Each restore is verified by re-reading the service's resolvers afterward,
+// not just trusted from the command's exit code. A restore that reported
+// success but did not actually take (the service was transiently absent from
+// networksetup's list, for instance) used to still delete the marker file --
+// permanently losing the one record of that service's true original value,
+// and leaving a later setupDNS() run free to capture the still-poisoned
+// reading as if it were real. Entries that do not verify as restored are
+// written back to the file instead, so the next run (or another --restore)
+// gets another attempt.
 func restoreStaleDNS() {
 	data, err := os.ReadFile(savedDNSFile)
 	if err != nil {
 		return
 	}
-	for _, line := range strings.Split(string(data), "\n") {
-		service, servers, ok := strings.Cut(strings.TrimSpace(line), "\t")
-		if !ok || service == "" {
+	var stillOwed []dnsRestoreEntry
+	var owedNames []string
+	for _, e := range parseSavedDNS(string(data)) {
+		exec.Command(networksetupBin, setdnsArgs(e.Service, e.Servers)...).Run() //nolint:errcheck
+		out, _ := exec.Command(networksetupBin, "-getdnsservers", e.Service).Output()
+		if restoreSucceeded(e.Servers, string(out)) {
+			fmt.Fprintf(os.Stderr, "freewire-tunnel: restored stale DNS for %q\n", e.Service)
 			continue
 		}
-		args := append([]string{"-setdnsservers", service}, strings.Fields(servers)...)
-		if len(args) == 2 {
-			args = append(args, "Empty")
-		}
-		exec.Command(networksetupBin, args...).Run() //nolint:errcheck
-		fmt.Fprintf(os.Stderr, "freewire-tunnel: restored stale DNS for %q\n", service)
+		stillOwed = append(stillOwed, e)
+		owedNames = append(owedNames, e.Service)
 	}
-	os.Remove(savedDNSFile) //nolint:errcheck
+	if len(stillOwed) == 0 {
+		os.Remove(savedDNSFile) //nolint:errcheck
+		return
+	}
+	os.WriteFile(savedDNSFile, []byte(formatSavedDNS(stillOwed)), 0o644) //nolint:errcheck
+	fmt.Fprintf(os.Stderr, "freewire-tunnel: could not restore stale DNS for: %s -- will retry next run\n",
+		strings.Join(owedNames, ", "))
 }
 
 func recordSavedDNS() {
@@ -1539,11 +1669,11 @@ func recordSavedDNS() {
 		os.Remove(savedDNSFile) //nolint:errcheck
 		return
 	}
-	var b strings.Builder
+	var entries []dnsRestoreEntry
 	for service, servers := range dnsSaved {
-		b.WriteString(service + "\t" + servers + "\n")
+		entries = append(entries, dnsRestoreEntry{Service: service, Servers: servers})
 	}
-	os.WriteFile(savedDNSFile, []byte(b.String()), 0o644) //nolint:errcheck
+	os.WriteFile(savedDNSFile, []byte(formatSavedDNS(entries)), 0o644) //nolint:errcheck
 }
 
 // setupDNS points every active network service at the tunnel's resolvers.
@@ -1552,12 +1682,29 @@ func recordSavedDNS() {
 // leaks is a real privacy loss and the user must be told, but it is still
 // better than no tunnel -- whereas refusing to connect over it would leave them
 // with neither.
+//
+// Before capturing a service's current resolvers as "the original" to restore
+// later, each reading goes through planDNSCapture: a service already pointed
+// at the tunnel's own resolver is not a real original, it is state an earlier
+// run's cleanup or restore failed to undo. Capturing it anyway would
+// permanently entrench whatever corrupted it -- every later restore would
+// "succeed" by faithfully putting it back exactly as broken. This is what
+// left a real machine's Wi-Fi and hotspot DNS stuck on the tunnel's loopback
+// forwarder with no running tunnel to answer it.
 func setupDNS() error {
 	names, err := activeNetworkServices()
 	if err != nil {
 		return err
 	}
-	var failed []string
+
+	markerEntries := map[string]dnsRestoreEntry{}
+	if data, err := os.ReadFile(savedDNSFile); err == nil {
+		for _, e := range parseSavedDNS(string(data)) {
+			markerEntries[e.Service] = e
+		}
+	}
+
+	var failed, poisoned []string
 	for _, name := range names {
 		out, err := exec.Command(networksetupBin, "-getdnsservers", name).Output()
 		if err != nil {
@@ -1572,18 +1719,32 @@ func setupDNS() error {
 			current = strings.Join(strings.Fields(current), " ")
 		}
 
+		var marker *dnsRestoreEntry
+		if e, ok := markerEntries[name]; ok {
+			marker = &e
+		}
+		decision, saveValue := planDNSCapture(current, marker)
+		if decision == captureSkipPoisoned {
+			poisoned = append(poisoned, name)
+			fmt.Fprintf(os.Stderr,
+				"freewire-tunnel: %s is already pointed at the tunnel resolver with no known original -- leaving it alone; run freewire-tunnel --restore\n",
+				name)
+			continue
+		}
+
 		args := append([]string{"-setdnsservers", name}, tunnelResolvers...)
 		if err := exec.Command(networksetupBin, args...).Run(); err != nil {
 			failed = append(failed, name)
 			continue
 		}
-		dnsSaved[name] = current
+		dnsSaved[name] = saveValue
 	}
 	recordSavedDNS()
 
 	if len(dnsSaved) == 0 {
 		return fmt.Errorf("no network service accepted -setdnsservers")
 	}
+	failed = append(failed, poisoned...)
 	if len(failed) > 0 {
 		return fmt.Errorf("DNS still leaks on: %s", strings.Join(failed, ", "))
 	}
