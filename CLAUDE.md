@@ -961,6 +961,8 @@ the moment anyone else connects.
   needs raw sockets (root) anyway. The faster slow-path targets — wireguard,
   udp443, wss443, cdn_wss — still decline by design: a cheap probe cannot predict
   whether they carry traffic, and the connect chain discovers them correctly.
+  Desk-verified (build + assertions); the live ICMP→DNS upgrade is
+  field-unconfirmed (sessions rarely land on ICMP).
 - **`PathUpgradeManager` now probes udp443, and path-upgrade actually upgrades
   now (2026-08-28).** `probe(.udp443)` sends the server's magic UDP probe to
   `serverHost:443` (native Swift, `enum MagicProbe`; the udp443 listener echoes
@@ -982,8 +984,63 @@ the moment anyone else connects.
   server `TestProbeWireConstantsMatchClient`). Desk-verified (server+tunnel race
   tests, Swift harness, app build); live upgrade is field-unconfirmed. Direct
   wireguard-51820 probing remains unavailable by design (the roaming hazard).
-  Desk-verified (build + assertions); the live ICMP→DNS upgrade is
-  field-unconfirmed (sessions rarely land on ICMP).
+- **`dns_tcp` is NOT yet a `PathUpgradeManager` candidate — queued, scoped by
+  the same reasoning as `udp443` above, not yet built (2026-08-30).** The
+  adversarial review the same day confirmed `dns_tcp`'s own connect hello
+  (dial TCP/53, exchange `dnsCarrierMagic` + a nonce, verify the echo) never
+  establishes real WireGuard session state before the bridge starts carrying
+  WireGuard traffic — same property that made `udp443`'s magic probe safe to
+  add: it carries no WireGuard identity, so probing it cannot roam the active
+  session's endpoint the way a real 51820 handshake would. The shape of the
+  fix: add `probe(.dnsTCP)` reusing that same hello (dial, echo, close — never
+  progressing to a real WireGuard handshake), analogous to `probe(.udp443)`'s
+  magic-UDP probe. Scoping which slower carriers should trigger it: `dns_tcp`
+  sits between `cdn_wss` and `dns` in the chain, so — mirroring how `probe(.dns)`
+  only fires from ICMP, the one carrier slower than DNS — `probe(.dnsTCP)`
+  should only fire from `.dns` (UDP) or `.icmpUDP`, the two carriers slower
+  than `dns_tcp`; every faster carrier has no reason to "upgrade" to it.
+  Genuinely useful once built: today, a client that fell all the way to the
+  slow UDP `dns` carrier because TCP/53 looked unavailable at connect time has
+  no way to notice mid-session if TCP/53 becomes reachable later — this closes
+  that gap the same way the `udp443` upgrade closed it for the faster carriers.
+- **IPv6 carrier — queued, scoped, ~an afternoon of work once at a v6 network
+  (see `IPV6-CARRIER-REMAINING.md` for the full detail; summarized here so it
+  doesn't need a separate load).** The hard part is already done: the VPC has
+  an Amazon-provided /56, the subnet a /64, a `::/0` route to the IGW, the
+  instance a global v6 address, security-group v6 rules mirror v4, and
+  `wireguard-go` already binds dual-stack — so a client reaching the server
+  over v6 today gets a full-speed tunnel with zero server changes. The server
+  auto-advertises its v6 address as `endpoint_host_v6` in `/v1/server/config`
+  (verified live). What's missing is entirely client-side:
+  1. **The `wireguard6` carrier itself** — small, low-risk: an `open` that
+     no-ops when `cfg.ServerHostV6` is empty, `endpoint(cfg)` returning
+     `[cfg.ServerHostV6]:51820`, a 2s handshake budget (falls through fast on
+     v4-only networks), and a Swift `TunnelTransport.wireguard6` case plumbed
+     through `ServerConfig`/`CachedConnection`/`TunnelConfig` the same way
+     `cdn_host` already is.
+  2. **The routing, which is the risky, must-verify-on-v6 part.**
+     `setupRouting` currently disables IPv6 entirely for every carrier so v6
+     user traffic can't leak around the v4-only tunnel — but that would kill
+     `wireguard6`'s own v6 connection. When `activeTransport == "wireguard6"`
+     specifically: do NOT disable v6; pin `[serverV6]/128` to the physical
+     interface (a v6 analogue of the existing `pinOutsideTunnel`); blackhole
+     the rest of v6 (`route add -inet6 ::/0 ::1 -blackhole`) so
+     non-server v6 traffic goes nowhere rather than leaking, forcing those
+     apps to fall back to v4 (carried in the tunnel); and `cleanupRouting`
+     must reverse exactly this without re-enabling v6 generally, since it was
+     never disabled in this case.
+  Deliberately not built yet for one honest reason: it can't be tested from a
+  v4-only network (this dev machine, and most), and untested leak-sensitive
+  routing code is exactly what broke the wifi earlier in this project — it
+  needs to be built AND verified at a real v6-capable network, which is also
+  the only place worth testing it (a v6-leaking café is the whole point).
+  The existing traffic-verified fall-through and egress self-check mean a
+  *broken* v6 routing implementation can't strand the machine — the tunnel
+  carries no traffic, falls through to a v4 carrier, and the routed-test
+  watchdog restores regardless. The real risk is a v6 *leak* during the
+  pre-fall-through window if the blackhole step is wrong, which is exactly
+  why it can't ship without being verified live. Until built, a v6-leaking
+  café is detected by the probe (`--server6` reachability) but not exploited.
 - The kill-switch cluster is real and untouched: the helper replaces the whole
   pf ruleset instead of loading its anchor, `release()` runs `pfctl -F all`,
   `isEngaged()` infers state from a file, and `sanitize()` strips hostile
