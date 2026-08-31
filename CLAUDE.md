@@ -18,12 +18,13 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 - **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
 - **In progress:** `dns_tcp` is FIELD-VALIDATED as of 2026-08-30 (see below) —
-  the primary open question from this whole arc is answered. Essentials Mode's
-  desk pre-flight was re-confirmed current the same day (both phases pass
-  clean against today's code); its own field validation is queued but not
-  urgent — narrower scope now that `dns_tcp` covers the common case — and is
-  the next thing to pick up on a future café visit. The Developer ID blocker
-  for the kill switch is unchanged.
+  the primary open question from this whole arc is answered. **Essentials
+  Mode's field validation is the explicit target for the next café visit**
+  (runbook Step 3, `testing/FIELD-TEST-RUNBOOK.md`) — desk pre-flight already
+  re-confirmed current the same day (both phases pass clean against today's
+  code), narrower scope now that `dns_tcp` covers the common case, but still
+  genuinely unvalidated against a real portal. The Developer ID blocker for
+  the kill switch is unchanged.
 - **`dns_tcp` FIELD-VALIDATED AT A REAL DESTINATION-GATED CAFÉ (2026-08-30).**
   Same café as the 2026-08-29 visit, now with the peer-persistence fix
   deployed so the test could actually run end to end. Connected on the café
