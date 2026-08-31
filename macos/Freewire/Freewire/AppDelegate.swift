@@ -102,7 +102,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         let pop = NSPopover()
-        pop.contentSize  = NSSize(width: 300, height: 340)
+        // Width matches PanelView.width -- host.sizingOptions below makes the
+        // view's own width win at runtime, but this initial value should not
+        // silently disagree with it.
+        pop.contentSize  = NSSize(width: PanelView.width, height: 340)
         pop.behavior     = .transient
         let host = NSHostingController(
             rootView: PanelView(

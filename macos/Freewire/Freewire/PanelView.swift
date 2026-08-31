@@ -7,6 +7,13 @@ struct PanelView: View {
     @ObservedObject var tunnelManager: TunnelManager
     let onQuit: () -> Void
 
+    // Single source of truth for the popover's width -- AppDelegate's
+    // NSPopover.contentSize used to hardcode its own 300pt that never
+    // actually applied (host.sizingOptions = .preferredContentSize makes
+    // this view's width win at runtime), so the two literals could drift
+    // with no visible effect until someone touched the wrong one.
+    static let width: CGFloat = 320
+
     // Settings live inside this popover rather than a separate window, so the
     // whole app is one dialog. The gear pushes to .settings, "What Freewire
     // sees" pushes to .privacy, and each has a back button.
@@ -32,7 +39,7 @@ struct PanelView: View {
                 PanelPrivacyView()
             }
         }
-        .frame(width: 320)
+        .frame(width: Self.width)
         // Base font for the whole popover. Set explicitly (not via dynamicTypeSize,
         // which barely affects macOS) so unstyled text and Toggle labels render at
         // the native menu size (~14pt) instead of SwiftUI's smaller macOS default.
@@ -57,6 +64,7 @@ private struct PanelHeader: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Settings")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -75,6 +83,7 @@ private struct SubHeader: View {
                     .foregroundStyle(.secondary)
             }
             .buttonStyle(.plain)
+            .accessibilityLabel("Back")
             Text(title)
                 .font(.system(size: 16, weight: .semibold))
             Spacer()
@@ -126,15 +135,13 @@ private struct DisconnectedBody: View {
     @ObservedObject var tunnelManager: TunnelManager
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        PanelBodyContent {
             StatusRow(symbol: "circle", label: "Not protected", color: .secondary)
             Text("Traffic is not encrypted on this network.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-            Spacer().frame(height: 4)
+                .panelCaptionStyle()
+            PanelGap()
             ConnectButton(tunnelManager: tunnelManager)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -145,23 +152,20 @@ private struct ConnectingBody: View {
     @ObservedObject var tunnelManager: TunnelManager
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        PanelBodyContent {
             HStack(spacing: 6) {
                 ProgressView().scaleEffect(0.6)
                 Text("Connecting...")
-                    .font(.system(size: 14, weight: .medium))
+                    .panelHeadlineStyle()
             }
             Text(status)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-            Spacer().frame(height: 4)
+                .panelCaptionStyle()
+            PanelGap()
             Button("Cancel") {
                 tunnelManager.cancelConnect()
             }
             .buttonStyle(SecondaryButtonStyle())
-            .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -189,7 +193,7 @@ private struct ConnectedBody: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        PanelBodyContent {
             // DEBUG-1, per error-states-spec.md. With routing skipped the
             // tunnel is genuinely up and genuinely carrying nothing, so the
             // headline is replaced rather than annotated: a caution underneath
@@ -199,24 +203,21 @@ private struct ConnectedBody: View {
                 StatusRow(symbol: "exclamationmark.triangle.fill",
                           label: "Debug mode: routing off", color: .orange)
                 Text("Your traffic is NOT going through the VPN.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .panelCaptionStyle()
             } else if tunnelManager.essentialsActive {
                 // ESSENTIALS-1, per error-states-spec.md. Replaces the "Protected"
                 // headline: only the allowlist is carried and most traffic is
                 // blocked, so "Protected" would be false. Same call as DEBUG-1.
                 StatusRow(symbol: "exclamationmark.triangle.fill",
-                          label: "Limited connectivity — messaging and email only", color: .orange)
+                          label: "Limited connectivity — messaging and email only.", color: .orange)
                 Text("This network is too restrictive for full browsing. Freewire is carrying only the destinations you allow-listed; everything else is blocked.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .panelCaptionStyle()
                     .fixedSize(horizontal: false, vertical: true)
             } else {
                 StatusRow(symbol: "checkmark.shield.fill", label: "Protected", color: .green)
             }
             Text("Connected · \(duration)")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .panelCaptionStyle()
             if transport.isReducedSpeed {
                 TransportIndicator(transport: transport)
             }
@@ -247,14 +248,12 @@ private struct ConnectedBody: View {
                 }
                 .fixedSize(horizontal: false, vertical: true)
             }
-            Spacer().frame(height: 4)
+            PanelGap()
             Button("Disconnect") {
                 Task { await tunnelManager.disconnect() }
             }
             .buttonStyle(PrimaryButtonStyle())
-            .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
         .onReceive(ticker) { t in now = t }
         .onAppear {
             now = Date()
@@ -297,32 +296,28 @@ private struct AwaitingPortalBody: View {
     @ObservedObject var tunnelManager: TunnelManager
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        PanelBodyContent {
             HStack(spacing: 6) {
                 if !timedOut { ProgressView().scaleEffect(0.6) }
                 Text(timedOut ? "Still not connected" : "Waiting for you to finish signing in…")
-                    .font(.system(size: 14, weight: .medium))
+                    .panelHeadlineStyle()
                     .fixedSize(horizontal: false, vertical: true)
             }
             Text(timedOut
                  ? "Finish signing in to this network, then try again."
                  : "Freewire will connect as soon as this network lets it through.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .panelCaptionStyle()
                 .fixedSize(horizontal: false, vertical: true)
-            Spacer().frame(height: 4)
+            PanelGap()
             if timedOut {
                 Button("Try again") { tunnelManager.retryPortalWait() }
                     .buttonStyle(PrimaryButtonStyle())
-                    .frame(maxWidth: .infinity)
             }
             Button("Cancel") {
                 Task { await tunnelManager.disconnect() }
             }
             .buttonStyle(SecondaryButtonStyle())
-            .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -332,22 +327,19 @@ private struct NoNetworkBody: View {
     @ObservedObject var tunnelManager: TunnelManager
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        PanelBodyContent {
             Text("No internet connection")
-                .font(.system(size: 14, weight: .medium))
+                .panelHeadlineStyle()
             // Copy per error-states-spec.md CONN-1.
             Text("Connect to a network and try again.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .panelCaptionStyle()
                 .fixedSize(horizontal: false, vertical: true)
-            Spacer().frame(height: 4)
+            PanelGap()
             Button("Try again") {
                 Task { await tunnelManager.connect() }
             }
             .buttonStyle(PrimaryButtonStyle())
-            .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -358,26 +350,23 @@ private struct ReconnectingBody: View {
     @ObservedObject var tunnelManager: TunnelManager
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        PanelBodyContent {
             HStack(spacing: 6) {
                 ProgressView().scaleEffect(0.6)
                 Text("Reconnecting...")
-                    .font(.system(size: 14, weight: .medium))
+                    .panelHeadlineStyle()
             }
             Text("Attempt \(attempt + 1) of 3. Your traffic is not protected while reconnecting.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .panelCaptionStyle()
                 .fixedSize(horizontal: false, vertical: true)
-            Spacer().frame(height: 4)
+            PanelGap()
             // F13: the full sentence overflowed the 240pt panel. The explanation
             // lives in the caption above.
             Button("Disconnect") {
                 Task { await tunnelManager.disconnect() }
             }
             .buttonStyle(SecondaryButtonStyle())
-            .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -387,24 +376,20 @@ private struct BlockedBody: View {
     @ObservedObject var tunnelManager: TunnelManager
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        PanelBodyContent {
             StatusRow(symbol: "exclamationmark.circle.fill", label: "Connection lost", color: .red)
             Text("Reconnection failed. Your traffic is not protected. Reconnect or disconnect.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-            Spacer().frame(height: 4)
+                .panelCaptionStyle()
+            PanelGap()
             Button("Try Again") {
                 Task { await tunnelManager.retryFromBlocked() }
             }
             .buttonStyle(PrimaryButtonStyle())
-            .frame(maxWidth: .infinity)
             Button("Disconnect") {
                 Task { await tunnelManager.disconnect() }
             }
             .buttonStyle(SecondaryButtonStyle())
-            .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -415,19 +400,17 @@ private struct CaptivePortalBody: View {
     @ObservedObject var tunnelManager: TunnelManager
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        PanelBodyContent {
             StatusRow(symbol: "wifi.exclamationmark", label: "Network login required", color: .orange)
             // Exact copy from error-states-spec.md CONN-2a
             Text("Authenticate with this network, then Freewire will reconnect automatically.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .panelCaptionStyle()
                 .fixedSize(horizontal: false, vertical: true)
-            Spacer().frame(height: 4)
+            PanelGap()
             Button("Open Network Login") {
                 tunnelManager.openCaptivePortal(url: redirectURL)
             }
             .buttonStyle(PrimaryButtonStyle())
-            .frame(maxWidth: .infinity)
             // In-flow Essentials offer: on a portal that leaves only a throttled
             // carrier, the user can get messaging + email through WITHOUT logging
             // in to the network. Offered only when this attempt was not already
@@ -437,15 +420,12 @@ private struct CaptivePortalBody: View {
                     Task { await tunnelManager.connectEssentials() }
                 }
                 .buttonStyle(SecondaryButtonStyle())
-                .frame(maxWidth: .infinity)
             }
             Button("Cancel") {
                 Task { await tunnelManager.disconnect() }
             }
             .buttonStyle(SecondaryButtonStyle())
-            .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -455,19 +435,17 @@ private struct NetworkBlockBody: View {
     @ObservedObject var tunnelManager: TunnelManager
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        PanelBodyContent {
             StatusRow(symbol: "xmark.shield.fill", label: "This network is blocking secure connections.", color: .red)
             // Exact copy from error-states-spec.md CONN-2b
             Text("Freewire tried every available method. This network may restrict all VPN traffic.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .panelCaptionStyle()
                 .fixedSize(horizontal: false, vertical: true)
-            Spacer().frame(height: 4)
+            PanelGap()
             Button("Try Again") {
                 Task { await tunnelManager.retryFromNetworkBlock() }
             }
             .buttonStyle(PrimaryButtonStyle())
-            .frame(maxWidth: .infinity)
             // In-flow Essentials offer: a network that blocks a full VPN may still
             // pass a throttled carrier that can carry messaging + email. Offered
             // only when the failed attempt was not already essentials.
@@ -476,15 +454,12 @@ private struct NetworkBlockBody: View {
                     Task { await tunnelManager.connectEssentials() }
                 }
                 .buttonStyle(SecondaryButtonStyle())
-                .frame(maxWidth: .infinity)
             }
             Button("Disconnect") {
                 Task { await tunnelManager.disconnect() }
             }
             .buttonStyle(SecondaryButtonStyle())
-            .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -495,16 +470,14 @@ private struct FailedBody: View {
     @ObservedObject var tunnelManager: TunnelManager
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        PanelBodyContent {
             StatusRow(symbol: "xmark.circle.fill", label: "Failed to connect", color: .red)
             Text(error.localizedDescription)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .panelCaptionStyle()
                 .lineLimit(4)
-            Spacer().frame(height: 4)
+            PanelGap()
             ConnectButton(tunnelManager: tunnelManager)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -620,7 +593,7 @@ private struct PanelSettingsView: View {
 
                 VStack(alignment: .leading, spacing: 3) {
                     Button("Export Diagnostics…") { exportDiagnostics() }
-                        .buttonStyle(.link)
+                        .buttonStyle(SecondaryButtonStyle())
                     Text("Timestamped connection and error logs, kept on this device only. Nothing is sent anywhere automatically.")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
@@ -635,7 +608,7 @@ private struct PanelSettingsView: View {
                 Divider()
 
                 Button("What Freewire sees \u{203A}", action: onPrivacy)
-                    .buttonStyle(.link)
+                    .buttonStyle(SecondaryButtonStyle())
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Key fingerprint")
@@ -644,16 +617,16 @@ private struct PanelSettingsView: View {
                         .font(.system(size: 13, design: .monospaced))
                         .textSelection(.enabled)
                 }
-                HStack {
-                    Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")")
-                        .font(.system(size: 12)).foregroundStyle(.secondary)
-                    Spacer()
-                    Button("Privacy Policy") {
-                        if let url = URL(string: "https://freewire.com/privacy") { NSWorkspace.shared.open(url) }
-                    }
-                    .buttonStyle(.link)
-                    .font(.system(size: 12))
+                Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                // Moved to its own row rather than a trailing inline link next to
+                // the version text: SecondaryButtonStyle fills available width,
+                // which fought the HStack's Spacer for space when squeezed in
+                // beside the version label. Matches every other Settings action.
+                Button("Privacy Policy") {
+                    if let url = URL(string: "https://freewire.com/privacy") { NSWorkspace.shared.open(url) }
                 }
+                .buttonStyle(SecondaryButtonStyle())
             }
             .padding(12)
         }
@@ -699,24 +672,66 @@ private struct PanelPrivacyView: View {
     ]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            ForEach(items, id: \.1) { item in
-                HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: item.0 ? "checkmark.circle.fill" : "xmark.circle.fill")
-                        .foregroundStyle(item.0 ? .green : .red)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(item.1).font(.system(size: 14, weight: .medium))
-                        Text(item.2).font(.system(size: 12)).foregroundStyle(.secondary)
+        // Same ScrollView + maxHeight cap as PanelSettingsView, a sibling
+        // in-popover screen of comparable content density -- previously
+        // uncapped, so it would have grown the popover unbounded via
+        // preferredContentSize instead of scrolling.
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                ForEach(items, id: \.1) { item in
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: item.0 ? "checkmark.circle.fill" : "xmark.circle.fill")
+                            .foregroundStyle(item.0 ? .green : .red)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.1).font(.system(size: 14, weight: .medium))
+                            Text(item.2).font(.system(size: 12)).foregroundStyle(.secondary)
+                        }
                     }
                 }
+                Button("Read our privacy policy") {
+                    if let url = URL(string: "https://freewire.com/privacy") { NSWorkspace.shared.open(url) }
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                .padding(.top, 2)
             }
-            Button("Read our privacy policy") {
-                if let url = URL(string: "https://freewire.com/privacy") { NSWorkspace.shared.open(url) }
-            }
-            .buttonStyle(.link)
-            .padding(.top, 2)
+            .padding(12)
         }
-        .padding(12)
+        .frame(maxHeight: 420)
+    }
+}
+
+// MARK: - Shared body layout
+
+// Every *Body view repeated this same leading-aligned, 8pt-spaced, full-width
+// wrapper. Extracted so the 11 state bodies share one definition instead of
+// 11 copies that could drift independently.
+private struct PanelBodyContent<Content: View>: View {
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// The pre-button gap repeated across nearly every *Body view.
+private struct PanelGap: View {
+    var body: some View { Spacer().frame(height: 4) }
+}
+
+private extension View {
+    /// Shared caption style (12pt, secondary) for the explanatory line under
+    /// a status row -- used identically across every *Body view.
+    func panelCaptionStyle() -> some View {
+        self.font(.system(size: 12)).foregroundStyle(.secondary)
+    }
+
+    /// Shared headline style (14pt medium) for the small handful of *Body
+    /// views whose lead line is plain Text rather than a StatusRow.
+    func panelHeadlineStyle() -> some View {
+        self.font(.system(size: 14, weight: .medium))
     }
 }
 
@@ -734,6 +749,7 @@ private struct StatusRow: View {
             Text(label)
                 // Regular weight to read like a native menu item, not a heading.
                 .font(.system(size: 14))
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }
@@ -789,14 +805,12 @@ struct SecondaryButtonStyle: ButtonStyle {
 /// available from the menu and does cancel the upgrade.
 struct UpgradingBody: View {
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        PanelBodyContent {
             StatusRow(symbol: "arrow.triangle.2.circlepath",
                       label: "Switching to a faster connection", color: .orange)
             Text("Your traffic is not protected for a moment.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .panelCaptionStyle()
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
