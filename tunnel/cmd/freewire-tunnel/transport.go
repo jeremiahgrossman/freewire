@@ -240,6 +240,51 @@ func defaultCandidates() []transportCandidate {
 	}
 }
 
+// wireguard6Candidate is the IPv6 carrier: direct WireGuard UDP to the
+// server's v6 endpoint, as fast as "wireguard" when it works. See
+// IPV6-CARRIER-REMAINING.md for the full design.
+//
+// STAGED, NOT ACTIVE (2026-08-30): deliberately not included in
+// defaultCandidates(), and no TunnelTransport case exists for it on the
+// Swift side either. The carrier itself (this function) is low-risk and
+// tested in isolation, but selecting it live requires setupRouting/
+// cleanupRouting changes that are explicitly leak-sensitive -- disabling v6
+// entirely is what keeps every OTHER carrier's user traffic from leaking
+// around the tunnel, and this carrier needs the opposite (v6 left on, but
+// blackholed except to the server) exactly while it is active. That routing
+// change has real incident history in this project (untested routing code
+// broke this machine's networking once already) and its own spec says it
+// must be built AND verified on a real v6-capable network before shipping,
+// which was not available when this was written. Wire this into
+// defaultCandidates() (and add the matching Swift TunnelTransport.wireguard6
+// case, priority ~2) only alongside that routing change, verified together
+// on a real v6 network -- not as two separate, partially-verified changes.
+func wireguard6Candidate() transportCandidate {
+	return transportCandidate{
+		name: "wireguard6",
+		// Skips the rung when the server has no v6 address, rather than dialing
+		// a host:port that can't possibly work -- cfg.ServerHostV6 is empty on
+		// any deployment that hasn't published one.
+		open: func(cfg Config) (net.PacketConn, net.Conn, error) {
+			if cfg.ServerHostV6 == "" {
+				return nil, nil, fmt.Errorf("wireguard6: server has no IPv6 address")
+			}
+			return nil, nil, nil
+		},
+		endpoint: func(cfg Config) string {
+			// The WireGuard port isn't its own config field -- it rides in
+			// ServerEndpoint ("host:51820"), matching how the "udp443" rung
+			// above extracts its host the same way. Default 51820 if that
+			// can't be parsed, rather than producing an invalid endpoint.
+			port := "51820"
+			if _, p, err := net.SplitHostPort(cfg.ServerEndpoint); err == nil && p != "" {
+				port = p
+			}
+			return net.JoinHostPort(cfg.ServerHostV6, port)
+		},
+	}
+}
+
 // tryHTTPConnect attempts HTTP CONNECT through a captive portal proxy.
 // It tries the default gateway on ports 3128, 8080, and 443 with a 2s total deadline.
 // On success it upgrades the CONNECT tunnel to TLS and returns the TLS connection.
@@ -569,11 +614,12 @@ func handshakeBudgetFor(name string) time.Duration {
 		return 8 * time.Second
 	case "icmp_udp":
 		return 5 * time.Second
-	case "wireguard", "udp443":
-		// Both are a direct WireGuard handshake -- one round trip, well under a
-		// second on a working network -- so a short budget succeeds on an open
-		// network while falling through fast on a portal that blocks the port
-		// instead of stalling the whole chain.
+	case "wireguard", "udp443", "wireguard6":
+		// All three are a direct WireGuard handshake -- one round trip, well
+		// under a second on a working network -- so a short budget succeeds on
+		// an open network while falling through fast on a portal that blocks
+		// the port (or, for wireguard6, on a v4-only network with no v6 route
+		// at all) instead of stalling the whole chain.
 		return 2 * time.Second
 	default:
 		return 3 * time.Second

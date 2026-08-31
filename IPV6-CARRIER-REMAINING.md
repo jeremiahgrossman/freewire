@@ -76,3 +76,21 @@ The server is v6-ready and reproducible. The client carrier is ~an afternoon of
 work, but its routing must be built and verified at a v6-capable network. Until
 then a v6-leaking café is detected by the probe (`--server6` reachability) but
 not yet exploited by the app.
+
+**Update (2026-08-30): the carrier half is now written, tested, and
+deliberately staged, not active.** `wireguard6Candidate()` in
+`tunnel/cmd/freewire-tunnel/transport.go` implements exactly the "Carrier
+(small, low-risk)" section above -- skips when `cfg.ServerHostV6` is empty,
+dials `[serverV6]:51820` otherwise, 2s handshake budget -- and
+`wireguard6_test.go` covers its open/endpoint logic in isolation. It is
+**not** in `defaultCandidates()`'s returned list, and there is still no
+`TunnelTransport.wireguard6` case on the Swift side. This was a deliberate
+choice, confirmed with the user rather than assumed: the carrier alone is
+low-risk, but the "Routing (the risky, must-verify-on-v6 part)" section below
+is unchanged and still needs to be built and verified together with wiring
+this carrier into the active chain, on a real v6-capable network, in one pass
+-- not as two separately-shipped changes where the carrier goes live before
+the leak-safe routing exists. `TestWireguard6NotYetInDefaultCandidates` is a
+tripwire test that fails (with a pointer back here) if someone wires the
+carrier in without doing the Swift side and the routing change in the same
+change.
