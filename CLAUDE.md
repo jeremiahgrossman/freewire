@@ -246,6 +246,64 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   but UDP/53 is open, landing on CONN-2a, tapping "Try messaging & email only".
   This narrows when Essentials Mode is even the right answer at a café — see the
   `dns_tcp` implication noted 2026-08-30 above.
+- **INFRASTRUCTURE REDUNDANCY AUDIT (2026-08-30) — queued, not started.** A
+  background audit reviewed the whole deploy/AWS/state-persistence stack for
+  single-operator resilience gaps (explicitly NOT multi-user scaling — that
+  category was reviewed too and correctly matches the "Deferred until there
+  are other users" scope decision above, so none of it is queued here). Four
+  concrete, cheap fixes came out of it, ranked worst-failure-mode first:
+  1. **No backup of `/var/lib/freewire/` at all.** The WireGuard private key
+     (the server's whole identity) lives only on the single EBS volume
+     (`vol-0ff5771bd74fb93a8`); losing the instance/volume permanently
+     invalidates every client's pin (fail-closed by design, per TRUST-4) with
+     no restore path — recovery would mean regenerating a new server identity
+     and manually re-pinning. The deploy IAM user (`deploy/iam-policy.json`)
+     doesn't even grant `ec2:CreateSnapshot`/`ec2:CreateVolume` today. Fix: an
+     EBS snapshot lifecycle policy (AWS Data Lifecycle Manager) on that volume
+     — captures the WireGuard key, `peers.json`, the spent-token journal, and
+     the ACME cert together, so a restore reconstitutes the server exactly,
+     no re-pin needed. Cheap (pennies/month). For AWS-account-level loss (not
+     just instance/volume loss), a stronger follow-up is a small, separately
+     encrypted off-account copy of just the identity file, decryptable only
+     with a passphrase that lives outside AWS entirely — see the "architecture
+     for preventing catastrophe" discussion this session for the full
+     reasoning on why the backup and its decryption capability must be kept
+     apart.
+  2. **No monitoring/alerting at all.** Nothing (`grep` for
+     CloudWatch/alarms/health-checks across the repo finds only
+     `anycast-dns-infrastructure.md`, explicitly post-launch, multi-region
+     work). The operator's only failure signal today is personally trying to
+     connect and finding it broken — worst case, mid-trip. Fix: a CloudWatch
+     alarm on the EC2 instance's built-in `StatusCheckFailed` metric, wired to
+     an SNS topic that emails/texts the operator. Free tier covers this for
+     one instance. Catches instance-level death; does NOT catch the
+     `freewire` systemd unit crash-looping while the instance itself reports
+     healthy — that needs a second, external check hitting the probe
+     responder (e.g. a $0 uptime-ping service).
+  3. **`launch-aws.sh`'s SSH ingress rule is only set at security-group
+     *creation*, never refreshed on redeploy.** Already bit this project for
+     real on 2026-08-29: a mobile-hotspot NAT rotated the deployer's IP
+     mid-session, a fresh `/32` wasn't reliable, and the operator had to open
+     the group to `0.0.0.0/0` mid-deploy and manually narrow it back after.
+     Fix: make the SSH rule idempotent-refresh on every run, the same pattern
+     `open_port`/`open_port6` already use for the transport ports (revoke the
+     old deployer `/32`, authorize the current one, ignore
+     `InvalidPermission.Duplicate`).
+  4. **DNS delegation (`t.pinghop.net`) is one Cloudflare account with no
+     documented recovery plan.** Losing access there (lost 2FA device,
+     billing dispute) would silently kill the `dns`/`dns_tcp` carriers — the
+     hard-portal fallback this project has invested the most field-testing
+     effort in — with no fallback registrar or backup-contact plan. Fix: cheap
+     — verify Cloudflare account recovery options (backup 2FA, recovery
+     email) are actually solid.
+
+  Also surfaced, lower severity: deploy is entirely manual and tied to this
+  one Mac (no CI/CD; the SSH private key and AWS credentials only exist
+  locally — back up `~/.ssh/freewire-server` and write down the redeploy
+  steps once); local-only git commits are a live data-loss window until
+  pushed (informational only, given the standing instruction on this topic);
+  no off-box copy of the AWS IAM credentials (low severity, AWS account
+  recovery covers it).
 - **PLAN B for the throttled-DNS-only café is specced: `ESSENTIALS-MODE-SPEC.md`
   (2026-08-28, not built).** When only throttled DNS escapes, full-tunnel (`0/0`)
   collapses under whole-machine load — so instead carry only a low-bandwidth
