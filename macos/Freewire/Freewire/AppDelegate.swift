@@ -11,6 +11,7 @@ import Combine
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var popover: NSPopover?
+    private var panelHost: NSHostingController<PanelView>?
     private var clickMonitor: Any?
     private var tunnelManager: TunnelManager?
     private var cancellable: AnyCancellable?
@@ -114,6 +115,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         host.sizingOptions = [.preferredContentSize]
         pop.contentViewController = host
         popover = pop
+        panelHost = host
 
         // Dismiss popover on outside click.
         // AppKit calls this handler on the main thread, but Swift 6 doesn't know that —
@@ -141,6 +143,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if pop.isShown {
             closePanel()
         } else {
+            // Rebuild the root view fresh on every show, not just once at
+            // startup. PanelView owns its own `screen` (.main/.settings/
+            // .privacy) as @State; reusing one long-lived instance let a
+            // reopen land back on Settings or Privacy instead of the main
+            // status screen. A fresh PanelView always starts on .main.
+            if let mgr = tunnelManager {
+                panelHost?.rootView = PanelView(
+                    tunnelManager: mgr,
+                    onQuit:        { NSApp.terminate(nil) }
+                )
+            }
             // Activate first. An accessory (LSUIElement) app is often inactive
             // when its status item is clicked, and showing a popover from an
             // inactive app is where AppKit has been seen to place it against the

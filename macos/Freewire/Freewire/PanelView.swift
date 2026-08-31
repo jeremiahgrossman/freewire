@@ -217,7 +217,7 @@ private struct ConnectedBody: View {
             Text("Connected · \(duration)")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
-            if transport != .wireguard {
+            if transport.isReducedSpeed {
                 TransportIndicator(transport: transport)
             }
             // DNS-1, per error-states-spec.md. Shown below the status rather
@@ -267,18 +267,21 @@ private struct ConnectedBody: View {
     }
 }
 
-// Transport badge shown when connected on a non-WireGuard path.
+// Reduced-speed badge, per ux-workflows.md §1.3: "No technical path names are
+// shown to the user." Only fires for the DNS/ICMP carriers (isReducedSpeed);
+// a full-speed non-WireGuard carrier shows no badge at all — "Protected"
+// above already covers it.
 private struct TransportIndicator: View {
     let transport: TunnelTransport
 
     var body: some View {
         HStack(spacing: 4) {
-            Image(systemName: transport.isReducedSpeed ? "tortoise.fill" : "arrow.triangle.2.circlepath")
+            Image(systemName: "tortoise.fill")
                 .font(.system(size: 11))
-            Text(transport.isReducedSpeed ? "Reduced speed · \(transport.displayName)" : transport.displayName)
+            Text("Reduced speed")
                 .font(.system(size: 11))
         }
-        .foregroundStyle(transport.isReducedSpeed ? Color.orange : Color.secondary)
+        .foregroundStyle(Color.orange)
     }
 }
 
@@ -562,7 +565,13 @@ private struct PanelSettingsView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 Toggle("Launch at login", isOn: $launchAtLogin)
-                    .onChange(of: launchAtLogin) { _, v in Preferences.shared.launchAtLogin = v }
+                    .onChange(of: launchAtLogin) { _, v in
+                        Preferences.shared.launchAtLogin = v
+                        // SMAppService registration can fail silently (see its
+                        // catch block); re-read the true status so a failed
+                        // change snaps the switch back instead of lying.
+                        launchAtLogin = Preferences.shared.launchAtLogin
+                    }
                 Toggle("Connect automatically on launch", isOn: $autoConnect)
                     .onChange(of: autoConnect) { _, v in Preferences.shared.autoConnect = v }
 
