@@ -56,6 +56,7 @@ echo "Expect all of: CONNECT fails, TLS/443 fails, DNS tunnel fails"
 echo "(NXDOMAIN), ICMP succeeds. Watch for payload-bearing echoes:"
 echo "    sudo tcpdump -i $UPLINK_IF 'icmp and host $SERVER_IP'"
 echo
-echo "ICMP is capped at 20 pps per icmp-tunnel-protocol-spec.md — confirm"
-echo "the client does not exceed that under load."
+echo "ICMP is rate-limited to ~500 Kbps via a token bucket (icmp_client.go's"
+echo "icmpRateBytesPerSec), not a fixed packet cap — confirm the client stays"
+echo "under it rather than bursting."
 footer

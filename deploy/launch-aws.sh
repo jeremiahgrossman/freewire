@@ -39,34 +39,59 @@ if [[ -z "$SG_ID" || "$SG_ID" == "None" ]]; then
   SG_ID="$(aws ec2 create-security-group --group-name "$NAME" \
             --description "Freewire VPN server" --vpc-id "$VPC_ID" --region "$REGION" \
             --query 'GroupId' --output text)"
-
-  # SSH is restricted to the address launching this; everything else has to be
-  # open, because the whole point is reaching the server from hostile networks.
-  # A third party's HTTP response decides who may SSH to this box, so it is
-  # checked rather than trusted. An empty reply (the service is down, the
-  # network is captive) would otherwise expand to "/32" and, depending on how
-  # the AWS CLI parsed it, either fail confusingly or widen the rule. Anything
-  # that is not a dotted quad stops the script.
-  MYIP_RAW="$(curl -sf -m 5 https://api.ipify.org || true)"
-  if [[ ! "$MYIP_RAW" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
-    echo "could not determine this machine's public address (got '${MYIP_RAW}')." >&2
-    echo "Set MYIP_OVERRIDE=x.x.x.x and re-run to choose it yourself." >&2
-    [[ -n "${MYIP_OVERRIDE:-}" ]] || exit 1
-    MYIP_RAW="$MYIP_OVERRIDE"
-  fi
-  for octet in ${MYIP_RAW//./ }; do
-    if (( octet > 255 )); then
-      echo "'$MYIP_RAW' is not a valid IPv4 address" >&2; exit 1
-    fi
-  done
-  MYIP="$MYIP_RAW/32"
-  aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --region "$REGION" \
-    --ip-permissions \
-      "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=$MYIP,Description='ssh from deployer'}]" \
-    >/dev/null
-  echo "    created $SG_ID (ssh limited to $MYIP)"
+  echo "    created $SG_ID"
 else
   echo "    exists $SG_ID"
+fi
+
+# SSH is restricted to the address launching this; everything else has to be
+# open, because the whole point is reaching the server from hostile networks.
+# A third party's HTTP response decides who may SSH to this box, so it is
+# checked rather than trusted. An empty reply (the service is down, the
+# network is captive) would otherwise expand to "/32" and, depending on how
+# the AWS CLI parsed it, either fail confusingly or widen the rule. Anything
+# that is not a dotted quad stops the script.
+MYIP_RAW="$(curl -sf -m 5 https://api.ipify.org || true)"
+if [[ ! "$MYIP_RAW" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+  echo "could not determine this machine's public address (got '${MYIP_RAW}')." >&2
+  echo "Set MYIP_OVERRIDE=x.x.x.x and re-run to choose it yourself." >&2
+  [[ -n "${MYIP_OVERRIDE:-}" ]] || exit 1
+  MYIP_RAW="$MYIP_OVERRIDE"
+fi
+for octet in ${MYIP_RAW//./ }; do
+  if (( octet > 255 )); then
+    echo "'$MYIP_RAW' is not a valid IPv4 address" >&2; exit 1
+  fi
+done
+MYIP="$MYIP_RAW/32"
+
+# Refreshed on EVERY run, not only at creation -- this used to be inside the
+# "group doesn't exist yet" branch, so a deployer whose IP changed between
+# runs (a mobile-hotspot NAT rotation bit this for real on 2026-08-29) had no
+# automated way back in; the fix that day was widening the rule to 0.0.0.0/0
+# by hand and narrowing it back after. Idempotent both directions: revoke
+# every tcp/22 rule that is not today's address (cleans up exactly that kind
+# of manual widening too), then authorize today's, ignoring the
+# already-open case the same way open_port does below.
+echo "==> ssh ingress (refreshing for $MYIP)"
+STALE_SSH_CIDRS="$(aws ec2 describe-security-groups --group-ids "$SG_ID" --region "$REGION" \
+  --query "SecurityGroups[0].IpPermissions[?ToPort==\`22\` && FromPort==\`22\` && IpProtocol=='tcp'].IpRanges[].CidrIp" \
+  --output text 2>/dev/null || true)"
+for cidr in $STALE_SSH_CIDRS; do
+  [[ "$cidr" == "$MYIP" ]] && continue
+  aws ec2 revoke-security-group-ingress --group-id "$SG_ID" --region "$REGION" \
+    --ip-permissions "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=$cidr}]" \
+    >/dev/null 2>&1 && echo "    revoked stale ssh rule for $cidr"
+done
+if out="$(aws ec2 authorize-security-group-ingress --group-id "$SG_ID" --region "$REGION" \
+    --ip-permissions \
+      "IpProtocol=tcp,FromPort=22,ToPort=22,IpRanges=[{CidrIp=$MYIP,Description='ssh from deployer'}]" \
+    2>&1)"; then
+  echo "    ssh limited to $MYIP"
+elif grep -q "InvalidPermission.Duplicate" <<<"$out"; then
+  echo "    ssh already limited to $MYIP"
+else
+  echo "    WARNING: could not authorize ssh for $MYIP: $(tr '\n' ' ' <<<"$out")" >&2
 fi
 
 # Transport ports are opened on EVERY run, not only when the group is created.

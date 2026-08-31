@@ -397,6 +397,10 @@ Errors that occur after a tunnel has been established.
 
 ### SESSION-4 — NetworkExtension process killed by OS
 
+> ⚠️ **iOS-only, like PERM-3/PERM-4 below.** The shipped macOS client has no NE
+> process to kill — `wireguard-go` runs over a direct `utun`, not
+> `NEPacketTunnelProvider`. This state applies to a future iOS build.
+
 **Trigger:** iOS or macOS kills the NE extension process due to system memory pressure or OS-level termination.
 
 **Behavior:**
@@ -657,11 +661,11 @@ Errors where Freewire's cryptographic privacy guarantees are reduced but the con
 | SESSION-1 | Tunnel drop — kill switch activates | Soft warning | iOS, macOS |
 | SESSION-2 | Reconnection failed after 3 attempts | Hard block | iOS, macOS |
 | SESSION-3 | Network change mid-session | Silent / Soft warning | iOS, macOS |
-| SESSION-4 | NE process killed by OS | Soft warning | iOS, macOS |
+| SESSION-4 | NE process killed by OS | Soft warning | iOS only — no NE on macOS, see note above §PERM-3 |
 | PERM-1 | VPN permission denied (onboarding) | Hard block | iOS |
 | PERM-2 | VPN permission revoked | Hard block | iOS |
-| PERM-3 | System Extension approval dismissed | Hard block | macOS |
-| PERM-4 | System Extension revoked | Hard block | macOS |
+| PERM-3 | System Extension approval dismissed | Hard block | iOS-only design; not implemented on macOS, see note above |
+| PERM-4 | System Extension revoked | Hard block | iOS-only design; not implemented on macOS, see note above |
 | SELFHOST-1 | Config import failed | Hard block | iOS, macOS |
 | SELFHOST-2 | QR code expired | Hard block | iOS, macOS |
 | SELFHOST-3 | Self-hosted server unreachable | Hard block | iOS, macOS |

@@ -6,7 +6,14 @@ account `216989115408` needs to run this once.
 
 ## 1. Add this statement to `freewire-deploy`'s policy (or attach as a separate policy)
 
-Append to `deploy/iam-policy.json`'s `Statement` array:
+**Already done (2026-08-31):** `deploy/iam-policy.json` already carries the
+`EBSSnapshotBackup`, `DLMServiceLinkedRole`, and `PassDLMRole` statements below
+verbatim — this step is complete in the tracked policy file. What's still
+missing is applying it: whoever has IAM-admin access needs to actually attach
+the updated policy to the `freewire-deploy` user (or confirm it's already
+attached) before moving on to steps 2–5, which remain genuinely pending.
+
+For reference, the statements already in `deploy/iam-policy.json`:
 
 ```json
 {

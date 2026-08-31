@@ -6,6 +6,8 @@
 
 ---
 
+> **Superseded (2026-08-31):** the mechanism below (DNS-01 via `acme.sh`/Cloudflare, multi-server distribution through AWS Secrets Manager, `vpn.freewire.com`/`tunnel.freewire.com`) is not what shipped. There is one AWS server, and it provisions its own certificate automatically via `golang.org/x/crypto/acme/autocert` (HTTP-01, not DNS-01 — see `server/internal/certs/certs.go`), on the real domain `origin.pinghop.net` (`t.pinghop.net`'s DNS-tunnel zone is separate; see `CLAUDE.md`). No manual `certbot`/`acme.sh` step, no Secrets Manager, no multi-server distribution: `autocert.Manager` owns port 80 for the ACME HTTP-01 challenge (`m.HTTPHandler`) and renews on its own. A no-SNI/IP-direct client gets a self-signed fallback cert instead — that path exists specifically so IP-pinned clients aren't locked out by enabling ACME (see `CLAUDE.md`'s 2026-08-24 "certs.Build fix" note). The self-hosted dashboard and Developer ID rows below are real specs for deferred features, not currently active.
+
 ## Overview
 
 Freewire uses TLS certificates in four places:

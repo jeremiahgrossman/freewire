@@ -5,8 +5,20 @@
 # is the reliable signal), kills the tunnel out from under it, and checks the app
 # reconnects on its own. Fast path only (no machine slowdown). Self-restoring.
 set -uo pipefail
-TUN=/Users/jeremiah/Claude/Projects/FreewireVPN/tunnel/freewire-tunnel
-APP=/Users/jeremiah/Library/Developer/Xcode/DerivedData/Freewire-elmajhbhindocnejdnjhxousdzrg/Build/Products/Debug/Freewire.app
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TUN="$HERE/tunnel/freewire-tunnel"
+# Resolved dynamically rather than hardcoding a DerivedData hash: that hash is
+# tied to this exact checkout path and Xcode version, and silently goes stale
+# on a clean DerivedData wipe or a fresh checkout with no fallback. Picks the
+# most recently built Debug Freewire.app under DerivedData.
+APP="$(find ~/Library/Developer/Xcode/DerivedData -maxdepth 6 -type d \
+  -path '*/Build/Products/Debug/Freewire.app' -not -path '*/Index.noindex/*' -print 2>/dev/null \
+  | xargs -I{} stat -f '%m %N' {} 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)"
+if [[ -z "$APP" ]]; then
+  echo "no built Freewire.app found under DerivedData -- build first:" >&2
+  echo "  xcodebuild build -project macos/Freewire/Freewire.xcodeproj -scheme Freewire -configuration Debug CODE_SIGNING_ALLOWED=NO" >&2
+  exit 1
+fi
 OUT=/tmp/freewire-verify-reconnect.log
 SERVER=52.203.246.145
 egress() { curl -s -m10 https://checkip.amazonaws.com | tr -d '\n'; }

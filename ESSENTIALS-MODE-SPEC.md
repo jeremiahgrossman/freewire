@@ -1,6 +1,9 @@
 # Essentials Mode — Plan B for hard-throttled captive portals
 
-**Status:** Spec / not built. Design recorded 2026-08-28.
+**Status:** Built, unit-tested, and desk-pre-flight re-confirmed current
+(2026-08-30) — see `CLAUDE.md`'s Current State. The one remaining step is real
+café field validation (runbook Step 3, `testing/FIELD-TEST-RUNBOOK.md`). Design
+recorded 2026-08-28.
 **Prereq to build:** a field-confirmed throttled-DNS-only café (café #1 and #2 both
 qualify), and the throttle repro `FREEWIRE_DNS_CARRIER_CAP` for desk testing.
 

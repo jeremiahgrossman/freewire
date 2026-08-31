@@ -152,10 +152,7 @@ The server stores only `SHA-256(nonce)` — not the nonce itself, not the signat
 
 ### Key rotation
 
-The issuer RSA keypair should be rotated every 90 days. When a new keypair is generated:
-1. The new public key is returned in `POST /v1/tokens/issue` responses.
-2. The old public key remains valid for verification for 30 days (the token validity window) after rotation.
-3. Clients that cached the old key discover the mismatch when verifying unblinded tokens and automatically re-request issuance with the new key.
+**Corrected (2026-08-31):** the 90-day rotation policy this section used to describe is not implemented — no scheduled key-rotation logic exists in `server/internal/privacypass/`. What is implemented is client-side trust-on-first-use pinning of the issuer key (`--issuer-pin`), which refuses a changed key rather than silently accepting a rotated one; see `client-server-api-spec.md` and `error-states-spec.md`'s TRUST-4. If key rotation is added later, it needs a real mechanism for a pinned client to accept the change deliberately, not silent re-pinning — that would defeat the reason the pin exists.
 
 ---
 
@@ -174,10 +171,12 @@ If the token count reaches 0 before a background refresh completes:
 3. If the server rejects the tokenless request with `402`, surface a soft warning and retry after 30 seconds.
 
 ### Rate limit on issuance
-The server rate-limits issuance per source IP to prevent a single device from hoarding tokens:
-- Maximum 20 tokens per issuance request
-- Maximum 100 tokens per 24-hour window per IP address
-- This limit is soft — it prevents bulk abuse, not legitimate use
+
+**Corrected (2026-08-31):** issuance is not rate-limited per source IP — client IP addresses are never used anywhere in this codebase, a non-negotiable architectural constraint (see `CLAUDE.md`). Per-IP limiting was never a viable option for that reason. The real mechanism, verified against `server/internal/api/tokens_handler.go` and `proofofwork.go`:
+
+1. **Proof of work prices each batch in CPU time**, not identity. Every issuance request must solve a difficulty-gated challenge (`s.pow.Verify`) before anything else runs; failing this returns `429 PROOF_OF_WORK_REQUIRED`. This exists precisely because there is no usable rate-limit key to charge a caller against individually — it costs the caller time without telling the server anything about who they are.
+2. **A global issuance budget caps the absolute rate** across all callers, checked after proof of work (`s.issueLimit.allow`); exceeding it returns `429 RATE_LIMITED` with a `Retry-After` header. Proof of work alone can't cap absolute throughput against an attacker with more cores — the global budget does.
+3. Both are enforced server-side with no per-device or per-IP bookkeeping. `Maximum 20 tokens per issuance request` (`maxTokensPerRequest`, returns `400 BATCH_TOO_LARGE` if exceeded) is still accurate.
 
 ---
 

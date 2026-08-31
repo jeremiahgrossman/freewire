@@ -1,5 +1,16 @@
 # Field-test runbook — real captive portal (current plan)
 
+> **Result update (2026-08-30):** the PRIMARY question below —
+> does `dns_tcp` survive full-tunnel where UDP-DNS collapsed — is now
+> **answered, at a real destination-gated café**: yes. `dns_tcp` held under
+> load (3.6–7.6 Mbps sustained, ~13–56× the old UDP-DNS floor) at exactly the
+> café shape this runbook describes. See `CLAUDE.md`'s Current State,
+> 2026-08-30 entry, for the full result. **The next field-test priority is now
+> the FALLBACK section below — Essentials Mode's in-flow offer — at a café
+> that blocks TCP/53 specifically** (so `dns_tcp` can't rescue it) while still
+> passing UDP/53. Steps 1 and 2 below remain useful for completing the
+> carrier support map at a new café; Step 3 is now the headline step.
+
 **Updated 2026-08-29** (added the `dns_tcp` / TCP/53 primary thread; nine carriers
 now ship). This is THE plan for the next café visit. Pair it with
 `FIELD-TEST-CONTINGENCIES.md` (result → what to build) and, for the throttled-DNS

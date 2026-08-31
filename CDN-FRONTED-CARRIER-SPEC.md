@@ -1,6 +1,8 @@
 # CDN-fronted WebSocket carrier — engineering spec
 
-**Status:** spec, not built. **Date:** 2026-08-24.
+**Status:** built and shipped as the `cdn_wss` carrier (2026-08-25) — see the
+"Throughput MEASURED (2026-08-25)" section below and `technical-architecture.md`
+§3. **Date:** 2026-08-24.
 **Prereqs shipped:** WSS-443 carrier (`5db4bec`), traffic-verified fall-through
 selection (`3bae110`), probe battery (`3a032f6`).
 **Background:** `PORTAL-CARRIER-IDEATION-2026-08-24.md` §"NEW HIGH-VALUE CLASS".

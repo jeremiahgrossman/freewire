@@ -7,7 +7,16 @@
 
 ---
 
-> **Superseded (2026-08-30):** every `tunnel.freewire.com` reference below is the original placeholder domain, never actually used — `freewire.com` belongs to a third party. The zone actually registered and delegated is **`t.pinghop.net`** (see `PRD.md` OQ-4, `CLAUDE.md`). The wire-format logic below (query encoding, handshake, sliding window) is otherwise still accurate to the shipped `dns` carrier. This spec predates the 2026-08-28 `dns_tcp` carrier (WireGuard over TCP/53, RFC 7766 framing) — a second, separate DNS-based carrier not covered anywhere in this document. See `technical-architecture.md` §3 for both.
+> **Superseded (2026-08-31, corrected):** every `tunnel.freewire.com` reference below is the original placeholder domain, never actually used — `freewire.com` belongs to a third party. The zone actually registered and delegated is **`t.pinghop.net`** (see `PRD.md` OQ-4, `CLAUDE.md`). An earlier correction note here claimed the wire-format logic below was "otherwise still accurate" — that was wrong, verified against `server/internal/transport/dns_server.go` and `tunnel/cmd/freewire-tunnel/dns_client.go` directly. The real format is much simpler than what's specified below:
+>
+> ```
+> h.1.<b32(clientPub)>.<zone>                          → ClientHello
+> h.3.<b32(mac)>.<b32(token)>.<zone>                    → ClientConfirm
+> t.<b32(seq)>.<b32(frag)>.<b32(token)>.<data>.<zone>   → data query
+> k.<b32(token)>.<zone>                                 → keepalive
+> ```
+>
+> Two round trips complete the handshake (Hello, then Confirm), not three. There is no `u` (upgrade-probe) prefix at the DNS label level — the real path-upgrade mechanism is a separate magic-UDP probe outside this protocol (`path-upgrade-manager-spec.md`). Responses are TXT-only, base32-packed; there is no multi-record-type (A/AAAA/MX) response scheme as described in §"Response format" below. The §Handshake and §Data Transfer sections below describe an earlier, more elaborate design that was never built this way — read them as historical context for the rationale, not as the implemented wire format. For the real format, read `dns_server.go`'s package comment (top of file) and `handleHandshake`/the data-query dispatch directly. This spec also predates the 2026-08-28 `dns_tcp` carrier (WireGuard over TCP/53, RFC 7766 framing) — a second, separate DNS-based carrier not covered anywhere in this document. See `technical-architecture.md` §3 for both.
 
 ---
 

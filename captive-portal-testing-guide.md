@@ -6,6 +6,8 @@
 
 ---
 
+> **Superseded (2026-08-31):** this guide's four-path model (HTTP CONNECT, TLS/443, DNS, ICMP) predates the current 9-carrier chain (`wireguard`, `udp443`, `http_connect`, `tls443`, `wss443`, `cdn_wss`, `dns_tcp`, `dns`, `icmp_udp` — see `technical-architecture.md` §3). Its own `proxy.py` listing (further down) is confirmed broken — the relay threads never actually iterate; `testing/proxy.py` is a working replacement. More fundamentally, the local-simulation approach this whole guide is built around has been superseded by real café field-testing: `testing/cafe-run.sh` runs the full carrier survey against the live server, `testing/FIELD-TEST-RUNBOOK.md` is the current field-test process, and `CLAUDE.md`'s "Current State" records what each real café visit found. Local container/VM runtimes can't carry tunnel egress at all (they NAT their own guests but won't forward a third subnet), which is part of why this shifted to real-network testing. Kept here for the still-useful conceptual explanation of *why* portal simulation works the way it does — read the code/scripts above for what to actually run.
+
 ## Purpose
 
 Freewire's core differentiator is that it establishes a VPN tunnel on captive portal networks. This guide explains how to simulate those networks on your own hardware so every fallback path — HTTP CONNECT, TLS/443, DNS tunnel, ICMP — can be tested, debugged, and benchmarked without going to an airport.

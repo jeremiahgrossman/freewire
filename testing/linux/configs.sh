@@ -80,11 +80,16 @@ case "$1" in
     base_flush; base_nat
     iptables -P FORWARD DROP
     iptables -A FORWARD -p udp --dport 53 -j DROP
-    iptables -A FORWARD -p icmp -j ACCEPT
+    # The transport is icmp_udp: it rides UDP 4500, not the ICMP protocol.
+    # An earlier version of this config (and, until 2026-08-31, this one)
+    # passed "-p icmp" and blocked UDP 4500, blocking the very path it was
+    # meant to force. See macos/config4.sh's matching fix.
+    iptables -A FORWARD -p udp --dport "${ICMP_UDP_PORT:-4500}" -j ACCEPT
     established
     iptables -t nat -A PREROUTING -i "$LOCAL" -p udp --dport 53 \
       -j REDIRECT --to-port 5353
-    echo "Expect: Path 4 (ICMP tunnel). ~10s. Cap 20 pps."
+    echo "Expect: Path 4 (ICMP tunnel). ~10s. Rate-limited to ~500 Kbps"
+    echo "(a token bucket, not a fixed packet cap)."
     ;;
 
   5)

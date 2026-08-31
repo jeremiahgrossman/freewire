@@ -8,11 +8,13 @@
 
 ## Overview
 
-Freewire has three shippable artifacts:
+> **Superseded (2026-08-31):** iOS is fully deferred (no `ios/` directory, no App Store/TestFlight distribution exists or is planned near-term) and the server is not an AWS Marketplace AMI — it's a single hand-deployed EC2 instance (`deploy/launch-aws.sh`). The one real shippable artifact today is the macOS app, and it has one real pipeline: `.github/workflows/macos.yml`, which wraps `scripts/release-macos.sh` (the single source of truth for the release build) — builds and embeds the universal Go helpers on every push, signs + notarizes only when Developer ID secrets are present, and otherwise still produces an unsigned DMG so the build itself is exercised. There is no separate iOS pipeline, no TestFlight step, and no Sparkle-appcast publish step — Sparkle auto-update exists as a spec (`sparkle-update-feed-spec.md`) but nothing in the codebase wires it up yet.
 
-1. **iOS app** — distributed via TestFlight at launch; App Store post-launch
-2. **macOS app** — distributed via direct download (DMG) at launch; Mac App Store post-launch
-3. **Server binary** — distributed as an AWS Marketplace AMI; not downloaded directly by users
+Freewire has three shippable artifacts in the original plan, one of which is real today:
+
+1. **iOS app** — deferred indefinitely, not currently built
+2. **macOS app** — the one artifact that actually ships, distributed via direct DMG download; Mac App Store is permanently incompatible with this app's direct `utun` access (see `CLAUDE.md`'s "macOS distribution" row)
+3. **Server binary** — deployed by hand to a single EC2 instance, not distributed as an AMI or downloaded by users
 
 ---
 

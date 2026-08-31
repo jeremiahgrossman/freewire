@@ -1,3 +1,9 @@
+# NOTE: this covers the local pf-based captive-portal test harness only, not
+# tunnel-egress testing. Local container/VM runtimes NAT their own guests but
+# won't forward a third subnet, so tunnel egress can't be tested against a
+# container here at all -- see CLAUDE.md's "Dev environment" note. The real
+# server is a single AWS instance (deploy/launch-aws.sh); egress and carrier
+# testing runs against that, via testing/connect.sh and friends.
 services:
   freewire-server:
     build:

@@ -4,6 +4,8 @@
 **Entitlement needed:** `com.apple.developer.networking.networkextension`  
 **Required before:** TestFlight distribution (must be in the provisioning profile for any build using NetworkExtension APIs). Also required before App Store submission.
 
+> **Superseded (2026-08-31):** this entitlement applies to iOS only, whenever that work resumes (currently fully deferred — see `CLAUDE.md`). The shipped macOS client deliberately does **not** use NetworkExtension — it's a locked tech-stack decision: `wireguard-go` over a direct `utun` interface, no `NEPacketTunnelProvider`. macOS's own blocker is unrelated to this entitlement: the pf-based kill switch needs a Developer ID certificate to install its `SMAppService` privileged helper, not this NetworkExtension entitlement. The suggested application description below (`NEPacketTunnelProvider`, "for iOS and macOS") is accurate only for a future iOS build, not for the current macOS app.
+
 ---
 
 ## How to frame the application

@@ -241,7 +241,8 @@ ICMP is the fallback for networks where DNS resolvers are fully local and do not
 │  ┌──────────────┐     ┌────────────────────────────────────────┐   │
 │  │  Freewire    │────►│  Path Selection & Upgrade Manager      │   │
 │  │  Client App  │     │  (wg → udp443 → http_connect → tls443   │   │
-│  │              │     │   → wss443 → cdn_wss → dns → icmp_udp)  │   │
+│  │              │     │   → wss443 → cdn_wss → dns_tcp → dns    │   │
+│  │              │     │   → icmp_udp)                           │   │
 │  └──────────────┘     └──────────────────┬─────────────────────┘   │
 └─────────────────────────────────────────┬┼────────────────────────-┘
                                           ││
@@ -258,12 +259,12 @@ ICMP is the fallback for networks where DNS resolvers are fully local and do not
               │  │  Freewire Infrastructure │  │
               │  │                          │  │
               │  │  DNS tunnel server       │  │
-              │  │  (tunnel.freewire.com)   │  │
+              │  │  (t.pinghop.net)         │  │
               │  │  unicast at launch;      │  │
               │  │  anycast post-launch     │  │
               │  │                          │  │
-              │  │  VPN gateway servers     │  │
-              │  │  (vpn.freewire.com:443)  │  │
+              │  │  VPN gateway server      │  │
+              │  │  (origin.pinghop.net:443)│  │
               │  └──────────────────────────┘  │
               └────────────────────────────────┘
 ```

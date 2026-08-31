@@ -6,6 +6,17 @@
 
 ---
 
+> **Superseded (2026-08-31):** none of the infrastructure below was built, and the project's actual scope decisions (single-user, macOS-only, iOS deferred — see `CLAUDE.md`'s "Current State") make most of it moot rather than merely unbuilt. There is no `freewire-dev`/`freewire-staging`/`freewire-prod` AWS account split (there is one account, one server, deployed via `deploy/launch-aws.sh`), no CI gate (`.github/workflows/macos.yml` builds and optionally signs, nothing blocks a merge on it), no staging Let's Encrypt certs, no TestFlight track, and no App Store submission. Testing is field-driven, not a waterfall:
+>
+> - **Automated:** `go test -race ./...` in `server/` and `tunnel/`, `macos/Tests/run.sh` for Swift pure-logic tests, `testing/regression.sh` as the one-command core gate (build + race tests + app build + a live transport probe).
+> - **End-to-end against the real server:** `testing/connect.sh`/`disconnect.sh` and the wider `testing/` harness (`cafe-run.sh`, `probe-transports.sh`, `throughput-test.sh`, `validate-all-carriers.sh`) — all run against the single live AWS instance, since local container/VM runtimes can't carry tunnel egress at all (see `CLAUDE.md`'s "Dev environment" note).
+> - **Real captive portals:** field tests at actual cafés, documented per-visit in `CLAUDE.md`'s Current State and planned in `testing/FIELD-TEST-RUNBOOK.md` — this replaced the local two-NIC-gateway simulation approach entirely (`captive-portal-testing-guide.md` is itself superseded for the same reason).
+> - **Security:** ad hoc audits recorded in `AUDIT-3-ADJUDICATION.md` and this file's own historical stages below, not a scheduled Stage 6 gate.
+>
+> The 8-stage/3-environment plan below is kept for its still-relevant *reasoning* about what to test (unit vs. integration vs. end-to-end vs. captive-portal vs. performance vs. security) — read it as a checklist of testing concerns, not as a description of infrastructure that exists.
+
+---
+
 ## Overview
 
 This document defines the complete testing process for Freewire VPN across all phases of development. Testing is organized as a waterfall: each stage produces a gate before the next stage begins. No stage is skipped for a production release.

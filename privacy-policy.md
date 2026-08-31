@@ -29,7 +29,7 @@ This section matters as much as what we do collect.
 
 **No traffic content.** Freewire carries an encrypted tunnel between your device and our servers. We cannot read what you send or receive: the contents of your traffic are encrypted end to end with the sites you visit, and we do not hold those keys.
 
-**We can see where your traffic goes, and we do not record it.** This is worth stating plainly, because an earlier version of this policy said we could not, and that was wrong. A VPN server forwards your packets to their destination, so it necessarily knows the destination address — that is what forwarding means, and no VPN can avoid it. Today our servers can also see the hostname you asked for, because TLS still sends it in the clear; we intend to close that with Encrypted Client Hello, though it will only work for sites that support it. None of this is written down: connections are counted in hourly totals, never logged individually, and there is nothing on our servers that could later say which sites a device visited.
+**We can see where your traffic goes, and we do not record it.** This is worth stating plainly, because an earlier version of this policy said we could not, and that was wrong. A VPN server forwards your packets to their destination, so it necessarily knows the destination address — that is what forwarding means, and no VPN can avoid it. Today our servers can also see the hostname you asked for, because TLS still sends it in the clear. Encrypted Client Hello does not change this: ECH is negotiated between your browser and the destination site, not by anything in the middle of the connection, so no VPN — including this one — can add it on your behalf. None of this is written down regardless: connections are counted in hourly totals, never logged individually, and there is nothing on our servers that could later say which sites a device visited.
 
 **If you want a provider that cannot know where you go,** no single-hop VPN can offer that, ours included. It takes two independent operators — one that knows who you are and not where you went, another that knows where you went and not who you are — as used by systems like iCloud Private Relay and Tor.
 
@@ -73,22 +73,9 @@ We collect aggregate, anonymized performance statistics for capacity planning an
 
 These are rolled up in real time. No per-device or per-connection measurements are ever written to storage. We cannot reconstruct individual sessions from these metrics.
 
-### Captive portal intelligence (opt-in only)
+### Captive portal intelligence — evaluated, not offered
 
-If you choose to enable **"Help improve captive portal detection"** in Settings, Freewire collects anonymized reports about which connection methods work on wifi networks you join.
-
-**What is collected:**
-- A one-way SHA-256 hash of the wifi access point's hardware address (BSSID). The hash cannot be reversed to identify the location without a deliberate large-scale enumeration attack. The raw BSSID never leaves your device.
-- Which connection method succeeded (e.g., DNS tunnel, TLS/443).
-- Which connection methods failed before the successful one.
-
-**What is not collected:** your IP address, device identifier, connection time, SSID (network name), or any personal information.
-
-**K-anonymity:** A network's data is only used to provide hints to other users once at least 5 independent opt-in users have reported it. Your individual report does not create a traceable entry.
-
-**Opting out:** This feature is off by default. You can enable or disable it at any time in Settings → Privacy. Disabling it prevents any future reports from being submitted. It does not delete previously submitted reports (which contain no personal data).
-
-**Why this is useful:** When enough users report that a specific wifi network requires a particular connection method, Freewire can skip slower probe attempts for other users on that network, improving connection speed. No data identifying you or your location is required to achieve this.
+An earlier draft of this policy described an opt-in feature that would report which connection method worked on a given wifi network, to help other users on the same network connect faster. That feature was evaluated and deliberately not built: reconnect already remembers the last working method for a network, which covers most of the benefit, and a hashed wifi access point address is still a location identifier that public wardriving databases can reverse by lookup. There is no such setting in Freewire today, and nothing about your connection method is ever sent anywhere.
 
 ---
 
@@ -144,7 +131,7 @@ Depending on your location, you may have rights to access, correct, delete, or e
 
 **California residents (CCPA):** Freewire does not sell personal information. Freewire does not share personal information with third parties for cross-context behavioral advertising.
 
-**European residents (GDPR):** Freewire's lawful basis for any data processing is legitimate interest (aggregate metrics for service reliability) and consent (opt-in network intelligence). For questions about GDPR rights, contact privacy@freewire.com.
+**European residents (GDPR):** Freewire's lawful basis for any data processing is legitimate interest (aggregate metrics for service reliability). For questions about GDPR rights, contact privacy@freewire.com.
 
 ---
 

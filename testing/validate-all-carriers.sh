@@ -21,7 +21,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVER="${FREEWIRE_SERVER:-52.203.246.145}"
 export FREEWIRE_CDN_HOST="${FREEWIRE_CDN_HOST:-d29cubp361kpm8.cloudfront.net}"
-CARRIERS="${CARRIERS:-wireguard udp443 tls443 wss443 cdn_wss dns icmp_udp}"
+CARRIERS="${CARRIERS:-wireguard udp443 tls443 wss443 cdn_wss dns_tcp dns icmp_udp}"
 TLOG="/tmp/freewire-throughput-test.log"
 OUT="/tmp/freewire-validate-$(date '+%Y%m%d-%H%M%S').txt"
 exec > >(tee "$OUT") 2>&1

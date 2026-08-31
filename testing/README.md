@@ -3,9 +3,28 @@
 Runnable form of `captive-portal-testing-guide.md`. Clearing all six
 configurations is the **Phase 2 milestone gate** — cleared 2026-08-22.
 
-The guide remains authoritative. These scripts exist so a test session is
-one command per config instead of hand-applied firewall rules, and so runs
-are reproducible.
+The guide remains authoritative for the config-simulation approach this
+README documents below. That guide is itself now superseded for day-to-day
+carrier testing (see its own superseded note) — the rest of this file covers
+only the local Docker-simulation half of `testing/`. The other half, added
+since, is the field-testing generation this README doesn't otherwise mention:
+
+| Script | Purpose |
+|---|---|
+| `connect.sh` / `disconnect.sh` | Bring the tunnel up/down against the real live server, no app required |
+| `cafe-run.sh` | The full carrier survey (probe battery + walled-garden + rooted handshakes) — the entry point for a real café visit |
+| `cafe-measure.sh` | Read-only throughput/latency/page-load measurement of whichever carrier is currently connected |
+| `cafe-diagnostic.sh` | Older single-transport egress timeline; superseded by `cafe-run.sh` for the survey but still works standalone |
+| `probe-transports.sh` | Real per-carrier WireGuard handshake, rootless-capable, café-usable via a cached peer |
+| `regression.sh` | One-command core gate: build, `-race` tests, app build, live transport probe |
+| `routed-test.sh` | Autonomous routed testing with a hard-deadline watchdog that force-restores routing |
+| `throughput-test.sh` | Per-carrier throughput measurement |
+| `validate-all-carriers.sh` | Confirms every carrier in `$CARRIERS` actually carries traffic |
+| `essentials-test.sh` / `essentials-domain-test.sh` | Essentials Mode's IP-only and domain-scoped-resolver phases |
+| `verify-reconnect.sh` | Confirms the app recovers from an unexpected carrier/tunnel death |
+
+`testing/FIELD-TEST-RUNBOOK.md` is the current field-test process built on
+these; `CLAUDE.md`'s Current State records what each real café visit found.
 
 ---
 

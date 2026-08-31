@@ -48,7 +48,7 @@ Read these before writing code:
 | `sparkle-update-feed-spec.md` | Sparkle appcast format, signing, CDN hosting | Required for macOS auto-update |
 | `certificate-management.md` | TLS certificates and Developer ID lifecycle | Required for macOS + managed servers |
 | `anycast-dns-infrastructure.md` | Anycast DNS PoP deployment and BGP for tunnel.freewire.com | Post-launch — launch uses single unicast server in US-East |
-| `captive-portal-testing-guide.md` | Simulated captive portal test environments for all eight carriers | Required for testing |
+| `captive-portal-testing-guide.md` | Simulated captive portal test environments — superseded by real café field-testing, see `testing/FIELD-TEST-RUNBOOK.md` | Historical reference |
 | `apple-entitlement-application.md` | NE entitlement application guidance and recommended framing | Required before TestFlight distribution |
 | `icmp-tunnel-protocol-spec.md` | ICMP tunnel wire protocol — packet format, handshake, encryption, pipelining, rate limiting | Required for ICMP tunnel |
 | `server-dashboard-api-spec.md` | HTTP API for self-hosted server web dashboard — auth, device management, QR/config generation | Required for self-hosted dashboard |
@@ -174,13 +174,23 @@ All 11 questions are resolved below. Resolutions are also propagated to the rele
    - TLS/443: **3s** (TCP + TLS handshake + first keepalive response)
    - DNS tunnel: **3s** (3 DH handshake round trips at ~1s each)
    - ICMP: **2s** (enough for 3 echo request/reply cycles)
-   - Total: 10s exactly. After all eight carriers fail, the captive portal probe fires (1s timeout), totaling ≤11s to CONN-2a or CONN-2b.
+   - Total: 10s exactly. After all nine carriers fail, the captive portal probe fires (1s timeout), totaling ≤11s to CONN-2a or CONN-2b.
    - These values are added to `error-states-spec.md` §CONN-2 and `technical-architecture.md` §fallback chain.
 
 2. **"At capacity" signal** — **Resolved.** Already specified in `client-server-api-spec.md`:
    - At capacity: server returns `capacity_available: false` in `GET /v1/server/config`, or 503 with `PEER_LIMIT_REACHED` on `POST /v1/peers` → surface CONN-4.
    - Unreachable: connection timeout or DNS resolution failure → surface CONN-3.
    - No additional signal mechanism needed.
+
+> Questions 3–5 below were resolved in terms of iOS's `NEVPNStatus`/NetworkExtension
+> APIs, since iOS was the client being scoped at the time. iOS remains fully
+> deferred, and the shipped macOS client does not use NetworkExtension at all
+> (locked tech-stack decision: `wireguard-go` over a direct `utun`, no
+> `NEPacketTunnelProvider` — see `CLAUDE.md`). Read these as the reasoning to
+> carry into an eventual iOS build, not as a description of macOS's mechanism;
+> macOS's equivalents (reconnect logic, kill switch state) are implemented
+> directly in `TunnelManager.swift`/`KillSwitchController` against process and
+> pf state, not NE status notifications.
 
 3. **NE process detection** — **Resolved.** Detect SESSION-4 (OS-killed NE extension) via `NEVPNStatus` notifications:
    - Subscribe to `NEVPNConnection.status` changes via `NotificationCenter` with `.NEVPNStatusDidChange`.
