@@ -18,10 +18,12 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
 
 - **Active phase:** Phase 4 — Privacy + reliability (Phase 2 substantially complete)
 - **In progress:** `dns_tcp` is FIELD-VALIDATED as of 2026-08-30 (see below) —
-  the primary open question from this whole arc is answered. Remaining work is
-  lower-priority: Essentials Mode's field validation is now optional rather
-  than urgent (see the finding below), and the Developer ID blocker for the
-  kill switch is unchanged.
+  the primary open question from this whole arc is answered. Essentials Mode's
+  desk pre-flight was re-confirmed current the same day (both phases pass
+  clean against today's code); its own field validation is queued but not
+  urgent — narrower scope now that `dns_tcp` covers the common case — and is
+  the next thing to pick up on a future café visit. The Developer ID blocker
+  for the kill switch is unchanged.
 - **`dns_tcp` FIELD-VALIDATED AT A REAL DESTINATION-GATED CAFÉ (2026-08-30).**
   Same café as the 2026-08-29 visit, now with the peer-persistence fix
   deployed so the test could actually run end to end. Connected on the café
@@ -223,10 +225,27 @@ You are building **Freewire**, a free consumer VPN that works on captive portal 
   shipped-policy sanity); the original cold-start failure was intermittent and was
   NOT reproduced on demand, so the routed pass is consistent with the fix rather
   than proof of it.
-  **Left:** field-validate the whole flow at café #3 (runbook Step 3 — tap the offer
-  on CONN-2a; ~27 KB/s headroom says messaging flows). The scoped in-allowlist
-  egress probe (noted in `main.go` as a follow-up) would close the underlying
-  race properly by verifying the tunnel carries traffic before the takeover.
+  **Left:** field-validate the whole flow at a real café (runbook Step 3 — tap the
+  offer on CONN-2a). The scoped in-allowlist egress probe (noted in `main.go` as a
+  follow-up) would close the underlying race properly by verifying the tunnel
+  carries traffic before the takeover.
+- **DESK PRE-FLIGHT RE-CONFIRMED CURRENT (2026-08-30), still not field-validated.**
+  Re-ran both `testing/essentials-test.sh` (Phase 1, IP-only) and
+  `testing/essentials-domain-test.sh` (Phase 2, domain-scoped resolver) against
+  today's code — the first time either has run since `dns_tcp` and the
+  peer-persistence fix landed — specifically to confirm neither regressed
+  anything. Both pass clean: Phase 1's SCOPE and SURVIVAL checks, Phase 2's
+  TAKEOVER/ALLOW/REFUSE/ROUTE checks, and both teardowns' full 8-point machine
+  restoration. One transient flake on Phase 1's first run (the non-allowlisted
+  egress probe returned nothing) cleared on immediate re-run, with the probe
+  target independently confirmed reachable in <1s — a timing fluke, not a
+  regression; not investigated further since it self-resolved and the
+  authoritative `route -n get` scope check in the same run had already passed.
+  **Nothing is left to validate at the desk.** The only remaining step is the
+  real field test: a café where TCP/53 is blocked (so `dns_tcp` can't rescue it)
+  but UDP/53 is open, landing on CONN-2a, tapping "Try messaging & email only".
+  This narrows when Essentials Mode is even the right answer at a café — see the
+  `dns_tcp` implication noted 2026-08-30 above.
 - **PLAN B for the throttled-DNS-only café is specced: `ESSENTIALS-MODE-SPEC.md`
   (2026-08-28, not built).** When only throttled DNS escapes, full-tunnel (`0/0`)
   collapses under whole-machine load — so instead carry only a low-bandwidth
@@ -1109,7 +1128,7 @@ directly rather than left as a footnote above a stale table.
 | **3 — Self-hosted distribution** | Server dashboard, QR/config generation, CloudFormation template | **Deferred**, not "not started." Superseded by the 2026-08-22 single-user scope decision — assumed *other people* would self-host and need onboarding UX. The real deploy path today is `deploy/launch-aws.sh` + one manual re-pin, simpler than what this phase would have built. Revisit only if the project gains other users. | `server-dashboard-api-spec.md`, `cloudformation-spec.md`, `ux-workflows.md` §4, `sparkle-update-feed-spec.md`, `certificate-management.md`, `build-and-release-pipeline.md` — skip unless scope changes |
 | **4 — Privacy + reliability** | Privacy Pass, DoH, ECH, aggregate metrics, network intelligence | **Done**, except the kill switch — blocked on a Developer ID certificate (external, not engineering). ECH and network intelligence were evaluated and **declined on purpose** (`DECISIONS.md`), not left undone. | `privacy-pass-spec.md`, `testing-plan.md`, `DECISIONS.md` |
 | **5 — Field hardening** *(unplanned)* | `dns_tcp` carrier (built after a café field-tested a UDP-DNS collapse), the peer-table persistence fix + its adversarial review, the infrastructure redundancy audit | **Ongoing.** Driven by what real captive portals actually do, which no upfront plan could have anticipated. | This file's "Current State" section, `testing/FIELD-TEST-RUNBOOK.md`, `FIELD-TEST-CONTINGENCIES.md` |
-| **6 — Queued / remaining work** | Kill switch (blocked on Developer ID); EBS snapshot policy + CloudWatch alarm + SSH-ingress-refresh fix (cheap, scoped, explicitly saved for later); Essentials Mode field validation (low priority, explicitly still wanted); `dns_tcp` as a `PathUpgradeManager` candidate (deliberately not yet scoped); IPv6 carrier leak-safe routing (unvalidated on a real v6 network) | **Not started.** A holding area, not a phase with a gate — items move out as they're picked up. | — |
+| **6 — Queued / remaining work** | Kill switch (blocked on Developer ID); EBS snapshot policy + CloudWatch alarm + SSH-ingress-refresh fix (cheap, scoped, explicitly saved for later); Essentials Mode field validation (desk pre-flight re-confirmed current 2026-08-30, ready to go the next time a qualifying café is visited); `dns_tcp` as a `PathUpgradeManager` candidate (deliberately not yet scoped); IPv6 carrier leak-safe routing (unvalidated on a real v6 network) | **Not started**, except Essentials Mode's desk prep, which is done. A holding area, not a phase with a gate — items move out as they're picked up. | — |
 
 **Reference (any phase):** `learn-here.md` (definitions)
 
