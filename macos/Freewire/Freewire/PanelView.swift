@@ -545,61 +545,132 @@ private struct PanelSettingsView: View {
     @State private var killSwitch      = Preferences.shared.killSwitchEnabled
     @State private var autoConnect     = Preferences.shared.autoConnect
     @State private var launchAtLogin   = Preferences.shared.launchAtLogin
-    @State private var netIntelligence = Preferences.shared.networkIntelligenceEnabled
+    @State private var essentialsMode  = Preferences.shared.essentialsMode
+    @State private var essentialsList  = Preferences.shared.essentialsAllowlist.joined(separator: ", ")
+    @State private var exportMessage: String?
+    @State private var exportSucceeded = false
     private let fingerprint = (try? DeviceIdentity())?.fingerprint ?? "—"
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Toggle("Launch at login", isOn: $launchAtLogin)
-                .onChange(of: launchAtLogin) { _, v in Preferences.shared.launchAtLogin = v }
-            Toggle("Connect automatically on launch", isOn: $autoConnect)
-                .onChange(of: autoConnect) { _, v in Preferences.shared.autoConnect = v }
+        // This is the ONLY settings surface in the app -- reached from the gear
+        // icon here in the popover. A second, separate Preferences window used
+        // to exist alongside this one with a different, overlapping feature set
+        // (Essentials Mode and diagnostics export lived only there) but nothing
+        // ever opened it, so it was unreachable dead code carrying live
+        // features nobody could get to. Removed rather than kept in sync by
+        // hand -- one settings surface can't drift from itself.
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Toggle("Launch at login", isOn: $launchAtLogin)
+                    .onChange(of: launchAtLogin) { _, v in Preferences.shared.launchAtLogin = v }
+                Toggle("Connect automatically on launch", isOn: $autoConnect)
+                    .onChange(of: autoConnect) { _, v in Preferences.shared.autoConnect = v }
 
-            VStack(alignment: .leading, spacing: 3) {
-                // Disabled until FreewireHelper installs the pf rules. Copy per
-                // error-states-spec.md "Interim: kill switch not yet enforced".
-                Toggle("Kill switch", isOn: $killSwitch)
-                    .onChange(of: killSwitch) { _, v in Preferences.shared.killSwitchEnabled = v }
-                    .disabled(true)
-                Text("Not available yet. When the VPN drops, traffic is not blocked. Coming in a future release.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            VStack(alignment: .leading, spacing: 3) {
-                Toggle("Help improve captive portal detection", isOn: $netIntelligence)
-                    .onChange(of: netIntelligence) { _, v in Preferences.shared.networkIntelligenceEnabled = v }
-                Text("Shares which connection method worked on this network. No personal data collected.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Divider()
-
-            Button("What Freewire sees \u{203A}", action: onPrivacy)
-                .buttonStyle(.link)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Key fingerprint")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
-                Text(fingerprint)
-                    .font(.system(size: 13, design: .monospaced))
-                    .textSelection(.enabled)
-            }
-            HStack {
-                Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
-                Spacer()
-                Button("Privacy Policy") {
-                    if let url = URL(string: "https://freewire.com/privacy") { NSWorkspace.shared.open(url) }
+                VStack(alignment: .leading, spacing: 3) {
+                    // Disabled until FreewireHelper installs the pf rules. Copy per
+                    // error-states-spec.md "Interim: kill switch not yet enforced".
+                    Toggle("Kill switch", isOn: $killSwitch)
+                        .onChange(of: killSwitch) { _, v in Preferences.shared.killSwitchEnabled = v }
+                        .disabled(true)
+                    Text("Not available yet. When the VPN drops, traffic is not blocked. Coming in a future release.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .buttonStyle(.link)
-                .font(.system(size: 12))
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Toggle("Essentials Mode", isOn: $essentialsMode)
+                        .onChange(of: essentialsMode) { _, v in Preferences.shared.essentialsMode = v }
+                    Text("On networks too restrictive for a full VPN, carry only messaging, email, and push notifications, and block everything else. Off by default.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if essentialsMode {
+                        Text("Allowed destinations (comma-separated IPs, CIDRs, or domains):")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        TextField("17.0.0.0/8, signal.org", text: $essentialsList)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12))
+                            .onChange(of: essentialsList) { _, v in
+                                let items = v.split(separator: ",")
+                                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                                    .filter { !$0.isEmpty }
+                                Preferences.shared.essentialsAllowlist = items
+                            }
+                        Text("Default: Apple 17.0.0.0/8 (iMessage + push, needs no DNS). Domains resolve through the tunnel.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                Divider()
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Button("Export Diagnostics…") { exportDiagnostics() }
+                        .buttonStyle(.link)
+                    Text("Timestamped connection and error logs, kept on this device only. Nothing is sent anywhere automatically.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let exportMessage {
+                        Text(exportMessage)
+                            .font(.system(size: 12))
+                            .foregroundStyle(exportSucceeded ? Color.secondary : Color.red)
+                    }
+                }
+
+                Divider()
+
+                Button("What Freewire sees \u{203A}", action: onPrivacy)
+                    .buttonStyle(.link)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Key fingerprint")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text(fingerprint)
+                        .font(.system(size: 13, design: .monospaced))
+                        .textSelection(.enabled)
+                }
+                HStack {
+                    Text("Version \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "—")")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Privacy Policy") {
+                        if let url = URL(string: "https://freewire.com/privacy") { NSWorkspace.shared.open(url) }
+                    }
+                    .buttonStyle(.link)
+                    .font(.system(size: 12))
+                }
+            }
+            .padding(12)
+        }
+        .frame(maxHeight: 420)
+    }
+
+    /// The only path diagnostics data ever takes off this device: a deliberate
+    /// action the user just took, saving a copy where THEY choose via a real
+    /// save panel -- never an automatic upload. See DiagnosticsLog.swift.
+    private func exportDiagnostics() {
+        let panel = NSSavePanel()
+        let stamp = ISO8601DateFormatter().string(from: Date())
+            .replacingOccurrences(of: ":", with: "-")
+        panel.nameFieldStringValue = "freewire-diagnostics-\(stamp).log"
+        panel.canCreateDirectories = true
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                try DiagnosticsLog.exportSnapshot(to: url)
+                exportSucceeded = true
+                exportMessage = "Saved to \(url.lastPathComponent)."
+            } catch {
+                exportSucceeded = false
+                exportMessage = "No diagnostics available yet — connect at least once first."
             }
         }
-        .padding(12)
     }
 }
 
